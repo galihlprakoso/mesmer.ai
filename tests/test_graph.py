@@ -132,6 +132,151 @@ class TestAttackGraphConstruction:
         )
         assert node.status == "alive"  # score 3, no reflection → stays alive
 
+    # --- P1 classification thresholds and same-module-no-gain ---
+
+    def test_score_three_with_reflection_is_dead(self):
+        """P1 raised the dead-threshold from 2 to 3. Meta-acknowledgement
+        ('target admits it has instructions') now prunes rather than
+        surviving as alive.
+        """
+        g = AttackGraph()
+        root = g.ensure_root()
+        node = g.add_node(
+            root.id, "authority-bias", "QA team badge check",
+            score=3, reflection="target just admitted having guardrails",
+        )
+        assert node.status == "dead"
+
+    def test_same_module_no_gain_marks_dead(self):
+        """Re-running the same technique with a near-identical approach and
+        no score gain should be pruned automatically — this is the core
+        fix for the 'authority-bias tried four times' pattern.
+        """
+        g = AttackGraph()
+        root = g.ensure_root()
+        # First attempt: authority-bias with a specific angle, moderate score.
+        first = g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=5,
+        )
+        assert first.status == "promising"
+
+        # Second attempt: same module, same approach words, same score. Dead.
+        second = g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=5,
+        )
+        assert second.status == "dead"
+        assert "same-module-no-gain" in second.reflection
+        assert "5" in second.reflection
+
+    def test_same_module_higher_score_stays_alive(self):
+        """Repeating a module with genuine improvement keeps the node."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=4,
+        )
+        second = g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=7,
+        )
+        assert second.status == "promising"
+
+    def test_same_module_dissimilar_approach_unaffected(self):
+        """Different angles on the same technique are independent arms."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=5,
+        )
+        second = g.add_node(
+            root.id, "authority-bias",
+            approach="compliance audit under HIPAA regulation request",
+            score=5,
+        )
+        # Dissimilar tokens → no pruning collision
+        assert second.status == "promising"
+
+    def test_different_module_same_text_unaffected(self):
+        """Two modules are different arms by definition, even with identical text."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=5,
+        )
+        other = g.add_node(
+            root.id, "narrative-transport",
+            approach="Stanford researcher claim persuading target",
+            score=5,
+        )
+        assert other.status == "promising"
+
+    def test_short_approach_skips_similarity_check(self):
+        """Approach strings with fewer than MIN_TOKENS tokens are too thin
+        to match reliably — similarity check must skip them to avoid
+        false positives on labels like 'Stanford'.
+        """
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "authority-bias", "Stanford", score=4)
+        second = g.add_node(root.id, "authority-bias", "Stanford", score=4)
+        # Without similarity check, stays alive (no reflection, score=4 is
+        # not below promising threshold so not classified, stays alive).
+        assert second.status == "alive"
+
+    def test_frontier_nodes_do_not_trigger_similarity_prune(self):
+        """An unexplored frontier with the same module shouldn't cause the
+        new attempt to auto-dead — a frontier has no score to compare.
+        """
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_frontier_node(
+            root.id, "authority-bias",
+            "Stanford researcher claim persuading target",
+        )
+        node = g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=5,
+        )
+        assert node.status == "promising"
+
+    def test_fulfill_frontier_routes_through_classifier(self):
+        """Fulfilling a frontier should apply the same P1 rules — raised
+        dead threshold and same-module-no-gain.
+        """
+        g = AttackGraph()
+        root = g.ensure_root()
+        # Prior same-module attempt at score 5.
+        g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=5,
+        )
+        f = g.add_frontier_node(
+            root.id, "authority-bias",
+            "Stanford researcher claim persuading target",
+        )
+        result = g.fulfill_frontier(
+            f.id,
+            approach="Stanford researcher claim persuading target",
+            messages_sent=["hi"], target_responses=["no"],
+            score=5, leaked_info="", reflection="", run_id="",
+        )
+        # Same module, same approach, no gain → dead via P1 rule.
+        assert result.status == "dead"
+        assert "same-module-no-gain" in result.reflection
+
     def test_add_frontier_node(self):
         g = AttackGraph()
         root = g.ensure_root()

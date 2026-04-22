@@ -10,6 +10,15 @@ import json
 import time
 from typing import TYPE_CHECKING, Callable
 
+from mesmer.core.constants import (
+    MAX_CONSECUTIVE_REASONING,
+    MAX_LLM_RETRIES,
+    RETRY_DELAYS,
+    BudgetMode,
+    ContextMode,
+    LogEvent,
+    NodeSource,
+)
 from mesmer.core.context import TurnBudgetExhausted
 
 if TYPE_CHECKING:
@@ -22,10 +31,6 @@ LogFn = Callable[[str, str], None]
 
 def _noop_log(event: str, detail: str = "") -> None:
     pass
-
-
-MAX_LLM_RETRIES = 3
-RETRY_DELAYS = [2, 5, 10]  # seconds between retries
 
 
 def _is_rate_limit_error(err_str: str) -> bool:
@@ -49,7 +54,7 @@ def _cool_down_key_for(ctx, err_str: str, log) -> None:
         until_ts, tz=datetime.timezone.utc
     ).isoformat()
     log(
-        "key_cooled",
+        LogEvent.KEY_COOLED.value,
         f"key {_mask(key)} cooled until {until_iso} ({reason}); "
         f"active {pool.active_count()}/{pool.total}"
     )
@@ -72,16 +77,16 @@ async def _completion_with_retry(ctx, messages, tools, log):
                 _cool_down_key_for(ctx, err_str, log)
                 pool = getattr(ctx.agent_config, "pool", None)
                 if pool is not None and pool.active_count() == 0:
-                    log("rate_limit_wall", "all API keys are cooled down; stopping")
+                    log(LogEvent.RATE_LIMIT_WALL.value, "all API keys are cooled down; stopping")
                     return None
                 if attempt < MAX_LLM_RETRIES - 1:
                     log(
-                        "llm_retry",
+                        LogEvent.LLM_RETRY.value,
                         f"Rate limit on current key (attempt {attempt + 1}/{MAX_LLM_RETRIES}): "
                         f"{err_str[:100]} — switching key and retrying"
                     )
                     continue
-                log("llm_error", f"Max retries on rate-limit: {err_str}")
+                log(LogEvent.LLM_ERROR.value, f"Max retries on rate-limit: {err_str}")
                 return None
 
             # Other transient errors: backoff on the same key
@@ -91,10 +96,10 @@ async def _completion_with_retry(ctx, messages, tools, log):
             ))
             if is_transient and attempt < MAX_LLM_RETRIES - 1:
                 delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
-                log("llm_retry", f"Transient error (attempt {attempt + 1}/{MAX_LLM_RETRIES}): {err_str[:100]} — retrying in {delay}s...")
+                log(LogEvent.LLM_RETRY.value, f"Transient error (attempt {attempt + 1}/{MAX_LLM_RETRIES}): {err_str[:100]} — retrying in {delay}s...")
                 await asyncio.sleep(delay)
                 continue
-            log("llm_error", f"{'Non-transient' if not is_transient else 'Max retries'}: {err_str}")
+            log(LogEvent.LLM_ERROR.value, f"{'Non-transient' if not is_transient else 'Max retries'}: {err_str}")
             return None
     return None
 
@@ -234,7 +239,7 @@ def _build_graph_context(ctx: Context) -> str:
             for n in frontier:
                 parent = graph.nodes.get(n.parent_id) if n.parent_id else None
                 parent_info = f"parent score:{parent.score}" if parent else "root"
-                source_tag = " ★ HUMAN" if n.source == "human" else ""
+                source_tag = " ★ HUMAN" if n.source == NodeSource.HUMAN else ""
                 parts.append(
                     f"- [{n.id}] {n.module}: {n.approach} ({parent_info}){source_tag}"
                 )
@@ -257,15 +262,15 @@ def _build_graph_context(ctx: Context) -> str:
         parts.append(
             f"\nBudget: {ctx.turns_used}/{ctx.turn_budget} turns used. Mode: {mode.upper()}."
         )
-        if mode == "explore":
+        if mode == BudgetMode.EXPLORE:
             parts.append("→ Explore broadly — try different techniques.")
-        elif mode == "exploit":
+        elif mode == BudgetMode.EXPLOIT:
             best = graph.get_promising_nodes()[:1] if graph else []
             if best:
                 parts.append(f"→ Focus on your best lead: {best[0].module}→{best[0].approach}")
             else:
                 parts.append("→ Deepen your most promising angle.")
-        elif mode == "conclude":
+        elif mode == BudgetMode.CONCLUDE:
             parts.append("→ Budget almost exhausted. Conclude NOW with everything gathered.")
 
     return "\n".join(parts) if parts else ""
@@ -296,7 +301,7 @@ async def run_react_loop(
 
     # Python modules with custom logic bypass the ReAct loop
     if module.has_custom_run:
-        log("custom_run", module.name)
+        log(LogEvent.CUSTOM_RUN.value, module.name)
         ctx.reset_current_tracking()
         try:
             return await module.custom_run(ctx, instruction=instruction)
@@ -309,11 +314,11 @@ async def run_react_loop(
         tools.extend(ctx.registry.as_tools(module.sub_modules))
     tools.append(SEND_MESSAGE_TOOL)
     tools.append(CONCLUDE_TOOL)
-    if ctx.mode == "co-op" and ctx.human_broker is not None:
+    if ctx.mode == ContextMode.CO_OP and ctx.human_broker is not None:
         tools.append(ASK_HUMAN_TOOL)
 
     tool_names = [t["function"]["name"] for t in tools]
-    log("module_start", f"{module.name} — tools: {', '.join(tool_names)}")
+    log(LogEvent.MODULE_START.value, f"{module.name} — tools: {', '.join(tool_names)}")
 
     # Build initial messages
     system_content = module.system_prompt or (
@@ -387,10 +392,9 @@ async def run_react_loop(
 
     # The loop
     consecutive_reasoning = 0
-    MAX_CONSECUTIVE_REASONING = 3
 
     for iteration in range(max_iterations):
-        log("llm_call", f"[{module.name}] iteration {iteration + 1}/{max_iterations} — calling {ctx.agent_model}...")
+        log(LogEvent.LLM_CALL.value, f"[{module.name}] iteration {iteration + 1}/{max_iterations} — calling {ctx.agent_model}...")
         t0 = time.time()
 
         response = await _completion_with_retry(ctx, messages, tools, log)
@@ -407,11 +411,11 @@ async def run_react_loop(
         if not msg.tool_calls:
             consecutive_reasoning += 1
             reasoning = (msg.content or "")[:200]
-            log("reasoning", f"({elapsed:.1f}s) [{consecutive_reasoning}/{MAX_CONSECUTIVE_REASONING}] {reasoning}")
+            log(LogEvent.REASONING.value, f"({elapsed:.1f}s) [{consecutive_reasoning}/{MAX_CONSECUTIVE_REASONING}] {reasoning}")
 
             # Hard cap: model is truly refusing
             if consecutive_reasoning >= MAX_CONSECUTIVE_REASONING * 2:
-                log("hard_stop", f"Model refused to use tools after {consecutive_reasoning} turns — auto-concluding")
+                log(LogEvent.HARD_STOP.value, f"Model refused to use tools after {consecutive_reasoning} turns — auto-concluding")
                 return (
                     f"Agent refused to execute: the agent model ({ctx.agent_model}) "
                     f"declined to use any tools after {consecutive_reasoning} reasoning turns. "
@@ -420,7 +424,7 @@ async def run_react_loop(
 
             # Circuit breaker
             if consecutive_reasoning >= MAX_CONSECUTIVE_REASONING:
-                log("circuit_break", f"Model not using tools ({consecutive_reasoning} turns) — nudging toward action")
+                log(LogEvent.CIRCUIT_BREAK.value, f"Model not using tools ({consecutive_reasoning} turns) — nudging toward action")
                 messages.append({
                     "role": "user",
                     "content": (
@@ -440,7 +444,7 @@ async def run_react_loop(
         consecutive_reasoning = 0
 
         call_names = [c.function.name for c in msg.tool_calls]
-        log("tool_calls", f"({elapsed:.1f}s) → {', '.join(call_names)}")
+        log(LogEvent.TOOL_CALLS.value, f"({elapsed:.1f}s) → {', '.join(call_names)}")
 
         # Process tool calls
         for call in msg.tool_calls:
@@ -452,24 +456,24 @@ async def run_react_loop(
 
             if fn_name == "conclude":
                 result_text = args.get("result", "Module concluded without result.")
-                log("conclude", result_text[:200])
+                log(LogEvent.CONCLUDE.value, result_text[:200])
                 return result_text
 
             elif fn_name == "send_message":
                 message_text = args.get("message", "")
-                log("send", f"[{module.name}] → {message_text[:150]}")
+                log(LogEvent.SEND.value, f"[{module.name}] → {message_text[:150]}")
                 try:
                     reply = await ctx.send(message_text, module_name=module.name)
-                    log("recv", f"← {reply[:150]}")
+                    log(LogEvent.RECV.value, f"← {reply[:150]}")
                     tool_result = f"Target replied: {reply}"
                 except TurnBudgetExhausted:
-                    log("budget", "Turn budget exhausted")
+                    log(LogEvent.BUDGET.value, "Turn budget exhausted")
                     tool_result = (
                         "Turn budget exhausted. You MUST call conclude() now "
                         "with a summary of what you've accomplished so far."
                     )
                 except Exception as e:
-                    log("send_error", f"Target error: {e}")
+                    log(LogEvent.SEND_ERROR.value, f"Target error: {e}")
                     tool_result = (
                         f"Error sending message to target: {e}. "
                         "The connection may have dropped. You can try again or conclude."
@@ -486,13 +490,13 @@ async def run_react_loop(
                         "ask_human requires a 'question' argument. Retry with a clear question."
                     ))
                     continue
-                if ctx.mode != "co-op" or ctx.human_broker is None:
+                if ctx.mode != ContextMode.CO_OP or ctx.human_broker is None:
                     messages.append(_tool_result_message(
                         call.id,
                         "ask_human is only available in co-op mode. Decide based on your own judgement."
                     ))
                     continue
-                log("ask_human", f"? {question[:150]}")
+                log(LogEvent.ASK_HUMAN.value, f"? {question[:150]}")
                 try:
                     answer = await ctx.ask_human(
                         question=question,
@@ -500,13 +504,13 @@ async def run_react_loop(
                         context=q_context,
                         module=module.name,
                     )
-                    log("human_answer", f"! {answer[:150]}")
+                    log(LogEvent.HUMAN_ANSWER.value, f"! {answer[:150]}")
                     messages.append(_tool_result_message(
                         call.id,
                         f"Human answered: {answer}" if answer else "Human did not respond."
                     ))
                 except Exception as e:
-                    log("ask_human_error", f"{e}")
+                    log(LogEvent.ASK_HUMAN_ERROR.value, f"{e}")
                     messages.append(_tool_result_message(
                         call.id,
                         f"Failed to ask human: {e}. Continue with your own judgement."
@@ -537,7 +541,7 @@ async def run_react_loop(
                 turns_before = len(ctx.turns)
 
                 result = await ctx.run_module(fn_name, sub_instruction, sub_max_turns, log=log)
-                log("delegate_done", f"← {fn_name}: {result[:150]}")
+                log(LogEvent.DELEGATE_DONE.value, f"← {fn_name}: {result[:150]}")
 
                 # Collect messages from turns added during this delegation
                 # (turns list is shared between parent and child)
@@ -632,7 +636,7 @@ async def _judge_module_result(
     resps = target_responses or []
 
     if not msgs:
-        log("judge", f"Skipping judge — no messages exchanged in {module_name}")
+        log(LogEvent.JUDGE.value, f"Skipping judge — no messages exchanged in {module_name}")
         return None
 
     from mesmer.core.judge import evaluate_attempt
@@ -642,7 +646,7 @@ async def _judge_module_result(
     module = ctx.registry.get(module_name) if ctx.registry else None
     module_rubric = getattr(module, "judge_rubric", "") if module else ""
 
-    log("judge", f"Evaluating {module_name} ({len(msgs)} messages)...")
+    log(LogEvent.JUDGE.value, f"Evaluating {module_name} ({len(msgs)} messages)...")
     try:
         result = await evaluate_attempt(
             ctx,
@@ -653,10 +657,10 @@ async def _judge_module_result(
             module_rubric=module_rubric,
             module_result=module_result,
         )
-        log("judge_score", f"Score: {result.score}/10 — {result.leaked_info[:100]}")
+        log(LogEvent.JUDGE_SCORE.value, f"Score: {result.score}/10 — {result.leaked_info[:100]}")
         return result
     except Exception as e:
-        log("judge_error", f"Judge failed: {e}")
+        log(LogEvent.JUDGE_ERROR.value, f"Judge failed: {e}")
         return None
 
 
@@ -761,7 +765,7 @@ async def _reflect_and_expand(ctx, module_name, approach, judge_result, current_
 
     # Only generate frontier for non-dead nodes
     if current_node.is_dead:
-        log("graph_update", f"Node is dead — no frontier expansion")
+        log(LogEvent.GRAPH_UPDATE.value, f"Node is dead — no frontier expansion")
         return
 
     from mesmer.core.judge import generate_frontier
@@ -786,10 +790,10 @@ async def _reflect_and_expand(ctx, module_name, approach, judge_result, current_
                 approach=s.get("approach", ""),
                 run_id=ctx.run_id,
             )
-            log("frontier", f"🌿 New frontier: {frontier.module}→{frontier.approach[:80]}")
+            log(LogEvent.FRONTIER.value, f"🌿 New frontier: {frontier.module}→{frontier.approach[:80]}")
 
     except Exception as e:
-        log("reflect_error", f"Reflection failed: {e}")
+        log(LogEvent.REFLECT_ERROR.value, f"Reflection failed: {e}")
 
 
 # ---------------------------------------------------------------------------

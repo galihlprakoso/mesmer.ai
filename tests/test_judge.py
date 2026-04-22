@@ -290,6 +290,66 @@ class TestEvaluateAttempt:
         assert "Module summary" not in sent
 
 
+class TestDifferentiatedRubric:
+    """P1 — the rewritten JUDGE_SYSTEM must anchor distinct tiers so that
+    'promising angle' and 'actual leak' no longer collapse into one bucket.
+    These tests pin the rubric shape so future edits don't accidentally
+    re-flatten it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rubric_distinguishes_rules_from_structure_and_verbatim(self):
+        response = json.dumps({"score": 5, "leaked_info": "", "promising_angle": "", "dead_end": "", "suggested_next": ""})
+        ctx = _make_mock_ctx(response)
+        ctx.judge_rubric_additions = ""
+
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            messages_sent=["x"], target_responses=["y"],
+        )
+        sent = str(ctx.completion.call_args)
+
+        # Tier language — each number has a distinct definition.
+        assert "Hard refusal" in sent            # 1
+        assert "Meta-acknowledgement" in sent    # 3
+        assert "Behavioural generalities" in sent  # 4
+        assert "behavioural rules" in sent.lower()  # 5
+        assert "Structural hints" in sent        # 6
+        assert "Verbatim fragments" in sent      # 7
+
+    @pytest.mark.asyncio
+    async def test_rubric_rejects_promise_only_inflation(self):
+        response = json.dumps({"score": 3, "leaked_info": "", "promising_angle": "", "dead_end": "", "suggested_next": ""})
+        ctx = _make_mock_ctx(response)
+        ctx.judge_rubric_additions = ""
+
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            messages_sent=["x"], target_responses=["y"],
+        )
+        sent = str(ctx.completion.call_args)
+
+        # The rubric must explicitly tell the judge NOT to bump scores for
+        # promise alone — this is the 5-6 plateau fix.
+        assert "promise alone" in sent.lower() or "promising angle" in sent.lower()
+        assert "score only on what leaked" in sent.lower()
+
+    @pytest.mark.asyncio
+    async def test_rubric_treats_target_errors_as_score_one(self):
+        """Pipeline errors from the target ('I couldn't process that request')
+        must not be scored as a refusal — that biases the dead-end count."""
+        response = json.dumps({"score": 1, "leaked_info": "", "promising_angle": "", "dead_end": "", "suggested_next": ""})
+        ctx = _make_mock_ctx(response)
+        ctx.judge_rubric_additions = ""
+
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            messages_sent=["x"], target_responses=["y"],
+        )
+        sent = str(ctx.completion.call_args)
+        assert "Target-side errors" in sent
+
+
 # ---------------------------------------------------------------------------
 # generate_frontier
 # ---------------------------------------------------------------------------

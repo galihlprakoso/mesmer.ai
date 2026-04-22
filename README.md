@@ -209,7 +209,7 @@ agent:
   temperature: 0.7
 ```
 
-Three scenarios are included out of the box: OpenAI-compatible REST, WebSocket, and a VPA staging target.
+Example scenarios are included in `scenarios/` (OpenAI-compatible REST and WebSocket). Put your own real-target configs in `scenarios/private/` — that directory is gitignored.
 
 ## Multi-provider support
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from mesmer.core.constants import ContextMode
 from mesmer.core.context import Context, HumanQuestionBroker
 from mesmer.core.graph import AttackGraph
 from mesmer.core.loop import LogFn, run_react_loop
@@ -33,7 +34,7 @@ class RunConfig:
     fresh: bool = False
     extra_module_paths: list[str] = field(default_factory=list)
     output_path: str | None = None
-    mode: str = "autonomous"  # 'autonomous' | 'co-op' | 'plan'
+    mode: str = ContextMode.AUTONOMOUS.value  # ContextMode or 'plan'
     human_broker: "HumanQuestionBroker | None" = None
 
 

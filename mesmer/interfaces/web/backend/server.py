@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from mesmer.core.constants import ContextMode
 from mesmer.core.context import HumanQuestionBroker
 from mesmer.core.graph import AttackGraph
 from mesmer.core.memory import TargetMemory, GlobalMemory
@@ -42,7 +43,7 @@ class RunRequest(BaseModel):
     max_turns: int | None = None
     hints: list[str] = []
     fresh: bool = False
-    mode: str = "autonomous"  # 'autonomous' | 'co-op'
+    mode: str = ContextMode.AUTONOMOUS.value  # ContextMode value
 
 
 class HintRequest(BaseModel):

@@ -8,6 +8,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
+from mesmer.core.constants import (
+    BUDGET_EXPLOIT_UPPER_RATIO,
+    BUDGET_EXPLORE_UPPER_RATIO,
+    BudgetMode,
+    ContextMode,
+    LogEvent,
+)
+
 if TYPE_CHECKING:
     from mesmer.core.graph import AttackGraph
     from mesmer.core.registry import Registry
@@ -156,7 +164,7 @@ class Context:
         max_turns: int | None = None,
         graph: AttackGraph | None = None,
         run_id: str = "",
-        mode: str = "autonomous",
+        mode: str = ContextMode.AUTONOMOUS.value,
         human_broker: HumanQuestionBroker | None = None,
         plan: str | None = None,
         judge_rubric_additions: str = "",
@@ -306,13 +314,13 @@ class Context:
                 self._target_reset_at = len(self.turns)
                 fresh_session = True
                 if log is not None:
-                    log("target_reset", f"Fresh target session for '{name}'")
+                    log(LogEvent.TARGET_RESET.value, f"Fresh target session for '{name}'")
             except Exception as e:
                 # A reset failure shouldn't kill the run — log and continue
                 # with the existing session. The sub-module will still run
                 # but against a target that remembers everything.
                 if log is not None:
-                    log("target_reset_error", f"reset failed for '{name}': {e}")
+                    log(LogEvent.TARGET_RESET_ERROR.value, f"reset failed for '{name}': {e}")
 
         child = self.child(max_turns=max_turns, target_fresh_session=fresh_session)
         result = await run_react_loop(module, child, instruction, log=log)
@@ -336,13 +344,13 @@ class Context:
     def budget_mode(self) -> str:
         """Explore/exploit/conclude based on budget consumption."""
         if self.turn_budget is None:
-            return "explore"
+            return BudgetMode.EXPLORE.value
         ratio = self.turns_used / self.turn_budget
-        if ratio < 0.5:
-            return "explore"
-        elif ratio < 0.8:
-            return "exploit"
-        return "conclude"
+        if ratio < BUDGET_EXPLORE_UPPER_RATIO:
+            return BudgetMode.EXPLORE.value
+        elif ratio < BUDGET_EXPLOIT_UPPER_RATIO:
+            return BudgetMode.EXPLOIT.value
+        return BudgetMode.CONCLUDE.value
 
     def child(
         self,
@@ -389,7 +397,7 @@ class Context:
         returns an empty string so modules that optimistically call it degrade
         gracefully rather than blocking forever.
         """
-        if self.mode != "co-op" or self.human_broker is None:
+        if self.mode != ContextMode.CO_OP or self.human_broker is None:
             return ""
         qid = self.human_broker.create_question(
             question=question,

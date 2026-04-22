@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from mesmer.core.constants import NodeSource
 from mesmer.core.graph import AttackGraph
 from mesmer.core.memory import TargetMemory, GlobalMemory
 from mesmer.core.runner import RunConfig, execute_run, BUILTIN_MODULES
@@ -187,7 +188,7 @@ def _print_run_summary(graph: AttackGraph):
     if frontier:
         lines.append("[bold]Frontier (suggested next moves):[/bold]")
         for i, n in enumerate(frontier, 1):
-            tag = " \u2605 HUMAN" if n.source == "human" else ""
+            tag = " \u2605 HUMAN" if n.source == NodeSource.HUMAN else ""
             lines.append(f"  {i}. {n.approach[:70]}{tag}")
     lines.append("")
     lines.append("[dim]\U0001f4a1 Pass feedback on next run with --hint[/dim]")
