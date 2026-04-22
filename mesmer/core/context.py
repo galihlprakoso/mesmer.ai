@@ -15,6 +15,7 @@ from mesmer.core.constants import (
     BudgetMode,
     ContextMode,
     LogEvent,
+    ScenarioMode,
 )
 
 
@@ -126,7 +127,17 @@ class HumanQuestionBroker:
 
 @dataclass
 class Turn:
-    """A single exchange with the target."""
+    """A single exchange with the target.
+
+    Most Turns are ``kind="exchange"``: a real ``sent`` → ``received`` round
+    with the target model. CONTINUOUS-mode compression (C9) introduces a
+    second kind, ``"summary"``, where the Turn carries a synthetic LLM-
+    authored recap of multiple older exchanges that were compressed to fit
+    the attacker's context budget. Summary Turns have ``sent=""`` and
+    ``received=<summary text>``; ``is_error`` is always False for them.
+    Summary Turns can themselves be compressed later (they stack), so the
+    field choice is a simple string rather than a two-case enum.
+    """
 
     sent: str
     received: str
@@ -137,6 +148,10 @@ class Turn:
     # real reply from the target model. Judge and tool-result formatting
     # use this to avoid scoring an error as a refusal.
     is_error: bool = False
+    # C9 — "exchange" (default) or "summary". Summary turns are compressed
+    # blocks of older history; formatters render them as ``[Summary of N
+    # earlier turns: ...]`` so attacker + judge can read them plainly.
+    kind: str = "exchange"
 
     def to_dict(self) -> dict:
         return {
@@ -145,6 +160,7 @@ class Turn:
             "module": self.module,
             "timestamp": self.timestamp,
             "is_error": self.is_error,
+            "kind": self.kind,
         }
 
 
@@ -194,6 +210,8 @@ class Context:
         judge_rubric_additions: str = "",
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
+        depth: int = 0,
+        scenario_mode: ScenarioMode = ScenarioMode.TRIALS,
         # Internal — set by child()
         _turns: list[Turn] | None = None,
         _module_log: list[ModuleRun] | None = None,
@@ -246,6 +264,18 @@ class Context:
         # The judge role (see completion(role="judge")) bypasses this and
         # always uses agent_config.effective_judge_model.
         self.attacker_model_override: str = attacker_model_override
+
+        # P6 — nesting depth for log display. Root context has depth 0;
+        # every ctx.child() returns depth+1. The CLI renderer uses this
+        # to disambiguate which module's iteration counter it's looking at.
+        self.depth: int = depth
+
+        # Scenario-level execution mode. Determines whether sub-modules are
+        # independent trials (default, TRIALS) or moves inside one continuous
+        # target conversation (CONTINUOUS). Propagated unchanged to child
+        # contexts. Distinct from ``self.mode`` — that controls human co-op
+        # framing (autonomous vs co-op), this controls target memory semantics.
+        self.scenario_mode: ScenarioMode = scenario_mode
 
     @property
     def agent_model(self) -> str:
@@ -361,12 +391,17 @@ class Context:
     ) -> str:
         """Delegate to a sub-module with a scoped turn budget.
 
-        When the sub-module declares ``reset_target: true`` in its YAML,
-        we reset the shared target BEFORE running it so the target sees a
-        fresh session. This breaks the target's compounding memory across
-        sibling modules — a well-defended target that would otherwise
-        accumulate "you've tried nine approaches" awareness now answers
-        each module as if it's the first interaction.
+        Reset-target semantics depend on :attr:`scenario_mode`:
+
+        - ``TRIALS`` (default): when the sub-module declares ``reset_target:
+          true`` in its YAML, we reset the shared target BEFORE running it
+          so the target sees a fresh session. This breaks the target's
+          compounding memory across sibling modules.
+        - ``CONTINUOUS``: the whole run is one live conversation. We NEVER
+          reset, regardless of what the module YAML says. A declared
+          ``reset_target: true`` is logged as :data:`LogEvent.MODE_OVERRIDE`
+          and ignored — breaking continuity would defeat the point of
+          continuous mode.
         """
         from mesmer.core.loop import run_react_loop
 
@@ -376,18 +411,30 @@ class Context:
 
         fresh_session = False
         if module.reset_target:
-            try:
-                await self.target.reset()
-                self._target_reset_at = len(self.turns)
-                fresh_session = True
+            if self.scenario_mode == ScenarioMode.CONTINUOUS:
+                # Continuous mode forbids target resets — the single target
+                # conversation IS the point. Warn once per occurrence so
+                # scenario authors notice, but keep running.
                 if log is not None:
-                    log(LogEvent.TARGET_RESET.value, f"Fresh target session for '{name}'")
-            except Exception as e:
-                # A reset failure shouldn't kill the run — log and continue
-                # with the existing session. The sub-module will still run
-                # but against a target that remembers everything.
-                if log is not None:
-                    log(LogEvent.TARGET_RESET_ERROR.value, f"reset failed for '{name}': {e}")
+                    log(
+                        LogEvent.MODE_OVERRIDE.value,
+                        f"module '{name}' declares reset_target: true but "
+                        "scenario mode is CONTINUOUS — reset skipped, "
+                        "conversation continues."
+                    )
+            else:
+                try:
+                    await self.target.reset()
+                    self._target_reset_at = len(self.turns)
+                    fresh_session = True
+                    if log is not None:
+                        log(LogEvent.TARGET_RESET.value, f"Fresh target session for '{name}'")
+                except Exception as e:
+                    # A reset failure shouldn't kill the run — log and continue
+                    # with the existing session. The sub-module will still run
+                    # but against a target that remembers everything.
+                    if log is not None:
+                        log(LogEvent.TARGET_RESET_ERROR.value, f"reset failed for '{name}': {e}")
 
         # P5 — rotate the attacker model round-robin when an ensemble is
         # declared. No-op (returns the single model) otherwise.
@@ -459,6 +506,8 @@ class Context:
             judge_rubric_additions=self.judge_rubric_additions,  # shared
             target_fresh_session=target_fresh_session,
             attacker_model_override=attacker_model_override or self.attacker_model_override,
+            depth=self.depth + 1,           # deeper in the module tree
+            scenario_mode=self.scenario_mode,  # inherit CONTINUOUS/TRIALS
             _turns=self.turns,              # same list reference
             _module_log=self.module_log,    # shared log
             _target_reset_at=self._target_reset_at,
@@ -492,13 +541,22 @@ class Context:
             return "(no response from human — continue with best judgement)"
 
     def format_turns(self, last_n: int = 10) -> str:
-        """Format recent conversation for LLM consumption."""
+        """Format recent conversation for LLM consumption.
+
+        Summary turns (C9 — compressed blocks of older history) are rendered
+        as an inline ``[Summary: ...]`` line so both the attacker LLM and the
+        judge can read them plainly without a new schema.
+        """
         recent = self.turns[-last_n:] if self.turns else []
         if not recent:
             return "(no conversation yet)"
 
         lines = []
-        for i, turn in enumerate(recent):
+        for turn in recent:
+            if getattr(turn, "kind", "exchange") == "summary":
+                lines.append(f"[Summary of compressed earlier turns: {turn.received}]")
+                lines.append("")
+                continue
             prefix = f"[{turn.module}] " if turn.module else ""
             lines.append(f"{prefix}You: {turn.sent}")
             lines.append(f"Target: {turn.received}")
@@ -511,6 +569,7 @@ class Context:
         Excludes turns that happened before the most recent target.reset().
         Use this when the attacker needs to see what the target actually
         remembers — anything earlier has been wiped from the target's side.
+        Summary turns (C9) render inline just like in :meth:`format_turns`.
         """
         session_turns = self.turns[self._target_reset_at:]
         recent = session_turns[-last_n:] if session_turns else []
@@ -519,6 +578,10 @@ class Context:
 
         lines = []
         for turn in recent:
+            if getattr(turn, "kind", "exchange") == "summary":
+                lines.append(f"[Summary of compressed earlier turns: {turn.received}]")
+                lines.append("")
+                continue
             prefix = f"[{turn.module}] " if turn.module else ""
             lines.append(f"{prefix}You: {turn.sent}")
             lines.append(f"Target: {turn.received}")

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from mesmer.core.constants import ContextMode
+from mesmer.core.constants import ContextMode, ScenarioMode
 from mesmer.core.context import Context, HumanQuestionBroker
 from mesmer.core.graph import AttackGraph
 from mesmer.core.loop import LogFn, run_react_loop
@@ -36,6 +36,10 @@ class RunConfig:
     output_path: str | None = None
     mode: str = ContextMode.AUTONOMOUS.value  # ContextMode or 'plan'
     human_broker: "HumanQuestionBroker | None" = None
+    # Per-invocation ScenarioMode override (--mode on the CLI). When None,
+    # the scenario YAML's mode field wins. Set to ScenarioMode.TRIALS or
+    # ScenarioMode.CONTINUOUS to force a mode regardless of YAML.
+    scenario_mode_override: ScenarioMode | None = None
 
 
 @dataclass
@@ -130,6 +134,24 @@ async def execute_run(
     # Create context
     max_turns = config.max_turns_override or scenario.objective.max_turns
     plan_md = memory.load_plan()  # None if no plan.md for this target
+    # CLI override wins over YAML (mirrors model_override / max_turns_override).
+    effective_scenario_mode = (
+        config.scenario_mode_override
+        if config.scenario_mode_override is not None
+        else scenario.mode
+    )
+
+    # C8 — cross-run conversation persistence for CONTINUOUS mode. Load the
+    # prior transcript so the attacker picks up where it left off. ``--fresh``
+    # wipes the file; TRIALS mode never touches it (and new targets have none).
+    seeded_turns = None
+    if effective_scenario_mode == ScenarioMode.CONTINUOUS:
+        if config.fresh:
+            # Clear the persisted arc — --fresh must mean genuinely fresh.
+            memory.delete_conversation()
+        else:
+            seeded_turns = memory.load_conversation()
+
     ctx = Context(
         target=target,
         registry=registry,
@@ -143,6 +165,8 @@ async def execute_run(
         human_broker=config.human_broker,
         plan=plan_md,
         judge_rubric_additions=scenario.judge_rubric_additions,
+        scenario_mode=effective_scenario_mode,
+        _turns=seeded_turns,
     )
 
     # Wrap log_fn to also emit graph snapshots
@@ -175,6 +199,10 @@ async def execute_run(
     # Save graph + memory
     memory.save_graph(graph)
     memory.save_run_log(run_id, ctx.turns)
+    # C8 — persist the rolling CONTINUOUS conversation for the next invocation.
+    # TRIALS never writes it (sibling rollouts have no shared arc to resume).
+    if effective_scenario_mode == ScenarioMode.CONTINUOUS:
+        memory.save_conversation(ctx.turns)
     GlobalMemory.update_from_graph(graph)
 
     # Save report if requested

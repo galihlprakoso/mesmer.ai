@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from mesmer.core.constants import NodeSource
+from mesmer.core.constants import NodeSource, ScenarioMode
 from mesmer.core.graph import AttackGraph
 from mesmer.core.memory import TargetMemory, GlobalMemory
 from mesmer.core.runner import RunConfig, execute_run, BUILTIN_MODULES
@@ -46,9 +46,17 @@ def cli():
 @click.option("--hint", multiple=True, help="Human insight to guide the attack (repeatable)")
 @click.option("--hint-file", type=click.Path(exists=True), default=None, help="File with human observations")
 @click.option("--fresh", is_flag=True, help="Ignore existing graph, start fresh")
-def run(scenario_path, model, max_turns, verbose, output, module_path, hint, hint_file, fresh):
+@click.option(
+    "--mode",
+    "scenario_mode",
+    type=click.Choice(["trials", "continuous"], case_sensitive=False),
+    default=None,
+    help="Override scenario mode. trials: independent sub-module rollouts (default). "
+         "continuous: one persistent conversation, delta scoring, cross-run memory.",
+)
+def run(scenario_path, model, max_turns, verbose, output, module_path, hint, hint_file, fresh, scenario_mode):
     """Run an attack scenario."""
-    asyncio.run(_run(scenario_path, model, max_turns, verbose, output, module_path, hint, hint_file, fresh))
+    asyncio.run(_run(scenario_path, model, max_turns, verbose, output, module_path, hint, hint_file, fresh, scenario_mode))
 
 
 def _make_verbose_log():
@@ -82,7 +90,7 @@ def _make_verbose_log():
     return verbose_log
 
 
-async def _run(scenario_path, model, max_turns, verbose, output, extra_module_paths, hints, hint_file, fresh):
+async def _run(scenario_path, model, max_turns, verbose, output, extra_module_paths, hints, hint_file, fresh, scenario_mode=None):
     """Async run implementation."""
     # Print scenario info
     scenario = load_scenario(scenario_path)
@@ -122,6 +130,9 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
         fresh=fresh,
         extra_module_paths=list(extra_module_paths),
         output_path=output,
+        scenario_mode_override=(
+            ScenarioMode(scenario_mode.lower()) if scenario_mode else None
+        ),
     )
 
     try:

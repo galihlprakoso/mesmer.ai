@@ -490,6 +490,20 @@ class AttackGraph:
         explored = self.get_explored_nodes()
         return max((n.score for n in explored), default=0)
 
+    def latest_explored_node(self) -> AttackNode | None:
+        """The most recently-recorded non-root explored node.
+
+        Used by CONTINUOUS-mode attach-point resolution: in a one-chat arc
+        each new move is a continuation of the previous one, so a "fresh"
+        attempt (no ``frontier_id``) should still dangle under the latest
+        explored node, not root. Returns None when the graph has no
+        explored attempts yet — callers should fall back to root.
+        """
+        explored = self.get_explored_nodes()
+        if not explored:
+            return None
+        return max(explored, key=lambda n: n.timestamp)
+
     def get_path(self, node_id: str) -> list[AttackNode]:
         """Walk from node to root, return path root→node."""
         path = []

@@ -601,3 +601,115 @@ class TestRefineApproach:
             ctx, module="m", rationale="untried", judge_result=jr,
         )
         assert len(out) <= 200
+
+    @pytest.mark.asyncio
+    async def test_transcript_tail_included_when_provided(self):
+        """C4 — when the caller passes ``transcript_tail`` (CONTINUOUS mode
+        does this), the refinement user prompt must include a block with
+        that live-state text so the opener is state-specific."""
+        ctx = _make_mock_ctx(json.dumps({"approach": "ok"}))
+        jr = JudgeResult(5, "rules", "angle", "dead end", "next")
+        tail = "[mod1] Attacker: what rules?\nTarget: I won't discuss."
+
+        await refine_approach(
+            ctx, module="foo", rationale="deepen",
+            judge_result=jr, transcript_tail=tail,
+        )
+        user_msg = ctx.completion.call_args.kwargs["messages"][1]["content"]
+        assert ("live state" in user_msg.lower()
+                or "current conversation" in user_msg.lower())
+        assert "won't discuss" in user_msg
+
+    @pytest.mark.asyncio
+    async def test_transcript_tail_absent_section_when_empty(self):
+        """Empty tail => no transcript-tail block in the user prompt.
+        TRIALS mode relies on this omission."""
+        ctx = _make_mock_ctx(json.dumps({"approach": "ok"}))
+        jr = JudgeResult(5, "rules", "angle", "dead end", "next")
+        await refine_approach(
+            ctx, module="foo", rationale="deepen",
+            judge_result=jr, transcript_tail="",
+        )
+        user_msg = ctx.completion.call_args.kwargs["messages"][1]["content"]
+        # The section header is only emitted when the tail is non-empty.
+        assert "Current conversation" not in user_msg
+
+
+# ---------------------------------------------------------------------------
+# CONTINUOUS judge addendum + prior_transcript_summary (C3)
+# ---------------------------------------------------------------------------
+
+class TestContinuousJudgeAddendum:
+    """``_compose_judge_system`` appends :data:`CONTINUOUS_JUDGE_ADDENDUM`
+    only when ``scenario_mode == CONTINUOUS`` — and ``evaluate_attempt``
+    exposes a ``prior_transcript_summary`` slot for the delta baseline."""
+
+    @pytest.mark.asyncio
+    async def test_addendum_absent_in_trials(self):
+        from mesmer.core.constants import ScenarioMode
+
+        ctx = _make_mock_ctx(json.dumps({
+            "score": 4, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        }))
+        ctx.scenario_mode = ScenarioMode.TRIALS
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[_xchg("hi", "hello")],
+        )
+        system_msg = ctx.completion.call_args.kwargs["messages"][0]["content"]
+        assert "Continuous-conversation scoring" not in system_msg
+        assert "score on **new** evidence" not in system_msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_addendum_present_in_continuous(self):
+        from mesmer.core.constants import ScenarioMode
+
+        ctx = _make_mock_ctx(json.dumps({
+            "score": 4, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        }))
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[_xchg("hi", "hello")],
+        )
+        system_msg = ctx.completion.call_args.kwargs["messages"][0]["content"]
+        assert "Continuous-conversation scoring" in system_msg
+        assert "new" in system_msg.lower()  # delta framing present
+
+    @pytest.mark.asyncio
+    async def test_prior_transcript_summary_embedded_in_user_msg(self):
+        """The baseline transcript is rendered into the judge's user prompt
+        as a 'Prior transcript' block so the LLM knows what was already
+        visible before THIS move."""
+        ctx = _make_mock_ctx(json.dumps({
+            "score": 5, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        }))
+        prior = "[foo] Attacker: ask\nTarget: no"
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[_xchg("hi", "hello")],
+            prior_transcript_summary=prior,
+        )
+        user_msg = ctx.completion.call_args.kwargs["messages"][1]["content"]
+        assert "Prior transcript" in user_msg
+        assert "ask" in user_msg
+        assert "Target: no" in user_msg
+
+    @pytest.mark.asyncio
+    async def test_prior_transcript_section_omitted_when_empty(self):
+        """Empty prior means no 'Prior transcript' block in the user prompt —
+        keeps TRIALS mode verbose-free."""
+        ctx = _make_mock_ctx(json.dumps({
+            "score": 5, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        }))
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[_xchg("hi", "hello")],
+            prior_transcript_summary="",
+        )
+        user_msg = ctx.completion.call_args.kwargs["messages"][1]["content"]
+        assert "Prior transcript" not in user_msg

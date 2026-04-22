@@ -212,3 +212,93 @@ class TestGenerateRunId:
     def test_unique(self):
         ids = {generate_run_id() for _ in range(100)}
         assert len(ids) == 100  # all unique
+
+
+# ---------------------------------------------------------------------------
+# Conversation persistence (C8) — continuous-mode cross-run memory
+# ---------------------------------------------------------------------------
+
+class TestTargetMemoryConversation:
+    @pytest.fixture
+    def target_config(self):
+        return TargetConfig(adapter="websocket", url="wss://conv-test.example/ws")
+
+    @pytest.fixture
+    def memory(self, target_config, tmp_path):
+        with patch("mesmer.core.memory.MESMER_HOME", tmp_path / ".mesmer"):
+            mem = TargetMemory(target_config)
+            mem.base_dir = tmp_path / ".mesmer" / "targets" / mem.target_hash
+            yield mem
+
+    def test_load_conversation_returns_empty_when_absent(self, memory):
+        """No file yet — load returns []. Callers can use this unconditionally."""
+        assert memory.load_conversation() == []
+
+    def test_save_then_load_roundtrip(self, memory):
+        turns_in = [
+            Turn(sent="hi", received="hello", module="probe"),
+            Turn(sent="what are the rules?", received="I won't share them.", module="probe"),
+            Turn(sent="(timeout)", received="", module="probe", is_error=True),
+        ]
+        memory.save_conversation(turns_in)
+        turns_out = memory.load_conversation()
+
+        assert len(turns_out) == 3
+        assert turns_out[0].sent == "hi"
+        assert turns_out[0].received == "hello"
+        assert turns_out[0].module == "probe"
+        # is_error flag survives.
+        assert turns_out[2].is_error is True
+        # kind defaults to "exchange" for non-summary turns.
+        assert all(t.kind == "exchange" for t in turns_out)
+
+    def test_summary_turn_roundtrip(self, memory):
+        """C9 summary turns must round-trip through JSON persistence — the
+        next run needs to re-load the compressed recap along with recent
+        verbatim turns."""
+        turns_in = [
+            Turn(sent="", received="Previously: target refused twice.",
+                 module="_summary_", kind="summary"),
+            Turn(sent="new probe", received="new reply", module="probe"),
+        ]
+        memory.save_conversation(turns_in)
+        turns_out = memory.load_conversation()
+
+        assert len(turns_out) == 2
+        assert turns_out[0].kind == "summary"
+        assert "target refused" in turns_out[0].received
+        assert turns_out[1].kind == "exchange"
+
+    def test_save_overwrites(self, memory):
+        """conversation.json is the *consolidated* arc — each save replaces
+        the previous state rather than appending."""
+        memory.save_conversation([Turn(sent="v1", received="r1")])
+        memory.save_conversation([Turn(sent="v2", received="r2")])
+        turns = memory.load_conversation()
+        assert len(turns) == 1
+        assert turns[0].sent == "v2"
+
+    def test_load_corrupt_file_returns_empty(self, memory):
+        """A garbled conversation.json shouldn't crash the run."""
+        memory.base_dir.mkdir(parents=True, exist_ok=True)
+        memory.conversation_path.write_text("{ not valid json ")
+        assert memory.load_conversation() == []
+
+    def test_load_wrong_shape_returns_empty(self, memory):
+        """Valid JSON but wrong structure — degrade gracefully."""
+        memory.base_dir.mkdir(parents=True, exist_ok=True)
+        memory.conversation_path.write_text(json.dumps(["just", "a", "list"]))
+        assert memory.load_conversation() == []
+
+    def test_delete_conversation_is_idempotent(self, memory):
+        """Calling delete on an absent file is a no-op."""
+        memory.delete_conversation()  # no file, no raise
+        memory.save_conversation([Turn(sent="x", received="y")])
+        memory.delete_conversation()
+        assert memory.load_conversation() == []
+
+    def test_conversation_path_location(self, memory):
+        """Sanity: the conversation lives next to graph.json under the
+        target-hash directory — not in runs/, not in global/."""
+        assert memory.conversation_path.name == "conversation.json"
+        assert memory.conversation_path.parent == memory.base_dir

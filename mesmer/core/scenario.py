@@ -9,6 +9,8 @@ from pathlib import Path
 
 import yaml
 
+from mesmer.core.constants import ScenarioMode
+
 
 @dataclass
 class Objective:
@@ -59,6 +61,23 @@ class AgentConfig:
       2. ``judge_model`` — the evaluator model. Kept stable across the run
          so scoring doesn't drift with the attacker rotation. Defaults to
          the first attacker model when unset.
+
+    Context-budget fields (C7 — continuous mode only):
+
+      - ``max_context_tokens`` — hard cap on the attacker prompt token count
+        before compression kicks in. ``0`` means "auto-resolve via
+        ``litellm.get_max_tokens(model)`` with a 10% safety margin; if that
+        lookup fails, disable compression entirely". See
+        :meth:`effective_max_context_tokens`.
+      - ``compression_keep_recent`` — number of trailing Turns to preserve
+        verbatim during compression. ``>=1``.
+      - ``compression_target_ratio`` — after compression, aim for roughly
+        this fraction of the cap (``0.0..1.0``). A smaller ratio compresses
+        more aggressively; larger leaves more headroom before the next firing.
+      - ``compression_model`` — model used for the summary LLM call. Empty
+        cascade: :attr:`compression_model` → :attr:`judge_model` → attacker
+        model. Keeping it configurable lets operators put compression on a
+        cheaper model than the judge when cost matters.
     """
 
     # LiteLLM model string: "openrouter/model", "anthropic/model", "openai/model", etc.
@@ -77,6 +96,14 @@ class AgentConfig:
     # Extra params passed to litellm (e.g. {"top_p": 0.9})
     extra: dict = field(default_factory=dict)
 
+    # Context budget + compression (C7). All four default to values that
+    # keep the TRIALS mode path entirely unchanged — compression only
+    # activates when scenario_mode == CONTINUOUS AND the effective cap > 0.
+    max_context_tokens: int = 0
+    compression_keep_recent: int = 10
+    compression_target_ratio: float = 0.6
+    compression_model: str = ""
+
     # Internal — populated from api_key if comma-separated
     _keys: list[str] = field(default_factory=list, repr=False)
     _pool: "object | None" = field(default=None, repr=False)
@@ -89,6 +116,9 @@ class AgentConfig:
         When ``models`` is non-empty, ``model`` is reset to ``models[0]`` so
         the two settings stay in sync — callers may still read ``model`` to
         get the current attacker brain.
+
+        Context-budget fields are clamped to safe ranges — an invalid YAML
+        value degrades to the default instead of crashing the run.
         """
         if self.models:
             # Normalise: strip whitespace, drop empties.
@@ -105,6 +135,26 @@ class AgentConfig:
         # Build a KeyPool that supports per-key cooldowns (rate-limit exclusion)
         from mesmer.core.keys import KeyPool
         self._pool = KeyPool(list(self._keys))
+
+        # C7 — validate / clamp context-budget fields. Defensive defaults so
+        # a typoed YAML value degrades instead of tripping the compressor.
+        try:
+            self.max_context_tokens = max(0, int(self.max_context_tokens))
+        except (TypeError, ValueError):
+            self.max_context_tokens = 0
+        try:
+            self.compression_keep_recent = max(1, int(self.compression_keep_recent))
+        except (TypeError, ValueError):
+            self.compression_keep_recent = 10
+        try:
+            ratio = float(self.compression_target_ratio)
+            if not 0.0 < ratio <= 1.0:
+                ratio = 0.6
+        except (TypeError, ValueError):
+            ratio = 0.6
+        self.compression_target_ratio = ratio
+        if not isinstance(self.compression_model, str):
+            self.compression_model = ""
 
     @property
     def pool(self):
@@ -155,6 +205,45 @@ class AgentConfig:
     def ensemble_size(self) -> int:
         return len(self.models)
 
+    # --- context budget + compression (C7) ---
+
+    def effective_max_context_tokens(self, model: str) -> int:
+        """Resolve the hard cap on attacker-prompt tokens for ``model``.
+
+        Priority:
+
+          1. Explicit ``max_context_tokens > 0`` wins — operator said what
+             they wanted, don't second-guess.
+          2. Else ask ``litellm.get_max_tokens(model)`` and subtract a 10%
+             safety margin (to leave room for the assistant's own reply and
+             for tokenizer approximation error).
+          3. Else return ``0`` — compression disabled for this invocation.
+
+        The function is best-effort: any exception from litellm is treated
+        as "no lookup available" rather than propagating. The compressor
+        interprets a 0 cap as "no-op".
+        """
+        if self.max_context_tokens > 0:
+            return self.max_context_tokens
+        try:
+            import litellm
+            resolved = litellm.get_max_tokens(model)
+        except Exception:
+            return 0
+        if not isinstance(resolved, int) or resolved <= 0:
+            return 0
+        # Reserve 10% headroom for the response + tokenizer slack.
+        return int(resolved * 0.9)
+
+    def effective_compression_model(self) -> str:
+        """Model for the compression LLM call.
+
+        Cascade: explicit ``compression_model`` → ``judge_model`` → attacker
+        model. Lets operators put summarisation on a cheap model without
+        touching the attacker or judge selection.
+        """
+        return self.compression_model or self.effective_judge_model
+
 
 @dataclass
 class Scenario:
@@ -171,6 +260,12 @@ class Scenario:
     # JUDGE_SYSTEM prompt so the judge credits wins that matter for this target
     # (e.g. refusal-list leaks, persona confirmation, behavioural policies).
     judge_rubric_additions: str = ""
+    # Run execution mode — see :class:`ScenarioMode`. ``TRIALS`` (default)
+    # preserves the pre-existing independent-rollout behaviour. ``CONTINUOUS``
+    # switches to single-conversation semantics (no per-module reset, delta-
+    # aware judging, continuation framing, cross-run persistence, and
+    # summary-buffer compression).
+    mode: ScenarioMode = ScenarioMode.TRIALS
 
     # Convenience accessors (backward compat)
     @property
@@ -248,10 +343,26 @@ def load_scenario(path: str | Path) -> Scenario:
         temperature=agent_data.get("temperature", 0.7),
         max_tokens=agent_data.get("max_tokens"),
         extra=agent_data.get("extra", {}),
+        # Context budget + compression (C7). Each field is validated /
+        # clamped inside AgentConfig.__post_init__, so sloppy YAML still
+        # boots with safe defaults.
+        max_context_tokens=agent_data.get("max_context_tokens", 0),
+        compression_keep_recent=agent_data.get("compression_keep_recent", 10),
+        compression_target_ratio=agent_data.get("compression_target_ratio", 0.6),
+        compression_model=str(agent_data.get("compression_model", "") or ""),
     )
 
     judge_data = data.get("judge", {}) or {}
     judge_rubric_additions = str(judge_data.get("rubric_additions", "") or "").strip()
+
+    # Mode: accept bare string ("continuous" / "trials"). Unknown or empty
+    # degrades to the safer legacy TRIALS behaviour so typos don't silently
+    # flip a scenario into continuous mode.
+    raw_mode = str(data.get("mode", "") or "").strip().lower()
+    try:
+        mode = ScenarioMode(raw_mode) if raw_mode else ScenarioMode.TRIALS
+    except ValueError:
+        mode = ScenarioMode.TRIALS
 
     return Scenario(
         name=data.get("name", "Unnamed Scenario"),
@@ -262,4 +373,5 @@ def load_scenario(path: str | Path) -> Scenario:
         agent=agent,
         module_paths=data.get("module_paths", []),
         judge_rubric_additions=judge_rubric_additions,
+        mode=mode,
     )

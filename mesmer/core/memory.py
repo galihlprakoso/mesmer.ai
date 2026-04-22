@@ -52,6 +52,17 @@ class TargetMemory:
     def plan_path(self) -> Path:
         return self.base_dir / "plan.md"
 
+    @property
+    def conversation_path(self) -> Path:
+        """C8 — cross-run conversation persistence for continuous mode.
+
+        Stores the rolling ``Turn`` list so that when mesmer is re-invoked
+        against the same target with ``scenario_mode == CONTINUOUS`` the
+        attacker can pick up where it left off. In TRIALS mode this file is
+        never written.
+        """
+        return self.base_dir / "conversation.json"
+
     def load_graph(self) -> AttackGraph:
         """Load existing graph or return a fresh one."""
         if self.graph_path.exists():
@@ -95,6 +106,61 @@ class TargetMemory:
         with open(runs_dir / f"{run_id}.jsonl", "w") as f:
             for turn in turns:
                 f.write(json.dumps(turn.to_dict()) + "\n")
+
+    def save_conversation(self, turns: list[Turn]) -> None:
+        """Persist the CONTINUOUS-mode rolling transcript.
+
+        Overwrites whatever was there — mesmer treats this file as the
+        canonical "what the target has heard so far" state. The per-run
+        ``runs/*.jsonl`` log is separate and append-only; this file is the
+        consolidated arc.
+        """
+        import time as _time
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "saved_at": _time.time(),
+            "turns": [t.to_dict() for t in turns],
+        }
+        self.conversation_path.write_text(json.dumps(payload, indent=2, default=str))
+
+    def load_conversation(self) -> list[Turn]:
+        """Return the persisted rolling transcript, or ``[]`` when absent.
+
+        Silently returns an empty list on parse/schema errors — a corrupt
+        conversation file shouldn't kill the run; the attacker just starts
+        fresh and the next save overwrites the bad blob.
+        """
+        from mesmer.core.context import Turn as _Turn
+        p = self.conversation_path
+        if not p.exists():
+            return []
+        try:
+            raw = json.loads(p.read_text())
+            items = raw.get("turns", []) if isinstance(raw, dict) else []
+        except (json.JSONDecodeError, KeyError, OSError):
+            return []
+        turns: list[Turn] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                turns.append(_Turn(
+                    sent=str(item.get("sent", "") or ""),
+                    received=str(item.get("received", "") or ""),
+                    module=str(item.get("module", "") or ""),
+                    timestamp=float(item.get("timestamp") or 0.0),
+                    is_error=bool(item.get("is_error", False)),
+                    # C9 — summary Turns stored by prior runs round-trip here.
+                    # Older JSON files without the field default to "exchange".
+                    kind=str(item.get("kind", "exchange") or "exchange"),
+                ))
+            except (TypeError, ValueError):
+                continue
+        return turns
+
+    def delete_conversation(self) -> None:
+        if self.conversation_path.exists():
+            self.conversation_path.unlink()
 
     def list_runs(self) -> list[str]:
         """List run IDs, newest first."""

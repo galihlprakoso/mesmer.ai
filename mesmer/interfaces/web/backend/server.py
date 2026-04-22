@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from mesmer.core.constants import ContextMode
+from mesmer.core.constants import ContextMode, ScenarioMode
 from mesmer.core.context import HumanQuestionBroker
 from mesmer.core.graph import AttackGraph
 from mesmer.core.memory import TargetMemory, GlobalMemory
@@ -43,7 +43,10 @@ class RunRequest(BaseModel):
     max_turns: int | None = None
     hints: list[str] = []
     fresh: bool = False
-    mode: str = ContextMode.AUTONOMOUS.value  # ContextMode value
+    mode: str = ContextMode.AUTONOMOUS.value  # ContextMode value (autonomous/co-op)
+    # Optional ScenarioMode override ("trials" or "continuous"). None = honour
+    # the YAML's mode field. Mirrors the CLI --mode flag.
+    scenario_mode: str | None = None
 
 
 class HintRequest(BaseModel):
@@ -233,6 +236,14 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         # Fresh broker per run — prior questions can't outlive a run.
         current_broker = HumanQuestionBroker(on_question=_broadcast_question)
 
+        # Resolve ScenarioMode override from the request (None => honour YAML).
+        scenario_mode_override: ScenarioMode | None = None
+        if req.scenario_mode:
+            try:
+                scenario_mode_override = ScenarioMode(req.scenario_mode.lower())
+            except ValueError:
+                scenario_mode_override = None
+
         config = RunConfig(
             scenario_path=req.scenario_path,
             model_override=req.model,
@@ -241,6 +252,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             fresh=req.fresh,
             mode=req.mode,
             human_broker=current_broker,
+            scenario_mode_override=scenario_mode_override,
         )
 
         async def _run():

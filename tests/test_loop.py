@@ -601,6 +601,99 @@ class TestPlanInjection:
 # Fresh-session framing (P0)
 # ---------------------------------------------------------------------------
 
+class TestLogHygiene:
+    """P6 — user-facing log details must not truncate mid-sentence, iteration
+    labels must expose depth, and budget exhaustion must explain itself."""
+
+    @pytest.mark.asyncio
+    async def test_llm_call_log_includes_depth(self):
+        events = []
+
+        def _log(event, detail=""):
+            events.append((event, detail))
+
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+        )
+        # Simulate a nested module: depth = 2
+        ctx.depth = 2
+        module = _make_module(name="narrative-transport")
+
+        await run_react_loop(module, ctx, "test", log=_log)
+
+        llm_events = [d for (e, d) in events if e == "llm_call"]
+        assert llm_events
+        assert "depth=2" in llm_events[0]
+        assert "narrative-transport" in llm_events[0]
+
+    @pytest.mark.asyncio
+    async def test_send_log_not_truncated(self):
+        events = []
+
+        def _log(event, detail=""):
+            events.append((event, detail))
+
+        long_message = "x" * 500
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("send_message", {"message": long_message})]
+                )),
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "done"})]
+                )),
+            ],
+            target_replies=["y" * 500],
+            max_turns=5,
+        )
+        module = _make_module()
+        await run_react_loop(module, ctx, "test", log=_log)
+
+        send_events = [d for (e, d) in events if e == "send"]
+        recv_events = [d for (e, d) in events if e == "recv"]
+        assert send_events and long_message in send_events[0]
+        assert recv_events and ("y" * 500) in recv_events[0]
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_log_explains_next_action(self):
+        events = []
+
+        def _log(event, detail=""):
+            events.append((event, detail))
+
+        # max_turns=1 → after the first send, the next send raises.
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("send_message", {"message": "first"})]
+                )),
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("send_message", {"message": "second"})]
+                )),
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "done"})]
+                )),
+            ],
+            target_replies=["ack"],
+            max_turns=1,
+        )
+        module = _make_module(name="cognitive-overload")
+        await run_react_loop(module, ctx, "test", log=_log)
+
+        budget_events = [d for (e, d) in events if e == "budget"]
+        assert budget_events, "budget exhaustion must be logged"
+        detail = budget_events[0]
+        assert "cognitive-overload" in detail
+        assert "1/1" in detail or "1 " in detail
+        # Must explain: this module concludes, parent leader can still delegate
+        assert "MUST conclude" in detail
+        assert "parent" in detail.lower()
+
+
 class TestFreshSessionFraming:
     """When ctx.target_fresh_session is True, the attacker LLM prompt must
     clearly distinguish prior-intel from current-session state, and must not
@@ -1029,8 +1122,10 @@ class TestReflectAndExpandGraphFirst:
         )
 
         # Stub refine_approach to always return a fixed string — this isolates
-        # the module-selection logic from the LLM call.
-        async def fake_refine(ctx, *, module, rationale, judge_result):
+        # the module-selection logic from the LLM call. ``**kwargs`` absorbs any
+        # caller-added kwargs (e.g. transcript_tail in CONTINUOUS mode) so this
+        # test stays robust to refinement-signature extensions.
+        async def fake_refine(ctx, *, module, rationale, judge_result, **kwargs):
             return f"refined-for-{module}"
 
         with patch("mesmer.core.judge.refine_approach", new=fake_refine):
@@ -1073,7 +1168,7 @@ class TestReflectAndExpandGraphFirst:
         )
         judge = JudgeResult(5, "", "", "", "")
 
-        async def fake_refine(ctx, *, module, rationale, judge_result):
+        async def fake_refine(ctx, *, module, rationale, judge_result, **kwargs):
             return f"refined-{module}"
 
         with patch("mesmer.core.judge.refine_approach", new=fake_refine):
@@ -1124,7 +1219,7 @@ class TestReflectAndExpandGraphFirst:
         )
         judge = JudgeResult(5, "", "", "", "")
 
-        async def empty_refine(ctx, *, module, rationale, judge_result):
+        async def empty_refine(ctx, *, module, rationale, judge_result, **kwargs):
             return ""
 
         with patch("mesmer.core.judge.refine_approach", new=empty_refine):
@@ -1141,3 +1236,186 @@ class TestReflectAndExpandGraphFirst:
         assert len(new_frontiers) == 1
         # Fallback embeds the rationale so the slot stays informative.
         assert "untried" in new_frontiers[0].approach or "deepen" in new_frontiers[0].approach
+
+
+# ---------------------------------------------------------------------------
+# Continuous-mode framing (C2, C4, C5)
+# ---------------------------------------------------------------------------
+
+class TestContinuationPreamble:
+    """C2 — CONTINUATION_PREAMBLE prepends to the attacker system message
+    only when ctx.scenario_mode == CONTINUOUS."""
+
+    @pytest.mark.asyncio
+    async def test_preamble_absent_in_trials(self):
+        captured: list = []
+        responses = [
+            FakeResponse(FakeMessage(
+                tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+            ))
+        ]
+        ctx = _make_ctx(completion_responses=responses, captured_messages=captured)
+        # Default mode is TRIALS.
+        from mesmer.core.constants import ScenarioMode
+        assert ctx.scenario_mode == ScenarioMode.TRIALS
+
+        module = _make_module()
+        await run_react_loop(module, ctx, "probe")
+
+        # First LLM call's system message must NOT contain the preamble.
+        system_msg = captured[0][0]["content"]
+        assert "Continuous-conversation mode" not in system_msg
+        assert "You are one move inside a single ongoing conversation" not in system_msg
+
+    @pytest.mark.asyncio
+    async def test_preamble_present_in_continuous(self):
+        from mesmer.core.constants import ScenarioMode
+
+        captured: list = []
+        responses = [
+            FakeResponse(FakeMessage(
+                tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+            ))
+        ]
+        ctx = _make_ctx(completion_responses=responses, captured_messages=captured)
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+
+        module = _make_module()
+        await run_react_loop(module, ctx, "probe")
+
+        system_msg = captured[0][0]["content"]
+        # A meaningful chunk of the preamble must be present.
+        assert "Continuous-conversation mode" in system_msg
+        assert "ongoing conversation" in system_msg
+        # Preamble comes FIRST so the framing dominates the module prompt.
+        assert system_msg.index("Continuous-conversation mode") < system_msg.index("test-module")
+
+
+class TestRefineApproachTranscriptTail:
+    """C4 — in CONTINUOUS mode, _reflect_and_expand passes a non-empty
+    ``transcript_tail`` to refine_approach so the opener is state-specific."""
+
+    @pytest.mark.asyncio
+    async def test_transcript_tail_empty_in_trials(self):
+        from mesmer.core.constants import ScenarioMode
+        from mesmer.core.context import Turn
+
+        ctx = _make_ctx()
+        graph = ctx.graph
+        # Seed a live turn so format_session_turns would return non-empty if
+        # it were called — but TRIALS mode shouldn't care.
+        ctx.turns.append(Turn(sent="hi", received="hello"))
+        current_node = graph.add_node(
+            graph.root_id, "foo", "prior angle words plenty", score=5,
+        )
+        judge = JudgeResult(5, "", "", "", "")
+
+        captured: dict = {}
+        async def fake_refine(ctx, *, module, rationale, judge_result, transcript_tail="", **kw):
+            captured.setdefault("tails", []).append(transcript_tail)
+            return "x"
+
+        assert ctx.scenario_mode == ScenarioMode.TRIALS
+        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+            await _reflect_and_expand(
+                ctx, "foo", "a", judge, current_node,
+                log=lambda *a, **kw: None,
+                available_modules=["foo", "bar"],
+            )
+
+        assert captured["tails"], "refine_approach was not called"
+        assert all(t == "" for t in captured["tails"])
+
+    @pytest.mark.asyncio
+    async def test_transcript_tail_populated_in_continuous(self):
+        from mesmer.core.constants import ScenarioMode
+        from mesmer.core.context import Turn
+
+        ctx = _make_ctx()
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+        graph = ctx.graph
+        ctx.turns.append(Turn(sent="probe question", received="deflection reply"))
+        current_node = graph.add_node(
+            graph.root_id, "foo", "prior angle words plenty", score=5,
+        )
+        judge = JudgeResult(5, "", "", "", "")
+
+        captured: dict = {}
+        async def fake_refine(ctx, *, module, rationale, judge_result, transcript_tail="", **kw):
+            captured.setdefault("tails", []).append(transcript_tail)
+            return "x"
+
+        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+            await _reflect_and_expand(
+                ctx, "foo", "a", judge, current_node,
+                log=lambda *a, **kw: None,
+                available_modules=["foo", "bar"],
+            )
+
+        assert captured["tails"], "refine_approach was not called"
+        # Every candidate sees the same tail — populated with the seeded turn.
+        for tail in captured["tails"]:
+            assert "probe question" in tail
+            assert "deflection reply" in tail
+
+
+class TestUpdateGraphContinuousAttach:
+    """C5 — a fresh attempt in CONTINUOUS mode attaches under the latest
+    explored node (the chain's leaf), not root. TRIALS behaviour preserved."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_attempt_attaches_to_root_in_trials(self):
+        from mesmer.core.constants import ScenarioMode
+
+        ctx = _make_ctx()
+        graph = ctx.graph
+        # Seed an explored node under root — in TRIALS it's still a sibling
+        # relationship: the next fresh attempt ALSO hangs off root, not under
+        # the prior node. That's the trials-mode contract.
+        graph.add_node(graph.root_id, "foo", "first one words", score=4)
+        assert ctx.scenario_mode == ScenarioMode.TRIALS
+
+        judge = JudgeResult(5, "leaked", "angle", "dead", "next")
+        node = _update_graph(
+            ctx, "bar", "second angle words plenty",
+            judge, log=lambda *a, **kw: None,
+            messages_sent=["hi"], target_responses=["ok"],
+            frontier_id=None,
+        )
+        assert node.parent_id == graph.root_id
+
+    @pytest.mark.asyncio
+    async def test_fresh_attempt_attaches_to_leaf_in_continuous(self):
+        from mesmer.core.constants import ScenarioMode
+
+        ctx = _make_ctx()
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+        graph = ctx.graph
+        prior = graph.add_node(graph.root_id, "foo", "first one words", score=4)
+
+        judge = JudgeResult(5, "leaked", "angle", "dead", "next")
+        node = _update_graph(
+            ctx, "bar", "second angle words plenty",
+            judge, log=lambda *a, **kw: None,
+            messages_sent=["hi"], target_responses=["ok"],
+            frontier_id=None,
+        )
+        # Chain extends: new move is a child of the previous move, not root.
+        assert node.parent_id == prior.id
+
+    @pytest.mark.asyncio
+    async def test_fresh_attempt_continuous_falls_back_to_root_when_graph_empty(self):
+        from mesmer.core.constants import ScenarioMode
+
+        ctx = _make_ctx()
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+        graph = ctx.graph  # has only root
+        judge = JudgeResult(5, "", "", "", "")
+        node = _update_graph(
+            ctx, "bar", "opening move plenty words",
+            judge, log=lambda *a, **kw: None,
+            messages_sent=[], target_responses=[],
+            frontier_id=None,
+        )
+        # No prior explored node → attach under root rather than crashing.
+        assert node.parent_id == graph.root_id

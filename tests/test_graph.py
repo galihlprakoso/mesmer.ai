@@ -752,3 +752,62 @@ class TestHashTarget:
         assert h1 == h2
         h3 = hash_target("openai", model="gpt-3.5")
         assert h1 != h3
+
+
+# ---------------------------------------------------------------------------
+# latest_explored_node (C5 — used by CONTINUOUS-mode attach resolution)
+# ---------------------------------------------------------------------------
+
+class TestLatestExploredNode:
+    def test_empty_graph_returns_none(self):
+        """No explored nodes yet → None. Callers fall back to root."""
+        g = AttackGraph()
+        g.ensure_root()
+        assert g.latest_explored_node() is None
+
+    def test_only_root_returns_none(self):
+        """Root is not considered explored — it's the origin marker."""
+        g = AttackGraph()
+        g.ensure_root()
+        assert g.latest_explored_node() is None
+
+    def test_returns_highest_timestamp_explored(self):
+        """When multiple explored nodes exist, pick the most recent by
+        timestamp — that's the chain's current leaf in CONTINUOUS mode."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        import time as _t
+        g.add_node(root.id, "m", "first angle words plenty", score=4)
+        _t.sleep(0.001)  # force strict ordering across dataclass timestamps
+        g.add_node(root.id, "m", "second angle words plenty", score=4)
+        _t.sleep(0.001)
+        third = g.add_node(root.id, "m", "third angle words plenty", score=4)
+        leaf = g.latest_explored_node()
+        assert leaf is not None
+        assert leaf.id == third.id
+
+    def test_frontier_nodes_do_not_count(self):
+        """Frontier nodes are unexplored proposals — the leaf of the live
+        chain is whatever was actually EXECUTED most recently."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        explored = g.add_node(root.id, "m", "real move words plenty", score=5)
+        frontier = g.add_frontier_node(root.id, "m", "suggested next move")
+        leaf = g.latest_explored_node()
+        assert leaf is not None
+        assert leaf.id == explored.id
+        assert leaf.id != frontier.id
+
+    def test_dead_nodes_still_count_as_leaf(self):
+        """A dead node is STILL the latest executed move — in a continuous
+        conversation, its presence is what the target remembers, even if
+        the technique failed. Next move extends from that state, not root."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        dead = g.add_node(
+            root.id, "m", "failed angle words plenty",
+            score=1, reflection="flat refusal",
+        )
+        leaf = g.latest_explored_node()
+        assert leaf is not None
+        assert leaf.id == dead.id

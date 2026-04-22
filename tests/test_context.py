@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
+from mesmer.core.constants import LogEvent, ScenarioMode
 from mesmer.core.context import Context, Turn, TurnBudgetExhausted, is_target_error
 from mesmer.core.graph import AttackGraph
 from mesmer.core.module import ModuleConfig
@@ -284,6 +285,85 @@ class TestTargetReset:
         assert observed["fresh"] is False
 
 
+class TestScenarioModePropagation:
+    """C0 / C1 — ScenarioMode threads from Context through child() and
+    controls whether ``run_module()`` honours ``reset_target`` on the module."""
+
+    def test_default_scenario_mode_is_trials(self):
+        ctx = _make_ctx()
+        assert ctx.scenario_mode == ScenarioMode.TRIALS
+
+    def test_child_inherits_scenario_mode_trials(self):
+        ctx = _make_ctx()
+        ctx.scenario_mode = ScenarioMode.TRIALS
+        assert ctx.child().scenario_mode == ScenarioMode.TRIALS
+
+    def test_child_inherits_scenario_mode_continuous(self):
+        ctx = _make_ctx()
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+        # Mode must survive arbitrarily deep nesting — sub-modules of
+        # sub-modules must all see the same scenario mode as the root.
+        assert ctx.child().child().child().scenario_mode == ScenarioMode.CONTINUOUS
+
+    @pytest.mark.asyncio
+    async def test_run_module_skips_reset_in_continuous_mode(self):
+        """C1 — even if a module YAML declares reset_target: true, the
+        reset is skipped under CONTINUOUS to preserve the live chat."""
+        ctx = _make_ctx(max_turns=10)
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+        module = ModuleConfig(
+            name="wants-reset",
+            description="t",
+            reset_target=True,  # will be warn-ignored
+        )
+        ctx.registry.get = MagicMock(return_value=module)
+
+        events: list[tuple[str, str]] = []
+        def log(e, d=""):
+            events.append((e, d))
+
+        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+            await ctx.run_module("wants-reset", "do it", log=log)
+
+        ctx.target.reset.assert_not_called()
+        assert ctx._target_reset_at == 0  # no reset advance
+        # A MODE_OVERRIDE event must be logged so scenario authors notice.
+        override_events = [e for e in events if e[0] == LogEvent.MODE_OVERRIDE.value]
+        assert len(override_events) == 1
+        assert "wants-reset" in override_events[0][1]
+        assert "CONTINUOUS" in override_events[0][1]
+
+    @pytest.mark.asyncio
+    async def test_run_module_still_resets_in_trials_mode(self):
+        """Regression: the CONTINUOUS skip-reset branch must not leak into
+        TRIALS runs — existing reset_target behaviour is unchanged."""
+        ctx = _make_ctx(max_turns=10)
+        assert ctx.scenario_mode == ScenarioMode.TRIALS
+        module = ModuleConfig(name="wants-reset", description="t", reset_target=True)
+        ctx.registry.get = MagicMock(return_value=module)
+
+        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+            await ctx.run_module("wants-reset", "do it")
+
+        ctx.target.reset.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_run_module_continuous_no_reset_flag_is_noop(self):
+        """No MODE_OVERRIDE logs when module.reset_target is False —
+        the warning only fires for the *override* case."""
+        ctx = _make_ctx(max_turns=10)
+        ctx.scenario_mode = ScenarioMode.CONTINUOUS
+        module = ModuleConfig(name="plain", description="t", reset_target=False)
+        ctx.registry.get = MagicMock(return_value=module)
+
+        events: list[tuple[str, str]] = []
+        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+            await ctx.run_module("plain", "do it", log=lambda e, d="": events.append((e, d)))
+
+        ctx.target.reset.assert_not_called()
+        assert not any(e[0] == LogEvent.MODE_OVERRIDE.value for e in events)
+
+
 class TestTargetErrorDetection:
     """P4 — is_target_error heuristic + Turn tagging in Context.send()."""
 
@@ -404,6 +484,32 @@ class TestAttackerModelRotation:
             await ctx.run_module("mod", "do")
 
         assert observed == ["a", "b", "c"]
+
+
+class TestContextDepth:
+    """P6 — depth tracks nesting so the CLI can distinguish iteration
+    counters of parent vs child modules."""
+
+    def test_root_depth_is_zero(self):
+        ctx = _make_ctx()
+        assert ctx.depth == 0
+
+    def test_child_increments_depth(self):
+        ctx = _make_ctx()
+        c1 = ctx.child()
+        c2 = c1.child()
+        assert c1.depth == 1
+        assert c2.depth == 2
+
+    def test_explicit_depth_preserved(self):
+        ctx = _make_ctx()
+        # child() at depth 3 produces a depth-4 grandchild.
+        deep = Context(
+            target=ctx.target, registry=ctx.registry,
+            agent_config=ctx.agent_config, depth=3,
+        )
+        assert deep.depth == 3
+        assert deep.child().depth == 4
 
 
 class TestFormatSessionTurns:

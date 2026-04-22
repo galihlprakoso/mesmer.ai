@@ -50,6 +50,29 @@ class ContextMode(str, Enum):
     CO_OP = "co-op"
 
 
+class ScenarioMode(str, Enum):
+    """How sub-modules relate to the target across a run.
+
+    ``TRIALS`` — the default and the original mesmer model. Sub-modules are
+    independent rollouts; ``module.reset_target`` controls whether each
+    sibling opens a fresh target session. Good against stateless or
+    session-scoped targets; MCTS-style exploration assumes each node is a
+    comparable trial of *that technique*.
+
+    ``CONTINUOUS`` — one target conversation for the whole run (and across
+    runs, once persistence is wired up). Sub-modules are moves inside that
+    conversation, not independent trials. The target is assumed to remember
+    everything said so far, so ``reset_target`` is ignored (and logged as a
+    warning) and scoring shifts to *new* information leaked by each move.
+    Use this for targets with account-level persistent memory (where a
+    fresh WebSocket still hits a user account that remembers prior chats)
+    or for attacks that depend on long-horizon rapport.
+    """
+
+    TRIALS = "trials"
+    CONTINUOUS = "continuous"
+
+
 class BudgetMode(str, Enum):
     """Phase of the run based on turn-budget consumption.
 
@@ -89,6 +112,8 @@ class LogEvent(str, Enum):
     BUDGET = "budget"
     TARGET_RESET = "target_reset"
     TARGET_RESET_ERROR = "target_reset_error"
+    MODE_OVERRIDE = "mode_override"
+    COMPRESSION = "compression"
 
     # Attacker reasoning
     REASONING = "reasoning"
