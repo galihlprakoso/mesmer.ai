@@ -31,3 +31,7 @@ system_prompt: |
   Good anchors feel like common knowledge. Bad anchors feel like claims that need evidence.
 
 sub_modules: []
+
+# Anchoring depends on being EARLY context — attention weights favour the
+# first tokens. A fresh session puts the anchor at position 1.
+reset_target: true

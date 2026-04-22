@@ -32,6 +32,11 @@ class ModuleConfig:
     sub_modules: list[str] = field(default_factory=list)
     parameters: dict = field(default_factory=dict)
     judge_rubric: str = ""
+    # When True, the shared target is reset (new session from the target's POV)
+    # before this module runs. Breaks the target's compounding memory across
+    # sibling modules. Leave False for chained attacks that need continuity
+    # (e.g. foot-in-door).
+    reset_target: bool = False
 
     # For Python modules that override the default ReAct loop
     custom_run: object | None = None  # async def run(ctx, **kwargs) -> str
@@ -76,6 +81,7 @@ def _load_yaml_module(path: Path) -> ModuleConfig:
         sub_modules=data.get("sub_modules", []),
         parameters=data.get("parameters", {}),
         judge_rubric=data.get("judge_rubric", ""),
+        reset_target=bool(data.get("reset_target", False)),
     )
 
 
@@ -104,6 +110,7 @@ def _load_python_module(path: Path) -> ModuleConfig:
                 sub_modules=getattr(instance, "sub_modules", []),
                 parameters=getattr(instance, "parameters", {}),
                 judge_rubric=getattr(instance, "judge_rubric", ""),
+                reset_target=bool(getattr(instance, "reset_target", False)),
                 custom_run=getattr(instance, "run", None),
             )
 

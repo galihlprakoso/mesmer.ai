@@ -33,3 +33,7 @@ system_prompt: |
   6. Conclude with results
 
 sub_modules: []
+
+# Authority claims work best on a target that hasn't already seen sibling
+# modules get rebuffed — avoids priming the target to pattern-match.
+reset_target: true

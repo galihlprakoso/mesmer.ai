@@ -74,3 +74,51 @@ class TestJudgeRubricField:
         cfg = load_module_config(module_dir)
         assert cfg is not None
         assert cfg.judge_rubric == ""
+
+
+class TestResetTargetField:
+    def test_default_is_false(self):
+        m = ModuleConfig(name="x")
+        assert m.reset_target is False
+
+    def test_yaml_module_parses_reset_target_true(self, tmp_path):
+        module_dir = tmp_path / "fresh"
+        module_dir.mkdir()
+        (module_dir / "module.yaml").write_text(
+            "name: fresh\n"
+            "description: test\n"
+            "system_prompt: do stuff\n"
+            "reset_target: true\n"
+        )
+        cfg = load_module_config(module_dir)
+        assert cfg is not None
+        assert cfg.reset_target is True
+
+    def test_yaml_module_without_reset_target_defaults_false(self, tmp_path):
+        module_dir = tmp_path / "stateful"
+        module_dir.mkdir()
+        (module_dir / "module.yaml").write_text(
+            "name: stateful\n"
+            "description: test\n"
+            "system_prompt: do stuff\n"
+        )
+        cfg = load_module_config(module_dir)
+        assert cfg is not None
+        assert cfg.reset_target is False
+
+    def test_python_module_reads_reset_target_attribute(self, tmp_path):
+        module_dir = tmp_path / "pyreset"
+        module_dir.mkdir()
+        (module_dir / "module.py").write_text(textwrap.dedent("""
+            class PyReset:
+                name = "pyreset"
+                description = "py test"
+                theory = ""
+                system_prompt = "hi"
+                sub_modules: list = []
+                parameters: dict = {}
+                reset_target = True
+        """))
+        cfg = load_module_config(module_dir)
+        assert cfg is not None
+        assert cfg.reset_target is True

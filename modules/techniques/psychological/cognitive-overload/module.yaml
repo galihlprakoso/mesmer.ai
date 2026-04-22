@@ -40,3 +40,7 @@ system_prompt: |
   7. Conclude with what was extracted
 
 sub_modules: []
+
+# Burst attack — lands hardest on a target with no prior suspicion. Sibling
+# modules that already tripped defenses make the target skim every decoy.
+reset_target: true

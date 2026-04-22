@@ -160,9 +160,11 @@ class Context:
         human_broker: HumanQuestionBroker | None = None,
         plan: str | None = None,
         judge_rubric_additions: str = "",
+        target_fresh_session: bool = False,
         # Internal — set by child()
         _turns: list[Turn] | None = None,
         _module_log: list[ModuleRun] | None = None,
+        _target_reset_at: int = 0,
     ):
         self.target = target
         self.registry = registry
@@ -193,6 +195,17 @@ class Context:
         # Shared across parent/child — same list reference
         self.turns: list[Turn] = _turns if _turns is not None else []
         self.module_log: list[ModuleRun] = _module_log if _module_log is not None else []
+
+        # P0 — target memory reset tracking.
+        #   target_fresh_session: True when this module entered with a fresh
+        #       target session (target has no memory of prior turns). Drives
+        #       prompt framing in run_react_loop.
+        #   _target_reset_at: global turn index at which the most recent
+        #       target.reset() fired. format_turns() uses this to only show
+        #       turns from the target's current session, so the attacker LLM
+        #       doesn't hallucinate continuity the target can't actually see.
+        self.target_fresh_session: bool = target_fresh_session
+        self._target_reset_at: int = _target_reset_at
 
     @property
     def agent_model(self) -> str:
@@ -271,14 +284,37 @@ class Context:
         max_turns: int | None = None,
         log=None,
     ) -> str:
-        """Delegate to a sub-module with a scoped turn budget."""
+        """Delegate to a sub-module with a scoped turn budget.
+
+        When the sub-module declares ``reset_target: true`` in its YAML,
+        we reset the shared target BEFORE running it so the target sees a
+        fresh session. This breaks the target's compounding memory across
+        sibling modules — a well-defended target that would otherwise
+        accumulate "you've tried nine approaches" awareness now answers
+        each module as if it's the first interaction.
+        """
         from mesmer.core.loop import run_react_loop
 
         module = self.registry.get(name)
         if module is None:
             return f"Error: module '{name}' not found in registry"
 
-        child = self.child(max_turns=max_turns)
+        fresh_session = False
+        if module.reset_target:
+            try:
+                await self.target.reset()
+                self._target_reset_at = len(self.turns)
+                fresh_session = True
+                if log is not None:
+                    log("target_reset", f"Fresh target session for '{name}'")
+            except Exception as e:
+                # A reset failure shouldn't kill the run — log and continue
+                # with the existing session. The sub-module will still run
+                # but against a target that remembers everything.
+                if log is not None:
+                    log("target_reset_error", f"reset failed for '{name}': {e}")
+
+        child = self.child(max_turns=max_turns, target_fresh_session=fresh_session)
         result = await run_react_loop(module, child, instruction, log=log)
 
         self.module_log.append(
@@ -308,8 +344,18 @@ class Context:
             return "exploit"
         return "conclude"
 
-    def child(self, max_turns: int | None = None) -> Context:
-        """Create a child context — shares target + turns + graph, own budget."""
+    def child(
+        self,
+        max_turns: int | None = None,
+        target_fresh_session: bool = False,
+    ) -> Context:
+        """Create a child context — shares target + turns + graph, own budget.
+
+        ``target_fresh_session`` is passed through so the child's run_react_loop
+        can reframe its prompt: the target has no memory of prior turns, so
+        the attacker should treat sibling-module history as intel rather than
+        shared context with the target.
+        """
         return Context(
             target=self.target,
             registry=self.registry,
@@ -323,8 +369,10 @@ class Context:
             human_broker=self.human_broker, # broker shared
             plan=self.plan,                 # plan shared
             judge_rubric_additions=self.judge_rubric_additions,  # shared
+            target_fresh_session=target_fresh_session,
             _turns=self.turns,              # same list reference
             _module_log=self.module_log,    # shared log
+            _target_reset_at=self._target_reset_at,
         )
 
     async def ask_human(
@@ -362,6 +410,26 @@ class Context:
 
         lines = []
         for i, turn in enumerate(recent):
+            prefix = f"[{turn.module}] " if turn.module else ""
+            lines.append(f"{prefix}You: {turn.sent}")
+            lines.append(f"Target: {turn.received}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def format_session_turns(self, last_n: int = 10) -> str:
+        """Format turns from the target's CURRENT session only.
+
+        Excludes turns that happened before the most recent target.reset().
+        Use this when the attacker needs to see what the target actually
+        remembers — anything earlier has been wiped from the target's side.
+        """
+        session_turns = self.turns[self._target_reset_at:]
+        recent = session_turns[-last_n:] if session_turns else []
+        if not recent:
+            return "(no conversation in this target session yet)"
+
+        lines = []
+        for turn in recent:
             prefix = f"[{turn.module}] " if turn.module else ""
             lines.append(f"{prefix}You: {turn.sent}")
             lines.append(f"Target: {turn.received}")

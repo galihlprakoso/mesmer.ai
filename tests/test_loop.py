@@ -596,6 +596,87 @@ class TestPlanInjection:
 
 
 # ---------------------------------------------------------------------------
+# Fresh-session framing (P0)
+# ---------------------------------------------------------------------------
+
+class TestFreshSessionFraming:
+    """When ctx.target_fresh_session is True, the attacker LLM prompt must
+    clearly distinguish prior-intel from current-session state, and must not
+    mislead the attacker into treating the target as if it remembered old turns.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fresh_session_banner_injected(self):
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+            captured_messages=captured,
+        )
+        ctx.target_fresh_session = True
+        module = _make_module()
+
+        await run_react_loop(module, ctx, "test", log=None)
+
+        combined = "\n".join(
+            m.get("content", "") for m in captured[0] if m.get("role") == "user"
+        )
+        assert "Fresh target session" in combined
+
+    @pytest.mark.asyncio
+    async def test_fresh_session_reframes_prior_turns_as_intel(self):
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+            captured_messages=captured,
+        )
+        # Simulate prior sibling-module activity
+        await ctx.send("sibling probed earlier", module_name="sibling")
+        ctx.target_fresh_session = True
+        module = _make_module()
+
+        await run_react_loop(module, ctx, "test", log=None)
+
+        combined = "\n".join(
+            m.get("content", "") for m in captured[0] if m.get("role") == "user"
+        )
+        assert "Prior intel from sibling modules" in combined
+        # Must warn against referencing prior turns back to the target
+        assert "do NOT reference them" in combined
+        assert "Conversation so far:" not in combined
+
+    @pytest.mark.asyncio
+    async def test_default_still_shows_conversation_so_far(self):
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+            captured_messages=captured,
+        )
+        await ctx.send("prior exchange")
+        module = _make_module()
+
+        await run_react_loop(module, ctx, "test", log=None)
+
+        combined = "\n".join(
+            m.get("content", "") for m in captured[0] if m.get("role") == "user"
+        )
+        assert "Conversation so far:" in combined
+        assert "Fresh target session" not in combined
+        assert "Prior intel from sibling modules" not in combined
+
+
+# ---------------------------------------------------------------------------
 # TAP-aligned parent selection in _update_graph
 # ---------------------------------------------------------------------------
 

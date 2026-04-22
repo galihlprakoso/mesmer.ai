@@ -1,11 +1,12 @@
 """Tests for mesmer.core.context — Context, budget mode, message tracking."""
 
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
 from mesmer.core.context import Context, Turn, TurnBudgetExhausted
 from mesmer.core.graph import AttackGraph
+from mesmer.core.module import ModuleConfig
 from mesmer.core.scenario import AgentConfig
 
 
@@ -17,6 +18,7 @@ def _make_ctx(max_turns=None, graph=None):
     """Create a Context with mocked target and registry."""
     target = MagicMock()
     target.send = AsyncMock(return_value="target reply")
+    target.reset = AsyncMock(return_value=None)
 
     registry = MagicMock()
     agent_config = AgentConfig(model="test/model", api_key="sk-test")
@@ -174,3 +176,141 @@ class TestFormatting:
         assert "objective" in report
         assert "conversation" in report
         assert report["objective"] == "test objective"
+
+
+# ---------------------------------------------------------------------------
+# Target-reset / fresh-session (P0)
+# ---------------------------------------------------------------------------
+
+class TestTargetReset:
+    """Behavior around the `reset_target` module flag and the resulting
+    `target_fresh_session` signal the child context carries.
+    """
+
+    def test_default_flag_is_false(self):
+        ctx = _make_ctx()
+        assert ctx.target_fresh_session is False
+        assert ctx._target_reset_at == 0
+
+    def test_child_inherits_reset_marker(self):
+        ctx = _make_ctx()
+        ctx._target_reset_at = 5
+        child = ctx.child()
+        assert child._target_reset_at == 5
+        # Fresh-session flag defaults to False for plain child() — it's only
+        # set True when run_module decides a reset happened.
+        assert child.target_fresh_session is False
+
+    def test_child_accepts_fresh_session_flag(self):
+        ctx = _make_ctx()
+        child = ctx.child(target_fresh_session=True)
+        assert child.target_fresh_session is True
+
+    @pytest.mark.asyncio
+    async def test_run_module_resets_target_when_flag_set(self):
+        ctx = _make_ctx(max_turns=10)
+        module = ModuleConfig(
+            name="fresh-mod",
+            description="test",
+            reset_target=True,
+        )
+        ctx.registry.get = MagicMock(return_value=module)
+
+        await ctx.send("seed turn")
+        assert len(ctx.turns) == 1
+        assert ctx._target_reset_at == 0
+
+        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+            await ctx.run_module("fresh-mod", "do it")
+
+        ctx.target.reset.assert_awaited_once()
+        # Reset marker should advance to the turn count at the moment of reset.
+        assert ctx._target_reset_at == 1
+
+    @pytest.mark.asyncio
+    async def test_run_module_does_not_reset_when_flag_unset(self):
+        ctx = _make_ctx(max_turns=10)
+        module = ModuleConfig(
+            name="stateful-mod",
+            description="test",
+            reset_target=False,
+        )
+        ctx.registry.get = MagicMock(return_value=module)
+
+        await ctx.send("seed turn")
+
+        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+            await ctx.run_module("stateful-mod", "do it")
+
+        ctx.target.reset.assert_not_called()
+        assert ctx._target_reset_at == 0
+
+    @pytest.mark.asyncio
+    async def test_run_module_propagates_fresh_session_to_child(self):
+        ctx = _make_ctx(max_turns=10)
+        module = ModuleConfig(name="fresh-mod", description="t", reset_target=True)
+        ctx.registry.get = MagicMock(return_value=module)
+
+        observed = {}
+
+        async def _fake_loop(mod, child_ctx, instruction, **kwargs):
+            observed["fresh"] = child_ctx.target_fresh_session
+            observed["reset_at"] = child_ctx._target_reset_at
+            return "done"
+
+        with patch("mesmer.core.loop.run_react_loop", new=_fake_loop):
+            await ctx.run_module("fresh-mod", "do it")
+
+        assert observed["fresh"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_module_survives_reset_failure(self):
+        ctx = _make_ctx(max_turns=10)
+        module = ModuleConfig(name="fresh-mod", description="t", reset_target=True)
+        ctx.registry.get = MagicMock(return_value=module)
+        ctx.target.reset = AsyncMock(side_effect=RuntimeError("boom"))
+
+        observed = {}
+
+        async def _fake_loop(mod, child_ctx, instruction, **kwargs):
+            observed["fresh"] = child_ctx.target_fresh_session
+            return "done"
+
+        with patch("mesmer.core.loop.run_react_loop", new=_fake_loop):
+            result = await ctx.run_module("fresh-mod", "do it")
+
+        # Reset failure is non-fatal — module still runs, but without fresh flag.
+        assert result == "done"
+        assert observed["fresh"] is False
+
+
+class TestFormatSessionTurns:
+    def test_empty_when_no_turns(self):
+        ctx = _make_ctx()
+        assert ctx.format_session_turns() == "(no conversation in this target session yet)"
+
+    @pytest.mark.asyncio
+    async def test_excludes_pre_reset_turns(self):
+        ctx = _make_ctx(max_turns=10)
+        await ctx.send("old", module_name="prior")
+        await ctx.send("older", module_name="prior")
+        ctx._target_reset_at = len(ctx.turns)  # simulate reset
+        await ctx.send("new", module_name="current")
+
+        formatted = ctx.format_session_turns()
+        assert "new" in formatted
+        assert "old" not in formatted
+        assert "older" not in formatted
+
+    @pytest.mark.asyncio
+    async def test_format_turns_still_shows_all(self):
+        ctx = _make_ctx(max_turns=10)
+        await ctx.send("old")
+        ctx._target_reset_at = len(ctx.turns)
+        await ctx.send("new")
+
+        # The unfiltered helper still returns everything — it's the attacker's
+        # intel view, not the target's session view.
+        all_formatted = ctx.format_turns()
+        assert "old" in all_formatted
+        assert "new" in all_formatted
