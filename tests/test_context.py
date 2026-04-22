@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-from mesmer.core.context import Context, Turn, TurnBudgetExhausted
+from mesmer.core.context import Context, Turn, TurnBudgetExhausted, is_target_error
 from mesmer.core.graph import AttackGraph
 from mesmer.core.module import ModuleConfig
 from mesmer.core.scenario import AgentConfig
@@ -282,6 +282,59 @@ class TestTargetReset:
         # Reset failure is non-fatal — module still runs, but without fresh flag.
         assert result == "done"
         assert observed["fresh"] is False
+
+
+class TestTargetErrorDetection:
+    """P4 — is_target_error heuristic + Turn tagging in Context.send()."""
+
+    @pytest.mark.parametrize("reply,expected", [
+        ("", True),
+        ("   ", True),
+        (None, True),
+        ("(timeout — no response)", True),
+        ("I couldn't process that request.", True),
+        ("Internal Server Error", True),
+        ("Service unavailable", True),
+        ("bad gateway", True),
+        ("Gateway Timeout", True),
+        ("Rate limit exceeded", True),
+        ("Too Many Requests", True),
+        ("I cannot help with that request.", False),  # real refusal
+        ("Sure, here you go!", False),
+        ("I don't share my system prompt, sorry.", False),  # real refusal
+    ])
+    def test_is_target_error_classification(self, reply, expected):
+        assert is_target_error(reply) is expected
+
+    @pytest.mark.asyncio
+    async def test_send_tags_clean_reply_as_not_error(self):
+        ctx = _make_ctx(max_turns=5)
+        ctx.target.send = AsyncMock(return_value="a real reply")
+        await ctx.send("probe")
+        assert ctx.turns[-1].is_error is False
+
+    @pytest.mark.asyncio
+    async def test_send_tags_timeout_reply_as_error(self):
+        ctx = _make_ctx(max_turns=5)
+        ctx.target.send = AsyncMock(return_value="(timeout — no response)")
+        await ctx.send("probe")
+        assert ctx.turns[-1].is_error is True
+
+    @pytest.mark.asyncio
+    async def test_send_tags_empty_reply_as_error(self):
+        ctx = _make_ctx(max_turns=5)
+        ctx.target.send = AsyncMock(return_value="")
+        await ctx.send("probe")
+        assert ctx.turns[-1].is_error is True
+
+    def test_turn_is_error_default_false(self):
+        t = Turn(sent="hi", received="hello")
+        assert t.is_error is False
+
+    def test_turn_round_trip_preserves_is_error(self):
+        t = Turn(sent="hi", received="(timeout)", is_error=True)
+        data = t.to_dict()
+        assert data["is_error"] is True
 
 
 class TestFormatSessionTurns:

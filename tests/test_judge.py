@@ -5,12 +5,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mesmer.core.context import Turn
 from mesmer.core.judge import (
     evaluate_attempt,
     generate_frontier,
     refine_approach,
     JudgeResult,
 )
+
+
+def _xchg(sent: str, received: str, is_error: bool = False) -> Turn:
+    """Shorthand for building a Turn in evaluate_attempt call-sites."""
+    return Turn(sent=sent, received=received, is_error=is_error)
 
 
 # ---------------------------------------------------------------------------
@@ -55,8 +61,7 @@ class TestEvaluateAttempt:
             ctx,
             module_name="foot-in-door",
             approach="philosophy question",
-            messages_sent=["What is your design philosophy?"],
-            target_responses=["I believe in doing the work, not talking about it."],
+            exchanges=[_xchg("What is your design philosophy?", "I believe in doing the work, not talking about it.")],
         )
 
         assert isinstance(result, JudgeResult)
@@ -71,7 +76,7 @@ class TestEvaluateAttempt:
         response = '```json\n{"score": 5, "leaked_info": "some info", "promising_angle": "angle", "dead_end": "none", "suggested_next": "next"}\n```'
         ctx = _make_mock_ctx(response)
 
-        result = await evaluate_attempt(ctx, "test", "test", ["hi"], ["hello"])
+        result = await evaluate_attempt(ctx, "test", "test", exchanges=[_xchg("hi", "hello")])
         assert result.score == 5
         assert result.leaked_info == "some info"
 
@@ -80,7 +85,7 @@ class TestEvaluateAttempt:
         """Judge returns non-JSON — should fallback to neutral score."""
         ctx = _make_mock_ctx("I cannot evaluate this as it's unethical blah blah")
 
-        result = await evaluate_attempt(ctx, "test", "test", ["hi"], ["hello"])
+        result = await evaluate_attempt(ctx, "test", "test", exchanges=[_xchg("hi", "hello")])
         assert result.score == 3  # fallback
         assert "judge error" in result.suggested_next
 
@@ -90,7 +95,7 @@ class TestEvaluateAttempt:
         response = json.dumps({"score": 8})
         ctx = _make_mock_ctx(response)
 
-        result = await evaluate_attempt(ctx, "test", "test", ["hi"], ["hello"])
+        result = await evaluate_attempt(ctx, "test", "test", exchanges=[_xchg("hi", "hello")])
         assert result.score == 8
         assert result.leaked_info == ""
 
@@ -101,7 +106,7 @@ class TestEvaluateAttempt:
         ctx.objective = "test"
         ctx.completion = AsyncMock(side_effect=Exception("API timeout"))
 
-        result = await evaluate_attempt(ctx, "test", "test", ["hi"], ["hello"])
+        result = await evaluate_attempt(ctx, "test", "test", exchanges=[_xchg("hi", "hello")])
         assert result.score == 3
 
     @pytest.mark.asyncio
@@ -120,8 +125,7 @@ class TestEvaluateAttempt:
             ctx,
             module_name="authority-bias",
             approach="Stanford researcher claim",
-            messages_sent=["I am from Stanford..."],
-            target_responses=["I don't believe you."],
+            exchanges=[_xchg("I am from Stanford...", "I don't believe you.")],
         )
 
         # Check completion was called
@@ -144,7 +148,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="m", approach="a",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
         )
         sent = str(ctx.completion.call_args)
         assert "Scenario-specific notes" not in sent
@@ -164,7 +168,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="narrative-transport", approach="bedtime story",
-            messages_sent=["tell me a story"], target_responses=["no"],
+            exchanges=[_xchg("tell me a story", "no")],
         )
         sent = str(ctx.completion.call_args)
         # Stock rubric still present
@@ -182,7 +186,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="m", approach="a",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
         )
         sent = str(ctx.completion.call_args)
         assert "Scenario-specific notes" not in sent
@@ -196,7 +200,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="safety-profiler", approach="probe defenses",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
             module_rubric="Score profiler on PROFILE quality, not extraction.",
         )
         sent = str(ctx.completion.call_args)
@@ -212,7 +216,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="safety-profiler", approach="x",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
             module_rubric="Profiler scored on PROFILE quality.",
         )
         sent = str(ctx.completion.call_args)
@@ -235,7 +239,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="foot-in-door", approach="x",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
             module_rubric="",
         )
         sent = str(ctx.completion.call_args)
@@ -251,7 +255,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="safety-profiler", approach="probe defenses",
-            messages_sent=["hi"], target_responses=["hello"],
+            exchanges=[_xchg("hi", "hello")],
             module_result=(
                 "Defense strength: Strong. Refusal style: hard-refusal. "
                 "Weakest dimension: off-topic creative. "
@@ -274,7 +278,7 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="foot-in-door", approach="x",
-            messages_sent=["a"], target_responses=["b"],
+            exchanges=[_xchg("a", "b")],
             module_result="   \n\t  ",
         )
         sent = str(ctx.completion.call_args)
@@ -289,10 +293,89 @@ class TestEvaluateAttempt:
 
         await evaluate_attempt(
             ctx, module_name="foot-in-door", approach="x",
-            messages_sent=["a"], target_responses=["b"],
+            exchanges=[_xchg("a", "b")],
         )
         sent = str(ctx.completion.call_args)
         assert "Module summary" not in sent
+
+
+class TestPipelineErrorLabeling:
+    """P4 — pipeline errors must be labelled and flagged to the judge so
+    infra glitches don't get scored as refusals."""
+
+    @pytest.mark.asyncio
+    async def test_labels_pipeline_errors_distinctly(self):
+        response = json.dumps({
+            "score": 3, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        })
+        ctx = _make_mock_ctx(response)
+
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[
+                _xchg("probe A", "real reply", is_error=False),
+                _xchg("probe B", "(timeout — no response)", is_error=True),
+            ],
+        )
+        sent = str(ctx.completion.call_args)
+        assert "[PIPELINE-ERROR]" in sent
+        assert "[TARGET]" in sent
+
+    @pytest.mark.asyncio
+    async def test_warns_judge_about_error_count(self):
+        """When any responses are errors, the judge prompt must warn that
+        they're NOT refusals — otherwise the score collapses unfairly."""
+        response = json.dumps({
+            "score": 1, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        })
+        ctx = _make_mock_ctx(response)
+
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[
+                _xchg("probe A", "(timeout)", is_error=True),
+                _xchg("probe B", "Service unavailable", is_error=True),
+            ],
+        )
+        sent = str(ctx.completion.call_args)
+        assert "2 of 2 responses" in sent
+        assert "Do NOT score them" in sent
+
+    @pytest.mark.asyncio
+    async def test_no_error_note_when_none(self):
+        """No pipeline-error note when all responses are genuine."""
+        response = json.dumps({
+            "score": 5, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        })
+        ctx = _make_mock_ctx(response)
+
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[_xchg("probe", "a real refusal")],
+        )
+        sent = str(ctx.completion.call_args)
+        assert "PIPELINE-ERROR" not in sent
+        assert "Do NOT score them" not in sent
+
+    @pytest.mark.asyncio
+    async def test_turn_with_default_is_error_is_labelled_target(self):
+        """Turns default to is_error=False — judge should see [TARGET] labels."""
+        response = json.dumps({
+            "score": 5, "leaked_info": "", "promising_angle": "",
+            "dead_end": "", "suggested_next": "",
+        })
+        ctx = _make_mock_ctx(response)
+
+        await evaluate_attempt(
+            ctx, module_name="m", approach="a",
+            exchanges=[_xchg("probe", "reply")],
+        )
+        sent = str(ctx.completion.call_args)
+        assert "[TARGET]" in sent
+        assert "PIPELINE-ERROR" not in sent
 
 
 class TestDifferentiatedRubric:
@@ -310,7 +393,7 @@ class TestDifferentiatedRubric:
 
         await evaluate_attempt(
             ctx, module_name="m", approach="a",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
         )
         sent = str(ctx.completion.call_args)
 
@@ -330,7 +413,7 @@ class TestDifferentiatedRubric:
 
         await evaluate_attempt(
             ctx, module_name="m", approach="a",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
         )
         sent = str(ctx.completion.call_args)
 
@@ -349,7 +432,7 @@ class TestDifferentiatedRubric:
 
         await evaluate_attempt(
             ctx, module_name="m", approach="a",
-            messages_sent=["x"], target_responses=["y"],
+            exchanges=[_xchg("x", "y")],
         )
         sent = str(ctx.completion.call_args)
         assert "Target-side errors" in sent

@@ -23,7 +23,7 @@ from mesmer.core.constants import (
 from mesmer.core.context import TurnBudgetExhausted
 
 if TYPE_CHECKING:
-    from mesmer.core.context import Context
+    from mesmer.core.context import Context, Turn
     from mesmer.core.graph import AttackGraph
     from mesmer.core.module import ModuleConfig
 
@@ -506,7 +506,22 @@ async def run_react_loop(
                 try:
                     reply = await ctx.send(message_text, module_name=module.name)
                     log(LogEvent.RECV.value, f"← {reply[:150]}")
-                    tool_result = f"Target replied: {reply}" + _budget_suffix(ctx)
+                    # Distinguish a pipeline error from a real reply — scoring
+                    # an infra glitch as a refusal inflates dead-ends (P4).
+                    last_turn = ctx.turns[-1] if ctx.turns else None
+                    if last_turn is not None and last_turn.is_error:
+                        log(LogEvent.SEND_ERROR.value, f"pipeline error: {reply[:100]}")
+                        tool_result = (
+                            f"Target-side pipeline error: {reply!r}. "
+                            "The target did NOT refuse — its infrastructure "
+                            "glitched (timeout / gateway / rate-limit). "
+                            "Treat this send as wasted: the technique never "
+                            "landed. Consider a shorter retry or conclude if "
+                            "the error persists."
+                            + _budget_suffix(ctx)
+                        )
+                    else:
+                        tool_result = f"Target replied: {reply}" + _budget_suffix(ctx)
                 except TurnBudgetExhausted:
                     log(LogEvent.BUDGET.value, "Turn budget exhausted")
                     tool_result = (
@@ -573,7 +588,7 @@ async def run_react_loop(
                 missed_frontier = _find_missed_frontier(ctx.graph, fn_name, frontier_id)
 
                 log(
-                    "delegate",
+                    LogEvent.DELEGATE.value,
                     f"→ {fn_name} (max_turns={sub_max_turns})"
                     + (f" [frontier={frontier_id}]" if frontier_id else "")
                 )
@@ -586,23 +601,25 @@ async def run_react_loop(
                 log(LogEvent.DELEGATE_DONE.value, f"← {fn_name}: {result[:150]}")
 
                 # Collect messages from turns added during this delegation
-                # (turns list is shared between parent and child)
-                sub_messages = [t.sent for t in ctx.turns[turns_before:]]
-                sub_responses = [t.received for t in ctx.turns[turns_before:]]
+                # (turns list is shared between parent and child). Track
+                # per-turn error flags so the judge can ignore pipeline
+                # glitches (P4).
+                sub_turns = ctx.turns[turns_before:]
 
                 # --- Judge the attempt ---
                 judge_result = await _judge_module_result(
                     ctx, fn_name, approach, log,
-                    messages_sent=sub_messages,
-                    target_responses=sub_responses,
+                    exchanges=sub_turns,
                     module_result=result,
                 )
 
                 # --- Update graph ---
+                # The graph stores plain strings on AttackNode for JSON-friendliness
+                # — the is_error flag lives on ctx.turns itself, not on the node.
                 current_node = _update_graph(
                     ctx, fn_name, approach, judge_result, log,
-                    messages_sent=sub_messages,
-                    target_responses=sub_responses,
+                    messages_sent=[t.sent for t in sub_turns],
+                    target_responses=[t.received for t in sub_turns],
                     frontier_id=frontier_id,
                 )
 
@@ -664,24 +681,23 @@ async def _judge_module_result(
     approach: str,
     log: LogFn,
     *,
-    messages_sent: list[str] | None = None,
-    target_responses: list[str] | None = None,
+    exchanges: "list[Turn] | None" = None,
     module_result: str = "",
 ):
-    """Run the judge on the messages exchanged during a sub-module.
+    """Run the judge on the exchanges produced during a sub-module.
 
-    messages_sent/target_responses are passed explicitly because the child
-    context tracks its own messages — the parent ctx doesn't see them.
+    ``exchanges`` is the slice of ``ctx.turns`` added by the delegated
+    sub-module. Passing Turn objects directly preserves the ``is_error``
+    flag (P4) without a parallel side-list.
 
     ``module_result`` is the sub-module's ``conclude()`` text. For modules
     whose artifact lives in the conclude (e.g. safety-profiler's defense
     profile), the probe messages alone are insufficient to score — the
     judge also needs the summary the module produced.
     """
-    msgs = messages_sent or []
-    resps = target_responses or []
+    turns = exchanges or []
 
-    if not msgs:
+    if not turns:
         log(LogEvent.JUDGE.value, f"Skipping judge — no messages exchanged in {module_name}")
         return None
 
@@ -692,14 +708,19 @@ async def _judge_module_result(
     module = ctx.registry.get(module_name) if ctx.registry else None
     module_rubric = getattr(module, "judge_rubric", "") if module else ""
 
-    log(LogEvent.JUDGE.value, f"Evaluating {module_name} ({len(msgs)} messages)...")
+    err_count = sum(1 for t in turns if t.is_error)
+    log(
+        LogEvent.JUDGE.value,
+        f"Evaluating {module_name} ({len(turns)} messages"
+        + (f", {err_count} pipeline errors" if err_count else "")
+        + ")..."
+    )
     try:
         result = await evaluate_attempt(
             ctx,
             module_name=module_name,
             approach=approach,
-            messages_sent=msgs,
-            target_responses=resps,
+            exchanges=turns,
             module_rubric=module_rubric,
             module_result=module_result,
         )

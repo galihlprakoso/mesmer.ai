@@ -731,6 +731,38 @@ class TestFreshSessionFraming:
         assert "4/5 sends remaining" in joined
 
     @pytest.mark.asyncio
+    async def test_pipeline_error_not_framed_as_refusal(self):
+        """When the target emits a timeout/gateway error, the tool_result
+        must NOT say 'Target replied' — that misleads the attacker into
+        thinking the technique failed when it never landed (P4)."""
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("send_message", {"message": "probe 1"})]
+                )),
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "done"})]
+                )),
+            ],
+            target_replies=["(timeout — no response)"],
+            max_turns=5,
+            captured_messages=captured,
+        )
+        module = _make_module()
+        await run_react_loop(module, ctx, "test", log=None)
+
+        tool_results = [
+            m.get("content", "") for m in captured[1] if m.get("role") == "tool"
+        ]
+        joined = "\n".join(tool_results)
+        assert "Target-side pipeline error" in joined
+        assert "did NOT refuse" in joined
+        # Must not fall back to the "Target replied:" wording used for real
+        # responses — that's the exact misframing P4 eliminates.
+        assert "Target replied:" not in joined
+
+    @pytest.mark.asyncio
     async def test_send_tool_result_last_shot_warning(self):
         """When exactly 1 send remains, the tool_result must flag that
         loudly — not just as a number."""

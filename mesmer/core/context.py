@@ -11,10 +11,28 @@ from typing import TYPE_CHECKING, Callable
 from mesmer.core.constants import (
     BUDGET_EXPLOIT_UPPER_RATIO,
     BUDGET_EXPLORE_UPPER_RATIO,
+    TARGET_ERROR_MARKERS,
     BudgetMode,
     ContextMode,
     LogEvent,
 )
+
+
+def is_target_error(reply: str) -> bool:
+    """Classify a target reply as a pipeline error vs a genuine response.
+
+    Conservative: empty/whitespace-only replies, and replies whose
+    lower-cased text contains any :data:`TARGET_ERROR_MARKERS` substring.
+    Anything else is treated as a legitimate target response — even if
+    it looks like a refusal, a refusal is real target behaviour.
+    """
+    if reply is None:
+        return True
+    s = reply.strip()
+    if not s:
+        return True
+    lowered = s.lower()
+    return any(marker in lowered for marker in TARGET_ERROR_MARKERS)
 
 if TYPE_CHECKING:
     from mesmer.core.graph import AttackGraph
@@ -114,6 +132,11 @@ class Turn:
     received: str
     module: str = ""
     timestamp: float = field(default_factory=time.time)
+    # P4 — True when ``received`` looks like a target-side pipeline error
+    # (timeout, gateway 5xx, rate-limit bounce, empty response), not a
+    # real reply from the target model. Judge and tool-result formatting
+    # use this to avoid scoring an error as a refusal.
+    is_error: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -121,6 +144,7 @@ class Turn:
             "received": self.received,
             "module": self.module,
             "timestamp": self.timestamp,
+            "is_error": self.is_error,
         }
 
 
@@ -264,12 +288,22 @@ class Context:
         return await litellm.acompletion(**kwargs)
 
     async def send(self, message: str, module_name: str = "") -> str:
-        """Send a message to the target. Respects turn budget."""
+        """Send a message to the target. Respects turn budget.
+
+        Pipeline errors (timeouts, gateway 5xx, rate-limit bounces, empty
+        replies) are tagged on the resulting Turn as ``is_error=True`` so
+        the attacker LLM and judge can distinguish them from genuine target
+        refusals. The reply string is still returned unchanged — callers
+        that care about the distinction read ``ctx.turns[-1].is_error``.
+        """
         if self.turn_budget is not None and self.turns_used >= self.turn_budget:
             raise TurnBudgetExhausted(self.turns_used)
 
         reply = await self.target.send(message)
-        self.turns.append(Turn(sent=message, received=reply, module=module_name))
+        error = is_target_error(reply)
+        self.turns.append(
+            Turn(sent=message, received=reply, module=module_name, is_error=error)
+        )
         self.turns_used += 1
 
         # Track for judge evaluation
