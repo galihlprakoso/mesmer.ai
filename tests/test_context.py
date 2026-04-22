@@ -337,6 +337,75 @@ class TestTargetErrorDetection:
         assert data["is_error"] is True
 
 
+class TestAttackerModelRotation:
+    """P5 — attacker-model ensemble rotation via ctx.run_module(), and the
+    judge model staying stable regardless of the attacker rotation."""
+
+    def _make_ensemble_ctx(self, models, judge_model=""):
+        target = MagicMock()
+        target.send = AsyncMock(return_value="ok")
+        target.reset = AsyncMock(return_value=None)
+        registry = MagicMock()
+        agent_config = AgentConfig(models=models, judge_model=judge_model, api_key="sk")
+        return Context(
+            target=target, registry=registry, agent_config=agent_config,
+            objective="o", run_id="r",
+        )
+
+    def test_agent_model_returns_override_first(self):
+        ctx = self._make_ensemble_ctx(["a", "b"])
+        ctx.attacker_model_override = "b"
+        assert ctx.agent_model == "b"
+
+    def test_agent_model_falls_back_to_config(self):
+        ctx = self._make_ensemble_ctx(["a", "b"])
+        assert ctx.agent_model == "a"  # config's current base
+
+    def test_resolve_model_attacker_uses_override(self):
+        ctx = self._make_ensemble_ctx(["a", "b"])
+        ctx.attacker_model_override = "b"
+        assert ctx._resolve_model("attacker") == "b"
+
+    def test_resolve_model_judge_ignores_override(self):
+        """Judge role must use judge_model (or config.model), never the
+        attacker override — stops the judge from drifting with rotation."""
+        ctx = self._make_ensemble_ctx(["a", "b", "c"], judge_model="judge-x")
+        ctx.attacker_model_override = "b"
+        assert ctx._resolve_model("judge") == "judge-x"
+
+    def test_child_inherits_override_when_not_overridden_again(self):
+        ctx = self._make_ensemble_ctx(["a", "b"])
+        ctx.attacker_model_override = "b"
+        child = ctx.child()
+        assert child.attacker_model_override == "b"
+
+    def test_child_accepts_explicit_override(self):
+        ctx = self._make_ensemble_ctx(["a", "b"])
+        child = ctx.child(attacker_model_override="b")
+        assert child.attacker_model_override == "b"
+
+    @pytest.mark.asyncio
+    async def test_run_module_rotates_and_binds_child(self):
+        """Running a sub-module advances the rotation and binds the chosen
+        model onto the child context."""
+        ctx = self._make_ensemble_ctx(["a", "b", "c"])
+        module = ModuleConfig(name="mod", description="t")
+        ctx.registry.get = MagicMock(return_value=module)
+
+        observed = []
+
+        async def _fake_loop(mod, child_ctx, instruction, **kwargs):
+            observed.append(child_ctx.attacker_model_override)
+            return "done"
+
+        with patch("mesmer.core.loop.run_react_loop", new=_fake_loop):
+            await ctx.run_module("mod", "do")
+            await ctx.run_module("mod", "do")
+            await ctx.run_module("mod", "do")
+
+        assert observed == ["a", "b", "c"]
+
+
 class TestFormatSessionTurns:
     def test_empty_when_no_turns(self):
         ctx = _make_ctx()

@@ -47,10 +47,29 @@ class TargetConfig:
 
 @dataclass
 class AgentConfig:
-    """Agent (attacker brain) configuration — fully declarative."""
+    """Agent (attacker brain) configuration — fully declarative.
+
+    Two models live here:
+
+      1. ``model`` / ``models`` — the *attacker* brain. A scenario can declare
+         a single ``model`` or an ``models`` ensemble. When an ensemble is
+         set, :meth:`next_attacker_model` rotates through it round-robin so
+         different sub-modules get different base models — cheap diversity
+         without rewriting the framework.
+      2. ``judge_model`` — the evaluator model. Kept stable across the run
+         so scoring doesn't drift with the attacker rotation. Defaults to
+         the first attacker model when unset.
+    """
 
     # LiteLLM model string: "openrouter/model", "anthropic/model", "openai/model", etc.
     model: str = "openrouter/anthropic/claude-sonnet-4-20250514"
+    # Optional ensemble. When non-empty, ``model`` is overwritten by the first
+    # entry on __post_init__ and next_attacker_model() cycles through the list.
+    models: list[str] = field(default_factory=list)
+    # Model used by the judge / refinement LLM calls. Empty → falls back to
+    # the attacker model. Keeping this separate stops the judge from drifting
+    # with the attacker rotation.
+    judge_model: str = ""
     api_key: str = ""          # resolved from ${ENV_VAR} — supports comma-separated for rotation
     api_base: str = ""         # optional: custom endpoint
     temperature: float = 0.7
@@ -61,9 +80,22 @@ class AgentConfig:
     # Internal — populated from api_key if comma-separated
     _keys: list[str] = field(default_factory=list, repr=False)
     _pool: "object | None" = field(default=None, repr=False)
+    # Internal — round-robin cursor into ``models``.
+    _attacker_idx: int = field(default=0, repr=False)
 
     def __post_init__(self):
-        """Parse comma-separated api_key into rotation list + build KeyPool."""
+        """Parse comma-separated api_key into rotation list + build KeyPool.
+
+        When ``models`` is non-empty, ``model`` is reset to ``models[0]`` so
+        the two settings stay in sync — callers may still read ``model`` to
+        get the current attacker brain.
+        """
+        if self.models:
+            # Normalise: strip whitespace, drop empties.
+            self.models = [m.strip() for m in self.models if m and m.strip()]
+            if self.models:
+                self.model = self.models[0]
+
         if self.api_key and "," in self.api_key:
             self._keys = [k.strip() for k in self.api_key.split(",") if k.strip()]
             self.api_key = self._keys[0]  # set first as default
@@ -93,6 +125,35 @@ class AgentConfig:
     @property
     def key_count(self) -> int:
         return len(self._keys)
+
+    # --- attacker-model rotation (P5) ---
+
+    def next_attacker_model(self) -> str:
+        """Return the next attacker model, round-robin over ``models``.
+
+        When the ensemble is empty, always returns ``model`` (the single
+        attacker case) — callers can invoke this unconditionally without
+        branching on ensemble existence.
+        """
+        if not self.models:
+            return self.model
+        chosen = self.models[self._attacker_idx % len(self.models)]
+        self._attacker_idx += 1
+        return chosen
+
+    @property
+    def effective_judge_model(self) -> str:
+        """Model to use for judge / refinement LLM calls.
+
+        Falls back to the attacker model when ``judge_model`` is unset —
+        preserves single-model behaviour for scenarios that don't opt into
+        the separation.
+        """
+        return self.judge_model or self.model
+
+    @property
+    def ensemble_size(self) -> int:
+        return len(self.models)
 
 
 @dataclass
@@ -180,6 +241,8 @@ def load_scenario(path: str | Path) -> Scenario:
 
     agent = AgentConfig(
         model=agent_data.get("model", "openrouter/anthropic/claude-sonnet-4-20250514"),
+        models=list(agent_data.get("models", []) or []),
+        judge_model=str(agent_data.get("judge_model", "") or ""),
         api_key=agent_data.get("api_key", ""),
         api_base=agent_data.get("api_base", ""),
         temperature=agent_data.get("temperature", 0.7),

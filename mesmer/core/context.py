@@ -193,6 +193,7 @@ class Context:
         plan: str | None = None,
         judge_rubric_additions: str = "",
         target_fresh_session: bool = False,
+        attacker_model_override: str = "",
         # Internal — set by child()
         _turns: list[Turn] | None = None,
         _module_log: list[ModuleRun] | None = None,
@@ -239,14 +240,46 @@ class Context:
         self.target_fresh_session: bool = target_fresh_session
         self._target_reset_at: int = _target_reset_at
 
+        # P5 — when a scenario declares an attacker-model ensemble, each
+        # child context is bound to a specific model chosen round-robin by
+        # ctx.run_module(). Empty string means "use agent_config.model".
+        # The judge role (see completion(role="judge")) bypasses this and
+        # always uses agent_config.effective_judge_model.
+        self.attacker_model_override: str = attacker_model_override
+
     @property
     def agent_model(self) -> str:
-        return self.agent_config.model
+        """Currently-bound attacker model (rotation override wins)."""
+        return self.attacker_model_override or self.agent_config.model
 
-    async def completion(self, messages: list[dict], tools: list[dict] | None = None):
+    def _resolve_model(self, role: str) -> str:
+        """Pick the model to use for an LLM call based on its role.
+
+        - ``attacker`` (default): the rotation-assigned attacker model if
+          bound on this context, otherwise the config's base attacker model.
+        - ``judge``: the scenario's judge model (stable across rotation).
+
+        Unknown roles are treated as attacker for forward-compat.
+        """
+        if role == "judge":
+            return self.agent_config.effective_judge_model
+        return self.attacker_model_override or self.agent_config.model
+
+    async def completion(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        *,
+        role: str = "attacker",
+    ):
         """
         Call the LLM via litellm. Returns an OpenAI-compatible response.
         Supports any provider: openrouter/, anthropic/, openai/, gemini/, etc.
+
+        ``role`` picks which model to use (see :meth:`_resolve_model`).
+        Keep it ``"attacker"`` for ReAct-loop LLM calls; pass ``"judge"``
+        from judge/refinement code so scoring doesn't drift with the
+        attacker-model rotation.
 
         Side effect: `self._last_key_used` is set to whichever API key was
         selected for this call (or "" when none). The retry loop reads it
@@ -258,7 +291,7 @@ class Context:
         litellm.suppress_debug_info = True
 
         kwargs: dict = {
-            "model": self.agent_config.model,
+            "model": self._resolve_model(role),
             "messages": messages,
             "temperature": self.agent_config.temperature,
         }
@@ -356,7 +389,15 @@ class Context:
                 if log is not None:
                     log(LogEvent.TARGET_RESET_ERROR.value, f"reset failed for '{name}': {e}")
 
-        child = self.child(max_turns=max_turns, target_fresh_session=fresh_session)
+        # P5 — rotate the attacker model round-robin when an ensemble is
+        # declared. No-op (returns the single model) otherwise.
+        chosen_model = self.agent_config.next_attacker_model()
+
+        child = self.child(
+            max_turns=max_turns,
+            target_fresh_session=fresh_session,
+            attacker_model_override=chosen_model,
+        )
         result = await run_react_loop(module, child, instruction, log=log)
 
         self.module_log.append(
@@ -390,6 +431,7 @@ class Context:
         self,
         max_turns: int | None = None,
         target_fresh_session: bool = False,
+        attacker_model_override: str = "",
     ) -> Context:
         """Create a child context — shares target + turns + graph, own budget.
 
@@ -397,6 +439,10 @@ class Context:
         can reframe its prompt: the target has no memory of prior turns, so
         the attacker should treat sibling-module history as intel rather than
         shared context with the target.
+
+        ``attacker_model_override`` binds the child to a specific attacker
+        model (used for MODEL ensemble rotation). Empty string means inherit
+        the parent's override (or the config's base model if no override).
         """
         return Context(
             target=self.target,
@@ -412,6 +458,7 @@ class Context:
             plan=self.plan,                 # plan shared
             judge_rubric_additions=self.judge_rubric_additions,  # shared
             target_fresh_session=target_fresh_session,
+            attacker_model_override=attacker_model_override or self.attacker_model_override,
             _turns=self.turns,              # same list reference
             _module_log=self.module_log,    # shared log
             _target_reset_at=self._target_reset_at,
