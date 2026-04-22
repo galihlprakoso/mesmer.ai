@@ -100,7 +100,7 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
         f"Module: {scenario.module}\n"
         f"Agent: {scenario.agent.model}\n"
         f"Objective: {scenario.objective.goal}",
-        title="[bold magenta]mesmer v2[/bold magenta]",
+        title="[bold magenta]mesmer v1[/bold magenta]",
         border_style="magenta",
     ))
 

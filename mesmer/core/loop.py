@@ -1,6 +1,6 @@
 """The universal ReAct loop — runs every module.
 
-v2: Plan → Execute → Judge → Reflect → Update cycle with attack graph.
+Plan → Execute → Judge → Reflect → Update cycle with attack graph.
 """
 
 from __future__ import annotations
@@ -359,7 +359,7 @@ async def run_react_loop(
     The universal ReAct loop. Runs any module — simple or complex,
     YAML or Python. This is the entire framework runtime.
 
-    v2 enhancements:
+    Features:
     - Graph context injection (anti-repetition, frontier, budget mode)
     - Judge evaluation after sub-module delegation
     - Reflection + frontier generation after judge
@@ -411,7 +411,7 @@ async def run_react_loop(
             "## Attack Plan (from human operator — follow this guidance)\n" + ctx.plan.strip()
         )
 
-    # v2: Inject graph context
+    # Inject graph context
     graph_context = _build_graph_context(ctx)
     if graph_context:
         user_content_parts.append(f"## Attack Intelligence\n{graph_context}")
@@ -631,7 +631,7 @@ async def run_react_loop(
                     ))
 
             elif fn_name in ctx.registry:
-                # --- v2: Delegate to sub-module with judge + reflect ---
+                # --- Delegate to sub-module with judge + reflect ---
                 sub_instruction = args.get("instruction", instruction)
                 sub_max_turns = args.get("max_turns")
                 # Leader may pass frontier_id to indicate this attempt is
@@ -729,7 +729,7 @@ async def run_react_loop(
 
 
 # ---------------------------------------------------------------------------
-# v2 helpers: Judge + Reflect + Graph update
+# Judge + Reflect + Graph update helpers
 # ---------------------------------------------------------------------------
 
 def _format_prior_turns_for_judge(prior_turns: list, last_n: int = 6) -> str:
