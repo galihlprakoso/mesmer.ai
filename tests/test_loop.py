@@ -7,9 +7,11 @@ import pytest
 
 from mesmer.core.context import Context, TurnBudgetExhausted
 from mesmer.core.graph import AttackGraph
+from mesmer.core.judge import JudgeResult
 from mesmer.core.loop import (
     run_react_loop,
     _build_graph_context,
+    _reflect_and_expand,
     _update_graph,
     _find_missed_frontier,
 )
@@ -858,3 +860,148 @@ class TestFindMissedFrontier:
         assert missed is not None
         # Whichever comes first — but must be a foot-in-door
         assert missed.module == "foot-in-door"
+
+
+# ---------------------------------------------------------------------------
+# Graph-first frontier flow (P2)
+# ---------------------------------------------------------------------------
+
+class TestReflectAndExpandGraphFirst:
+    """Integration check: _reflect_and_expand must route through
+    graph.propose_frontier (deterministic MCTS Selection) + judge.refine_approach
+    (LLM writes approach for a graph-chosen module), not through the pre-P2
+    generate_frontier that asked the LLM to pick the module itself.
+    """
+
+    @pytest.mark.asyncio
+    async def test_frontier_modules_come_from_graph_proposal(self):
+        """The modules attached to new frontier nodes must be the ones the
+        graph proposed — refine_approach never picks modules, only strings.
+        """
+        ctx = _make_ctx()
+        graph = ctx.graph
+        # Seed a non-dead current node to reflect on.
+        current_node = graph.add_node(
+            graph.root_id, "foot-in-door", "initial foothold prior attempt",
+            score=5,
+        )
+        judge = JudgeResult(
+            score=5, leaked_info="won't send msgs",
+            promising_angle="rule enumeration",
+            dead_end="identity claim",
+            suggested_next="ask about tools",
+        )
+
+        # Stub refine_approach to always return a fixed string — this isolates
+        # the module-selection logic from the LLM call.
+        async def fake_refine(ctx, *, module, rationale, judge_result):
+            return f"refined-for-{module}"
+
+        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+            await _reflect_and_expand(
+                ctx, "foot-in-door", "initial foothold", judge,
+                current_node, log=lambda *a, **kw: None,
+                available_modules=["authority-bias", "anchoring", "foot-in-door"],
+            )
+
+        new_frontiers = [
+            n for n in graph.iter_nodes()
+            if n.status == "frontier" and n.parent_id == current_node.id
+        ]
+        modules = {n.module for n in new_frontiers}
+        # Untried modules prioritized — anchoring and authority-bias both untried.
+        assert "authority-bias" in modules
+        assert "anchoring" in modules
+        # All approach strings come from refine_approach (not copy-pasted from LLM).
+        assert all(n.approach.startswith("refined-for-") for n in new_frontiers)
+
+    @pytest.mark.asyncio
+    async def test_dead_modules_excluded_from_frontier(self):
+        """A module whose every prior attempt is dead must not reappear as
+        a frontier suggestion."""
+        ctx = _make_ctx()
+        graph = ctx.graph
+        # authority-bias has two dead attempts.
+        graph.add_node(
+            graph.root_id, "authority-bias", "angle one words plenty",
+            score=1, reflection="detected",
+        )
+        graph.add_node(
+            graph.root_id, "authority-bias", "angle two words plenty",
+            score=2, reflection="rebuffed",
+        )
+        # foot-in-door has a live attempt.
+        current_node = graph.add_node(
+            graph.root_id, "foot-in-door", "current angle words plenty",
+            score=5,
+        )
+        judge = JudgeResult(5, "", "", "", "")
+
+        async def fake_refine(ctx, *, module, rationale, judge_result):
+            return f"refined-{module}"
+
+        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+            await _reflect_and_expand(
+                ctx, "foot-in-door", "x", judge, current_node,
+                log=lambda *a, **kw: None,
+                available_modules=["authority-bias", "foot-in-door", "anchoring"],
+            )
+
+        new_frontiers = [
+            n for n in graph.iter_nodes()
+            if n.status == "frontier" and n.parent_id == current_node.id
+        ]
+        modules = {n.module for n in new_frontiers}
+        assert "authority-bias" not in modules
+        # anchoring is untried → guaranteed in the top-3.
+        assert "anchoring" in modules
+
+    @pytest.mark.asyncio
+    async def test_no_expansion_when_available_modules_empty(self):
+        ctx = _make_ctx()
+        graph = ctx.graph
+        current_node = graph.add_node(
+            graph.root_id, "x", "current angle words plenty", score=5,
+        )
+        judge = JudgeResult(5, "", "", "", "")
+
+        await _reflect_and_expand(
+            ctx, "x", "a", judge, current_node,
+            log=lambda *a, **kw: None,
+            available_modules=[],
+        )
+        new_frontiers = [
+            n for n in graph.iter_nodes()
+            if n.status == "frontier" and n.parent_id == current_node.id
+        ]
+        assert new_frontiers == []
+
+    @pytest.mark.asyncio
+    async def test_empty_refine_falls_back_to_rationale(self):
+        """If the LLM returns an empty approach string, the frontier slot
+        should still be filled with a readable placeholder rather than
+        dropped — otherwise a flaky LLM silently shrinks the frontier."""
+        ctx = _make_ctx()
+        graph = ctx.graph
+        current_node = graph.add_node(
+            graph.root_id, "foo", "current angle words plenty", score=5,
+        )
+        judge = JudgeResult(5, "", "", "", "")
+
+        async def empty_refine(ctx, *, module, rationale, judge_result):
+            return ""
+
+        with patch("mesmer.core.judge.refine_approach", new=empty_refine):
+            await _reflect_and_expand(
+                ctx, "foo", "a", judge, current_node,
+                log=lambda *a, **kw: None,
+                available_modules=["bar"],
+            )
+
+        new_frontiers = [
+            n for n in graph.iter_nodes()
+            if n.status == "frontier" and n.parent_id == current_node.id
+        ]
+        assert len(new_frontiers) == 1
+        # Fallback embeds the rationale so the slot stays informative.
+        assert "untried" in new_frontiers[0].approach or "deepen" in new_frontiers[0].approach

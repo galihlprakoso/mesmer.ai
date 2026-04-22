@@ -251,6 +251,111 @@ class TestAttackGraphConstruction:
         )
         assert node.status == "promising"
 
+    # --- P2 graph.propose_frontier — MCTS Selection as pure code ---
+
+    def test_propose_frontier_prefers_untried(self):
+        """Untried modules have infinite UCB — they come first."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        # 'authority-bias' has been run and scored well.
+        g.add_node(
+            root.id, "authority-bias",
+            approach="Stanford researcher claim persuading target",
+            score=7,
+        )
+        # 'foot-in-door' is untried.
+        candidates = g.propose_frontier(
+            ["authority-bias", "foot-in-door", "anchoring"],
+            top_k=3,
+        )
+        modules = [c["module"] for c in candidates]
+        # foot-in-door and anchoring are both untried; whichever order, they
+        # must both rank above the tried authority-bias.
+        assert modules.index("foot-in-door") < modules.index("authority-bias")
+        assert modules.index("anchoring") < modules.index("authority-bias")
+
+    def test_propose_frontier_ranks_tried_modules_by_best_score(self):
+        """Among tried modules, higher best-score comes first."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "authority-bias", "angle one words plenty", score=4)
+        g.add_node(root.id, "foot-in-door", "angle two words plenty", score=7)
+        candidates = g.propose_frontier(
+            ["authority-bias", "foot-in-door"],
+            top_k=2,
+        )
+        # foot-in-door (score 7) outranks authority-bias (score 4).
+        assert candidates[0]["module"] == "foot-in-door"
+        assert candidates[1]["module"] == "authority-bias"
+
+    def test_propose_frontier_excludes_all_dead(self):
+        """If every attempt of a module is dead, exclude it."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(
+            root.id, "authority-bias", "claim one words plenty",
+            score=1, reflection="detected instantly",
+        )
+        g.add_node(
+            root.id, "authority-bias", "claim two words plenty",
+            score=2, reflection="rebuffed again",
+        )
+        # foot-in-door has a live score-5 attempt — should survive.
+        g.add_node(
+            root.id, "foot-in-door", "ladder approach words plenty",
+            score=5,
+        )
+        candidates = g.propose_frontier(
+            ["authority-bias", "foot-in-door"],
+            top_k=3,
+        )
+        modules = [c["module"] for c in candidates]
+        assert "authority-bias" not in modules
+        assert "foot-in-door" in modules
+
+    def test_propose_frontier_respects_top_k(self):
+        g = AttackGraph()
+        g.ensure_root()
+        candidates = g.propose_frontier(
+            ["a", "b", "c", "d", "e"],
+            top_k=2,
+        )
+        assert len(candidates) == 2
+
+    def test_propose_frontier_empty_available_modules(self):
+        g = AttackGraph()
+        g.ensure_root()
+        assert g.propose_frontier([], top_k=3) == []
+
+    def test_propose_frontier_attaches_to_given_parent(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        parent = g.add_node(root.id, "foo", "longer approach words here", score=5)
+        candidates = g.propose_frontier(
+            ["bar", "baz"],
+            parent_id=parent.id,
+            top_k=2,
+        )
+        assert all(c["parent_id"] == parent.id for c in candidates)
+
+    def test_propose_frontier_attaches_to_root_by_default(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        candidates = g.propose_frontier(["foo"], top_k=1)
+        assert candidates[0]["parent_id"] == root.id
+
+    def test_propose_frontier_rationale_distinguishes_untried_vs_deepen(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "tried-mod", "prior angle words plenty", score=6)
+        candidates = g.propose_frontier(
+            ["untried-mod", "tried-mod"],
+            top_k=2,
+        )
+        by_mod = {c["module"]: c for c in candidates}
+        assert "untried" in by_mod["untried-mod"]["rationale"]
+        assert "deepen" in by_mod["tried-mod"]["rationale"]
+
     def test_fulfill_frontier_routes_through_classifier(self):
         """Fulfilling a frontier should apply the same P1 rules — raised
         dead threshold and same-module-no-gain.

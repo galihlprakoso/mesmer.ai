@@ -359,6 +359,78 @@ class AttackGraph:
         self._auto_classify(node)
         return node
 
+    # --- frontier proposal (P2, MCTS Selection phase) ---
+
+    def propose_frontier(
+        self,
+        available_modules: list[str],
+        *,
+        parent_id: str | None = None,
+        top_k: int = 3,
+    ) -> list[dict]:
+        """Rank available modules for the next frontier expansion.
+
+        This is the MCTS Selection step made deterministic: the LLM no longer
+        picks which technique to try, the graph does. Rules, in priority order:
+
+          1. Untried modules first — unexplored arms have infinite UCB; run
+             them before re-walking anything.
+          2. Modules with at least one non-dead attempt, ranked by best score
+             (exploit what worked).
+          3. Exclude: modules whose every prior attempt is dead in the graph
+             (anywhere, not just under this parent). No point retrying a
+             technique the target has decisively rebuffed.
+
+        Returns a list of dicts, each with:
+          - ``module``: str — the chosen technique
+          - ``parent_id``: str — node this frontier will attach under
+          - ``rationale``: str — short human-readable reason for telemetry
+          - ``best_score``: int — 0 if untried, otherwise the prior best
+
+        The LLM then refines each proposal into a concrete approach one-liner
+        (see :func:`mesmer.core.judge.refine_approach`). It cannot re-pick
+        modules because it is never shown a menu.
+        """
+        if not available_modules:
+            return []
+
+        attach_to = parent_id or self.root_id
+        explored = self.get_explored_nodes()
+
+        per_module: dict[str, dict] = {}
+        for mod in available_modules:
+            nodes = [n for n in explored if n.module == mod]
+            if not nodes:
+                per_module[mod] = {"tried": 0, "best": 0, "all_dead": False}
+                continue
+            per_module[mod] = {
+                "tried": len(nodes),
+                "best": max(n.score for n in nodes),
+                "all_dead": all(n.is_dead for n in nodes),
+            }
+
+        # Filter dead-out modules and rank the rest.
+        ranked = sorted(
+            ((mod, s) for mod, s in per_module.items() if not s["all_dead"]),
+            # Priority key: untried first (tried > 0 is False), then best score
+            # descending, then module name for stable ordering.
+            key=lambda x: (x[1]["tried"] > 0, -x[1]["best"], x[0]),
+        )
+
+        results: list[dict] = []
+        for mod, stats in ranked[:top_k]:
+            if stats["tried"] == 0:
+                rationale = "untried — explore new arm"
+            else:
+                rationale = f"deepen {mod} — prior best score {stats['best']}"
+            results.append({
+                "module": mod,
+                "parent_id": attach_to,
+                "rationale": rationale,
+                "best_score": stats["best"],
+            })
+        return results
+
     def edit_approach(self, node_id: str, new_approach: str) -> AttackNode | None:
         """Update the approach text of a node (typically a frontier)."""
         node = self.nodes.get(node_id)

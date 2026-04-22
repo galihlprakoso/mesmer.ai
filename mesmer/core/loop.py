@@ -18,6 +18,7 @@ from mesmer.core.constants import (
     ContextMode,
     LogEvent,
     NodeSource,
+    NodeStatus,
 )
 from mesmer.core.context import TurnBudgetExhausted
 
@@ -565,9 +566,13 @@ async def run_react_loop(
                 )
 
                 # --- Reflect + generate frontier ---
+                # Scope the frontier arm-space to this leader's declared
+                # sub-modules so propose_frontier can't suggest techniques
+                # the leader isn't allowed to call.
                 if current_node and judge_result:
                     await _reflect_and_expand(
-                        ctx, fn_name, approach, judge_result, current_node, log
+                        ctx, fn_name, approach, judge_result, current_node, log,
+                        available_modules=list(module.sub_modules) if module.sub_modules else None,
                     )
 
                 # Build enhanced result for the leader
@@ -728,7 +733,7 @@ def _update_graph(
             )
         else:
             log(
-                "graph_update",
+                LogEvent.GRAPH_UPDATE.value,
                 f"frontier_id={frontier_id} unknown or already explored — "
                 f"falling back to fresh attempt"
             )
@@ -748,52 +753,106 @@ def _update_graph(
             run_id=ctx.run_id,
         )
 
-    status_icon = {"dead": "✗", "promising": "★", "alive": "·"}.get(node.status, "·")
+    status_icon = {
+        NodeStatus.DEAD.value: "✗",
+        NodeStatus.PROMISING.value: "★",
+        NodeStatus.ALIVE.value: "·",
+    }.get(node.status, "·")
     log(
-        "graph_update",
+        LogEvent.GRAPH_UPDATE.value,
         f"{status_icon} [{node.module}→{node.approach[:60]}] "
         f"score:{node.score} status:{node.status}"
     )
     return node
 
 
-async def _reflect_and_expand(ctx, module_name, approach, judge_result, current_node, log):
-    """Generate frontier nodes from the judge result."""
+async def _reflect_and_expand(
+    ctx,
+    module_name,
+    approach,
+    judge_result,
+    current_node,
+    log,
+    *,
+    available_modules: list[str] | None = None,
+):
+    """Expand the frontier using the graph-first (P2) flow.
+
+    Phase 1 — :meth:`AttackGraph.propose_frontier` deterministically ranks the
+    available modules and hands back the ``top_k`` slots to expand. Untried
+    arms come first; modules whose every prior attempt is dead are filtered
+    out. The LLM is not involved.
+
+    Phase 2 — :func:`mesmer.core.judge.refine_approach` writes a one-line
+    approach for each already-selected module, grounded in the latest judge
+    result. The LLM never sees a menu of modules, so it can no longer
+    re-suggest techniques the graph already excluded.
+
+    ``available_modules`` defaults to the leader's direct sub-modules if not
+    given. A leader that advertised no sub-modules cannot expand the frontier.
+    """
     graph = ctx.graph
     if not graph:
         return
 
     # Only generate frontier for non-dead nodes
     if current_node.is_dead:
-        log(LogEvent.GRAPH_UPDATE.value, f"Node is dead — no frontier expansion")
+        log(LogEvent.GRAPH_UPDATE.value, "Node is dead — no frontier expansion")
         return
 
-    from mesmer.core.judge import generate_frontier
-
-    available_modules = list(ctx.registry.modules.keys())
+    # Fall back to "everything in the registry" if the caller didn't scope.
+    # This matches the pre-P2 behaviour for callers that haven't been updated.
+    if available_modules is None:
+        available_modules = list(ctx.registry.modules.keys()) if ctx.registry else []
+    if not available_modules:
+        return
 
     try:
-        suggestions = await generate_frontier(
-            ctx,
-            judge_result=judge_result,
-            module_name=module_name,
-            approach=approach,
-            dead_ends=graph.format_dead_ends(),
-            explored=graph.format_explored_approaches(),
-            available_modules=available_modules,
+        candidates = graph.propose_frontier(
+            available_modules,
+            parent_id=current_node.id,
+            top_k=3,
         )
-
-        for s in suggestions:
-            frontier = graph.add_frontier_node(
-                parent_id=current_node.id,
-                module=s.get("module", module_name),
-                approach=s.get("approach", ""),
-                run_id=ctx.run_id,
-            )
-            log(LogEvent.FRONTIER.value, f"🌿 New frontier: {frontier.module}→{frontier.approach[:80]}")
-
     except Exception as e:
-        log(LogEvent.REFLECT_ERROR.value, f"Reflection failed: {e}")
+        log(LogEvent.REFLECT_ERROR.value, f"Frontier proposal failed: {e}")
+        return
+
+    if not candidates:
+        log(LogEvent.FRONTIER.value, "No candidates — every module is dead or excluded")
+        return
+
+    from mesmer.core.judge import refine_approach
+
+    for c in candidates:
+        mod = c["module"]
+        rationale = c["rationale"]
+        try:
+            approach_text = await refine_approach(
+                ctx,
+                module=mod,
+                rationale=rationale,
+                judge_result=judge_result,
+            )
+        except Exception as e:
+            log(LogEvent.REFLECT_ERROR.value, f"refine_approach({mod}) failed: {e}")
+            continue
+
+        if not approach_text:
+            # LLM failed or returned empty — fall back to the rationale as a
+            # readable placeholder rather than dropping the slot entirely.
+            approach_text = f"{mod}: {rationale}"
+
+        frontier = graph.add_frontier_node(
+            parent_id=c["parent_id"],
+            module=mod,
+            approach=approach_text,
+            run_id=ctx.run_id,
+        )
+        log(
+            LogEvent.FRONTIER.value,
+            f"🌿 New frontier: {frontier.module}→{frontier.approach[:80]} "
+            f"[{rationale}]",
+        )
 
 
 # ---------------------------------------------------------------------------

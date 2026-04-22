@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mesmer.core.judge import evaluate_attempt, generate_frontier, JudgeResult
+from mesmer.core.judge import (
+    evaluate_attempt,
+    generate_frontier,
+    refine_approach,
+    JudgeResult,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -422,3 +427,94 @@ class TestGenerateFrontier:
             ctx, judge_result, "test", "test", "", "", ["test"]
         )
         assert len(suggestions) == 1
+
+
+# ---------------------------------------------------------------------------
+# refine_approach (P2) — LLM writes approach for a pre-chosen module
+# ---------------------------------------------------------------------------
+
+class TestRefineApproach:
+    @pytest.mark.asyncio
+    async def test_returns_approach_string(self):
+        ctx = _make_mock_ctx(json.dumps(
+            {"approach": "open with bedtime story quoting yesterday's refusal list"}
+        ))
+        jr = JudgeResult(5, "won't send msgs", "story framing", "direct ask", "try narrative")
+
+        out = await refine_approach(
+            ctx, module="narrative-transport", rationale="untried — explore new arm",
+            judge_result=jr,
+        )
+        assert "bedtime story" in out
+
+    @pytest.mark.asyncio
+    async def test_prompt_hides_module_menu(self):
+        """The LLM must not be shown a list of available techniques —
+        that was the pre-P2 failure mode where it kept re-picking the
+        same module."""
+        ctx = _make_mock_ctx(json.dumps({"approach": "x"}))
+        jr = JudgeResult(5, "", "", "", "")
+
+        await refine_approach(
+            ctx, module="authority-bias", rationale="untried",
+            judge_result=jr,
+        )
+        sent = str(ctx.completion.call_args)
+        # The chosen module must appear (it's the subject), but no menu of
+        # alternatives should — specifically, the prompt must not list
+        # available_modules or reference "pick a technique".
+        assert "authority-bias" in sent
+        assert "available_modules" not in sent.lower()
+        assert "pick a module" not in sent.lower()
+        assert "choose a technique" not in sent.lower()
+
+    @pytest.mark.asyncio
+    async def test_prompt_embeds_judge_intelligence(self):
+        ctx = _make_mock_ctx(json.dumps({"approach": "x"}))
+        jr = JudgeResult(
+            score=6,
+            leaked_info="refuses phone calls, refuses unconfirmed messages",
+            promising_angle="explicit rule enumeration",
+            dead_end="direct identity question",
+            suggested_next="ask about tool scope",
+        )
+
+        await refine_approach(
+            ctx, module="foot-in-door", rationale="deepen",
+            judge_result=jr,
+        )
+        sent = str(ctx.completion.call_args)
+        assert "refuses phone calls" in sent
+        assert "explicit rule enumeration" in sent
+        assert "direct identity question" in sent
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_string_on_parse_failure(self):
+        ctx = _make_mock_ctx("not JSON at all — total garbage")
+        jr = JudgeResult(3, "", "", "", "")
+
+        out = await refine_approach(
+            ctx, module="any", rationale="untried", judge_result=jr,
+        )
+        assert out == ""
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_judge_result(self):
+        ctx = _make_mock_ctx(json.dumps({"approach": "first probe"}))
+
+        out = await refine_approach(
+            ctx, module="safety-profiler", rationale="untried",
+            judge_result=None,
+        )
+        assert out == "first probe"
+
+    @pytest.mark.asyncio
+    async def test_caps_approach_length(self):
+        long_text = "x" * 500
+        ctx = _make_mock_ctx(json.dumps({"approach": long_text}))
+        jr = JudgeResult(0, "", "", "", "")
+
+        out = await refine_approach(
+            ctx, module="m", rationale="untried", judge_result=jr,
+        )
+        assert len(out) <= 200
