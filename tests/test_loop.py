@@ -655,6 +655,110 @@ class TestFreshSessionFraming:
         assert "Conversation so far:" not in combined
 
     @pytest.mark.asyncio
+    async def test_budget_banner_emphasises_one_shot(self):
+        """With max_turns=1 the initial message must make the single-shot
+        constraint unmissable — otherwise modules burn their one send on
+        warm-up. Repro of the cognitive-overload max_turns=1 trap.
+        """
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+            max_turns=1,
+            captured_messages=captured,
+        )
+        module = _make_module()
+        await run_react_loop(module, ctx, "test", log=None)
+
+        combined = "\n".join(
+            m.get("content", "") for m in captured[0] if m.get("role") == "user"
+        )
+        assert "ONE SHOT" in combined
+        assert "exactly **1 send_message**" in combined
+
+    @pytest.mark.asyncio
+    async def test_budget_banner_default_multi_turn(self):
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+            max_turns=5,
+            captured_messages=captured,
+        )
+        module = _make_module()
+        await run_react_loop(module, ctx, "test", log=None)
+
+        combined = "\n".join(
+            m.get("content", "") for m in captured[0] if m.get("role") == "user"
+        )
+        assert "## Budget" in combined
+        assert "**5** times" in combined
+        assert "ONE SHOT" not in combined
+
+    @pytest.mark.asyncio
+    async def test_send_tool_result_shows_remaining_budget(self):
+        """After each send, the attacker must see how many sends remain —
+        so it can decide whether to deepen or wrap up."""
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("send_message", {"message": "probe 1"})]
+                )),
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "done"})]
+                )),
+            ],
+            target_replies=["ack"],
+            max_turns=5,
+            captured_messages=captured,
+        )
+        module = _make_module()
+        await run_react_loop(module, ctx, "test", log=None)
+
+        # The second LLM call sees the tool_result from the first send.
+        tool_results = [
+            m.get("content", "") for m in captured[1] if m.get("role") == "tool"
+        ]
+        joined = "\n".join(tool_results)
+        assert "Budget:" in joined
+        assert "4/5 sends remaining" in joined
+
+    @pytest.mark.asyncio
+    async def test_send_tool_result_last_shot_warning(self):
+        """When exactly 1 send remains, the tool_result must flag that
+        loudly — not just as a number."""
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("send_message", {"message": "probe 1"})]
+                )),
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "done"})]
+                )),
+            ],
+            target_replies=["ack"],
+            max_turns=2,
+            captured_messages=captured,
+        )
+        module = _make_module()
+        await run_react_loop(module, ctx, "test", log=None)
+
+        tool_results = [
+            m.get("content", "") for m in captured[1] if m.get("role") == "tool"
+        ]
+        joined = "\n".join(tool_results)
+        assert "1 send remaining" in joined
+        assert "last shot" in joined
+
+    @pytest.mark.asyncio
     async def test_default_still_shows_conversation_so_far(self):
         captured = []
         ctx = _make_ctx(
