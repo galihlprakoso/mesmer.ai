@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -119,7 +118,7 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
         )
 
     log_fn = _make_verbose_log() if verbose else None
-    console.print(f"\n[bold green]Starting attack...[/bold green]\n")
+    console.print("\n[bold green]Starting attack...[/bold green]\n")
 
     config = RunConfig(
         scenario_path=scenario_path,
@@ -168,7 +167,8 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
         )
 
     console.print(table)
-    console.print(f"\n[dim]Total turns: {len(run_result.ctx.turns)} / {run_result.ctx.turn_budget or '\u221e'}[/dim]")
+    budget_str = str(run_result.ctx.turn_budget) if run_result.ctx.turn_budget else "\u221e"
+    console.print(f"\n[dim]Total turns: {len(run_result.ctx.turns)} / {budget_str}[/dim]")
 
     # Print graph summary
     _print_run_summary(run_result.graph)
@@ -539,6 +539,176 @@ def serve(port, host, no_browser, scenario_dir):
     ))
 
     uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+# ---------------------------------------------------------------------------
+# bench — run a reproducible benchmark spec against N targets
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("spec_path", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--targets",
+    default=None,
+    help="Comma-separated target IDs to include (default: all targets in the spec).",
+)
+@click.option(
+    "--sample",
+    type=int,
+    default=None,
+    help="Limit to the first N dataset rows (overrides spec's budget.sample). "
+         "Useful for fast iterations — use 0 for 'all rows'.",
+)
+@click.option(
+    "--trials",
+    type=int,
+    default=None,
+    help="Override spec's trials_per_row. Set to 1 for smoke runs.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Where to write per-trial JSONL + summary.json + Markdown table. "
+         "Defaults to <spec-dir>/../results/.",
+)
+@click.option(
+    "--concurrency",
+    type=int,
+    default=None,
+    help="Max concurrent in-flight trials (overrides spec's budget.concurrency).",
+)
+@click.option(
+    "--download",
+    is_flag=True,
+    help="Force re-fetch the dataset from upstream_url even if a cached copy exists.",
+)
+@click.option(
+    "--no-baseline",
+    is_flag=True,
+    help="Skip the single-turn baseline arm (mesmer arm only). Saves API spend.",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Stream per-trial progress to stderr.",
+)
+def bench(spec_path, targets, sample, trials, output, concurrency, download, no_baseline, verbose):
+    """Run a benchmark spec and emit reproducible results.
+
+    A spec is a YAML file that binds one mesmer module to one dataset and
+    a list of target models. Example::
+
+        mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml \\
+            --sample 50 --trials 3
+
+    Writes a per-trial JSONL, a summary.json, and a Markdown table under
+    the output directory. Use the Markdown as a drop-in for the README.
+    """
+    asyncio.run(_bench(
+        spec_path=spec_path,
+        targets=targets,
+        sample=sample,
+        trials=trials,
+        output=output,
+        concurrency=concurrency,
+        download=download,
+        no_baseline=no_baseline,
+        verbose=verbose,
+    ))
+
+
+async def _bench(
+    *,
+    spec_path: str,
+    targets: str | None,
+    sample: int | None,
+    trials: int | None,
+    output: str | None,
+    concurrency: int | None,
+    download: bool,
+    no_baseline: bool,
+    verbose: bool,
+):
+    from mesmer.core.bench import load_spec, run_benchmark
+
+    spec_path_obj = Path(spec_path).resolve()
+    spec = load_spec(spec_path_obj)
+
+    if concurrency is not None:
+        spec.budget.concurrency = concurrency
+    if no_baseline:
+        spec.budget.run_baseline = False
+
+    target_ids = None
+    if targets:
+        target_ids = {t.strip() for t in targets.split(",") if t.strip()}
+
+    # Default output dir: <spec>/../../results/. Spec lives in
+    # benchmarks/specs/foo.yaml, so parent.parent = benchmarks/.
+    if output is None:
+        output_dir = spec_path_obj.parent.parent / "results"
+    else:
+        output_dir = Path(output)
+
+    spec_dir = spec_path_obj.parent.parent   # <benchmarks/>
+
+    console.print(Panel(
+        f"[bold]{spec.name}[/bold]\n"
+        f"Version: {spec.version} · Module: {spec.module}\n"
+        f"Targets: {', '.join(t.id for t in spec.targets)}\n"
+        f"Dataset: {spec.dataset.upstream_url or spec.dataset.local_cache}\n"
+        f"Budget: {spec.budget.max_turns} turns · "
+        f"{sample or spec.budget.sample or 'all'} rows · "
+        f"{trials or spec.budget.trials_per_row} trials/row\n"
+        f"Baseline arm: {'on' if spec.budget.run_baseline else 'off'}",
+        title="[bold magenta]mesmer bench[/bold magenta]",
+        border_style="magenta",
+    ))
+
+    def _progress(msg: str):
+        if verbose:
+            console.print(f"[dim]{msg}[/dim]")
+
+    summary, trials_list = await run_benchmark(
+        spec,
+        spec_dir=spec_dir,
+        output_dir=output_dir,
+        target_filter=target_ids,
+        sample_override=sample,
+        trials_override=trials,
+        force_download=download,
+        progress=_progress,
+    )
+
+    # Summary table
+    table = Table(
+        title=f"Benchmark results — {spec.name} ({spec.version})",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Target")
+    table.add_column("Arm")
+    table.add_column("ASR", justify="right")
+    table.add_column("± stderr", justify="right")
+    table.add_column("Trials", justify="right")
+    table.add_column("Median turns", justify="right")
+    table.add_column("Avg tokens", justify="right")
+    for c in summary.cells:
+        median_str = f"{int(c.median_turns)}" if c.median_turns is not None else "—"
+        table.add_row(
+            c.target_id,
+            c.arm,
+            f"{c.asr * 100:.1f}%",
+            f"±{c.asr_stderr * 100:.1f}%",
+            str(c.n_trials),
+            median_str,
+            f"{int(c.mean_total_tokens):,}",
+        )
+    console.print(table)
+    console.print(f"[green]Artifacts written to[/green] {output_dir}")
 
 
 if __name__ == "__main__":

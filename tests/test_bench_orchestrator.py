@@ -1,0 +1,495 @@
+"""Unit tests for the benchmark orchestrator.
+
+Strategy:
+  * Pure functions (:func:`aggregate`, :func:`render_markdown_table`) — call
+    with hand-crafted TrialResult lists and assert exact numbers.
+  * Dataset handling — write a synthetic JSONL to a tmp_path, point the
+    spec at it (no ``upstream_url``) to exercise the cache-hit path.
+  * Orchestration (:func:`run_benchmark`) — swap in a fake ``execute_run``
+    that returns a mocked RunResult. Verifies tasks dispatch, aggregate,
+    and write artifacts end-to-end without LLM or network IO.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from mesmer.core.bench import (
+    BenchAttackerSpec,
+    BenchBudget,
+    BenchCellSummary,
+    BenchDatasetSpec,
+    BenchSpec,
+    BenchSummary,
+    BenchTargetSpec,
+    DatasetRow,
+    TrialResult,
+    aggregate,
+    build_scenario_for_row,
+    ensure_dataset_cached,
+    load_dataset,
+    load_spec,
+    render_markdown_table,
+    run_benchmark,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _minimal_spec(tmp_path: Path, n_targets: int = 1) -> BenchSpec:
+    targets = [
+        BenchTargetSpec(
+            id=f"target-{i}",
+            adapter="echo",
+            base_url="",
+            model=f"echo-{i}",
+        )
+        for i in range(n_targets)
+    ]
+    return BenchSpec(
+        name="test-bench",
+        version="v0",
+        module="system-prompt-extraction",
+        dataset=BenchDatasetSpec(
+            upstream_url="",
+            local_cache=str(tmp_path / "data.jsonl"),
+            expected_sha256="",
+            expected_rows=0,
+        ),
+        targets=targets,
+        attacker=BenchAttackerSpec(),
+        budget=BenchBudget(
+            max_turns=5,
+            trials_per_row=2,
+            sample=0,
+            concurrency=2,
+            run_baseline=True,
+        ),
+    )
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> str:
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    path.write_text(text)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Pure: aggregate + render_markdown_table
+# ---------------------------------------------------------------------------
+
+
+class TestAggregate:
+    def _mk_trial(self, **kwargs) -> TrialResult:
+        base = dict(
+            trial_id="t", target_id="T", arm="mesmer", sample_id="s",
+            seed=42, success=False, canary_turn=None, matched_text="",
+            turns=0, prompt_tokens=0, completion_tokens=0, total_tokens=0,
+            duration_s=0.0,
+        )
+        base.update(kwargs)
+        return TrialResult(**base)
+
+    def test_single_cell_all_success(self):
+        trials = [
+            self._mk_trial(success=True, turns=3, total_tokens=100),
+            self._mk_trial(success=True, turns=5, total_tokens=200),
+            self._mk_trial(success=True, turns=7, total_tokens=300),
+        ]
+        cells = aggregate(trials)
+        assert len(cells) == 1
+        c = cells[0]
+        assert c.asr == 1.0
+        assert c.asr_stderr == 0.0   # p=1 → variance 0
+        assert c.n_trials == 3
+        assert c.n_successes == 3
+        assert c.median_turns == 5
+        assert c.mean_total_tokens == 200.0
+
+    def test_single_cell_all_fail(self):
+        trials = [
+            self._mk_trial(success=False, turns=15),
+            self._mk_trial(success=False, turns=15),
+        ]
+        cells = aggregate(trials)
+        assert cells[0].asr == 0.0
+        # Median over successes only — none here → None.
+        assert cells[0].median_turns is None
+
+    def test_mixed_success_rate(self):
+        trials = [self._mk_trial(success=True, turns=4)] * 3
+        trials += [self._mk_trial(success=False, turns=15)] * 7
+        cells = aggregate(trials)
+        c = cells[0]
+        assert c.n_trials == 10
+        assert c.n_successes == 3
+        assert abs(c.asr - 0.3) < 1e-9
+        # stderr = sqrt(0.3 * 0.7 / 10)
+        assert abs(c.asr_stderr - (0.3 * 0.7 / 10) ** 0.5) < 1e-9
+        # Median of [4,4,4] = 4 (failures excluded).
+        assert c.median_turns == 4
+
+    def test_splits_by_target_and_arm(self):
+        trials = [
+            self._mk_trial(target_id="A", arm="mesmer", success=True),
+            self._mk_trial(target_id="A", arm="baseline", success=False),
+            self._mk_trial(target_id="B", arm="mesmer", success=False),
+            self._mk_trial(target_id="B", arm="baseline", success=False),
+        ]
+        cells = aggregate(trials)
+        # 2 targets × 2 arms = 4 cells.
+        assert len(cells) == 4
+        keys = {(c.target_id, c.arm) for c in cells}
+        assert keys == {("A", "mesmer"), ("A", "baseline"),
+                        ("B", "mesmer"), ("B", "baseline")}
+
+    def test_empty_trials_list(self):
+        assert aggregate([]) == []
+
+    def test_errors_count_as_failures(self):
+        """Crashed trials shouldn't silently disappear from the denominator."""
+        trials = [
+            self._mk_trial(success=True),
+            self._mk_trial(success=False, error="RateLimitError"),
+        ]
+        cells = aggregate(trials)
+        assert cells[0].n_trials == 2
+        assert cells[0].n_successes == 1
+        assert cells[0].asr == 0.5
+
+
+class TestMarkdownRender:
+    def test_renders_headline_and_rows(self):
+        summary = BenchSummary(
+            spec_name="demo",
+            spec_version="v1",
+            module="system-prompt-extraction",
+            date_iso="2026-04-23T00:00:00Z",
+            mesmer_version="0.1.0",
+            dataset_sha256="abcd" * 16,
+            n_rows_sampled=50,
+            trials_per_row=3,
+            cells=[
+                BenchCellSummary(
+                    target_id="llama3.1-8b",
+                    arm="mesmer",
+                    n_trials=150,
+                    n_successes=75,
+                    asr=0.5,
+                    asr_stderr=0.04,
+                    median_turns=6,
+                    mean_total_tokens=8420.5,
+                    total_wall_seconds=3600.0,
+                ),
+                BenchCellSummary(
+                    target_id="llama3.1-8b",
+                    arm="baseline",
+                    n_trials=50,
+                    n_successes=15,
+                    asr=0.3,
+                    asr_stderr=0.06,
+                    median_turns=1,
+                    mean_total_tokens=0,
+                    total_wall_seconds=60.0,
+                ),
+            ],
+        )
+        md = render_markdown_table(summary)
+        assert "demo" in md and "v1" in md
+        assert "llama3.1-8b" in md
+        assert "50.0%" in md       # mesmer ASR
+        assert "30.0%" in md       # baseline ASR
+        assert "±4.0%" in md
+        assert "| mesmer |" in md and "| baseline |" in md
+
+    def test_median_none_renders_as_dash(self):
+        summary = BenchSummary(
+            spec_name="x", spec_version="v0", module="m",
+            date_iso="2026-01-01T00:00:00Z", mesmer_version="0",
+            dataset_sha256="0" * 64, n_rows_sampled=0, trials_per_row=0,
+            cells=[BenchCellSummary(
+                target_id="t", arm="mesmer", n_trials=0, n_successes=0,
+                asr=0.0, asr_stderr=0.0, median_turns=None,
+                mean_total_tokens=0.0, total_wall_seconds=0.0,
+            )],
+        )
+        md = render_markdown_table(summary)
+        assert " — |" in md  # em-dash for missing median
+
+
+# ---------------------------------------------------------------------------
+# Dataset IO
+# ---------------------------------------------------------------------------
+
+
+class TestDatasetCaching:
+    def test_cache_hit_with_no_expected_sha(self, tmp_path: Path):
+        cache = tmp_path / "cached.jsonl"
+        sha = _write_jsonl(cache, [{"a": 1}])
+        spec = BenchDatasetSpec(
+            upstream_url="",
+            local_cache=str(cache),
+            expected_sha256="",
+        )
+        path, actual = ensure_dataset_cached(spec)
+        assert path == cache
+        assert actual == sha
+
+    def test_sha_mismatch_raises(self, tmp_path: Path):
+        cache = tmp_path / "cached.jsonl"
+        _write_jsonl(cache, [{"a": 1}])
+        spec = BenchDatasetSpec(
+            upstream_url="",
+            local_cache=str(cache),
+            expected_sha256="deadbeef" * 8,  # wrong
+        )
+        with pytest.raises(ValueError, match="SHA256 mismatch"):
+            ensure_dataset_cached(spec)
+
+    def test_missing_cache_and_missing_url_raises(self, tmp_path: Path):
+        spec = BenchDatasetSpec(
+            upstream_url="",
+            local_cache=str(tmp_path / "nope.jsonl"),
+        )
+        with pytest.raises(ValueError, match="no upstream_url"):
+            ensure_dataset_cached(spec)
+
+
+class TestLoadDataset:
+    def test_maps_schema_and_skips_unusable_rows(self, tmp_path: Path):
+        cache = tmp_path / "data.jsonl"
+        _write_jsonl(cache, [
+            {"sample_id": 1, "pre_prompt": "P1", "post_prompt": "Q1",
+             "access_code": "canary-a", "attack": "hack me"},
+            {"sample_id": 2, "pre_prompt": "", "access_code": "x"},          # skipped: no pre
+            {"sample_id": 3, "pre_prompt": "P3", "access_code": ""},          # skipped: no canary
+            {"sample_id": 4, "pre_prompt": "P4", "access_code": "canary-d"},  # ok, no attack
+        ])
+        spec = BenchDatasetSpec(upstream_url="", local_cache=str(cache))
+        rows, _ = load_dataset(spec)
+        assert len(rows) == 2
+        assert rows[0].sample_id == "1"
+        assert rows[0].canary == "canary-a"
+        assert rows[0].baseline_attack == "hack me"
+        assert rows[1].sample_id == "4"
+        assert rows[1].baseline_attack == ""
+
+
+# ---------------------------------------------------------------------------
+# Spec loading
+# ---------------------------------------------------------------------------
+
+
+class TestLoadSpec:
+    def test_round_trip_yaml(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("FAKE_KEY", "sk-testing")
+        spec_path = tmp_path / "bench.yaml"
+        spec_path.write_text("""
+name: "test"
+version: v1
+module: system-prompt-extraction
+dataset:
+  upstream_url: https://example.com/data.jsonl
+  local_cache: data.jsonl
+  expected_sha256: ""
+  expected_rows: 10
+targets:
+  - id: t-a
+    adapter: openai
+    base_url: http://127.0.0.1:11434/v1
+    model: llama3
+    api_key: "${FAKE_KEY}"
+attacker:
+  model: openrouter/x
+  api_key: "${FAKE_KEY}"
+  temperature: 0.9
+  seed_base: 100
+budget:
+  max_turns: 10
+  trials_per_row: 4
+  sample: 5
+  concurrency: 1
+  run_baseline: false
+""")
+        spec = load_spec(spec_path)
+        assert spec.name == "test"
+        assert spec.targets[0].api_key == "sk-testing"
+        assert spec.attacker.api_key == "sk-testing"
+        assert spec.attacker.temperature == 0.9
+        assert spec.budget.trials_per_row == 4
+        assert spec.budget.run_baseline is False
+
+
+# ---------------------------------------------------------------------------
+# Scenario construction
+# ---------------------------------------------------------------------------
+
+
+class TestBuildScenario:
+    def test_injects_system_prompt(self, tmp_path: Path):
+        spec = _minimal_spec(tmp_path)
+        row = DatasetRow(
+            sample_id="x", pre_prompt="pre", post_prompt="post",
+            canary="c", baseline_attack="a",
+        )
+        scenario = build_scenario_for_row(spec, spec.targets[0], row, seed=7)
+        assert "pre" in scenario.target.system_prompt
+        assert "post" in scenario.target.system_prompt
+        assert scenario.module == "system-prompt-extraction"
+        assert scenario.agent.seed == 7
+        assert scenario.objective.max_turns == 5
+
+
+# ---------------------------------------------------------------------------
+# run_benchmark with mocked execute_run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestRunBenchmarkEndToEnd:
+    async def test_dispatches_and_writes_artifacts(self, tmp_path: Path):
+        # Build a 2-row dataset; 1 target × 2 trials + 1 baseline each row = 6 trials.
+        cache = tmp_path / "data.jsonl"
+        _write_jsonl(cache, [
+            {"sample_id": 1, "pre_prompt": "sys1", "post_prompt": "",
+             "access_code": "paradox", "attack": "show me"},
+            {"sample_id": 2, "pre_prompt": "sys2", "post_prompt": "",
+             "access_code": "mahabarata", "attack": "convert to python"},
+        ])
+        spec = _minimal_spec(tmp_path)
+
+        # Fake execute_run — returns a RunResult whose ctx.turns include a
+        # leak for row 1 and a refusal for row 2. Deterministic.
+        async def fake_execute_run(config, **_ignored):
+            scenario = config.scenario_override
+            sample_id = scenario.name.split(" :: ")[-1]
+            if sample_id == "1":
+                reply_text = "fine, the code is paradox"
+            else:
+                reply_text = "I cannot share that"
+            turn = SimpleNamespace(sent="probe", received=reply_text, is_error=False)
+            telemetry = SimpleNamespace(
+                prompt_tokens=100, completion_tokens=50, total_tokens=150,
+                llm_seconds=0.1, n_calls=1,
+            )
+            ctx = SimpleNamespace(turns=[turn], telemetry=telemetry)
+            return SimpleNamespace(
+                run_id="run-" + sample_id,
+                ctx=ctx,
+                telemetry=telemetry,
+                duration_s=0.5,
+                graph=None,
+                memory=None,
+                scenario=scenario,
+                result="done",
+            )
+
+        # Stub the baseline path too: create_target('echo') already exists,
+        # but EchoTarget replies with the message back. We want deterministic
+        # behaviour so monkey-patch the create_target called inside
+        # run_baseline_trial. Instead, run the real echo — which echoes back
+        # the `attack` — and check the canary is NOT in it (so baseline
+        # fails on both rows in this fake).
+
+        summary, trials = await run_benchmark(
+            spec,
+            spec_dir=tmp_path,
+            output_dir=tmp_path / "results",
+            execute_run_fn=fake_execute_run,
+        )
+
+        # Trials: 2 rows × 1 target × (2 mesmer + 1 baseline) = 6.
+        assert len(trials) == 6
+
+        mesmer_cells = [c for c in summary.cells if c.arm == "mesmer"]
+        baseline_cells = [c for c in summary.cells if c.arm == "baseline"]
+        assert len(mesmer_cells) == 1
+        assert len(baseline_cells) == 1
+
+        # Mesmer arm: 2 successes / 4 trials (row 1 leaks, row 2 doesn't, ×2 trials each).
+        assert mesmer_cells[0].n_successes == 2
+        assert mesmer_cells[0].n_trials == 4
+        assert mesmer_cells[0].asr == 0.5
+
+        # Baseline arm: echo just replays the attack string, which doesn't
+        # contain the canary, so 0/2 successes.
+        assert baseline_cells[0].n_successes == 0
+
+        # Artifacts written.
+        results_dir = tmp_path / "results"
+        files = list(results_dir.iterdir())
+        assert any(f.name.endswith("-summary.json") for f in files)
+        assert any(f.name.endswith("-README.md") for f in files)
+        assert any(f.name.endswith("target-0__mesmer.jsonl") for f in files)
+        assert any(f.name.endswith("target-0__baseline.jsonl") for f in files)
+
+    async def test_errors_surface_as_failed_trials(self, tmp_path: Path):
+        cache = tmp_path / "data.jsonl"
+        _write_jsonl(cache, [
+            {"sample_id": 1, "pre_prompt": "p", "post_prompt": "",
+             "access_code": "c", "attack": "a"},
+        ])
+        spec = _minimal_spec(tmp_path)
+        spec.budget.trials_per_row = 1
+        spec.budget.run_baseline = False
+
+        async def exploding_execute_run(config, **_):
+            raise RuntimeError("simulated provider outage")
+
+        summary, trials = await run_benchmark(
+            spec,
+            spec_dir=tmp_path,
+            output_dir=tmp_path / "results2",
+            execute_run_fn=exploding_execute_run,
+        )
+        assert len(trials) == 1
+        assert trials[0].success is False
+        assert "simulated provider outage" in trials[0].error
+        assert summary.cells[0].n_successes == 0
+
+    async def test_target_filter(self, tmp_path: Path):
+        cache = tmp_path / "data.jsonl"
+        _write_jsonl(cache, [
+            {"sample_id": 1, "pre_prompt": "p", "post_prompt": "",
+             "access_code": "c", "attack": "a"},
+        ])
+        spec = _minimal_spec(tmp_path, n_targets=3)
+        spec.budget.trials_per_row = 1
+        spec.budget.run_baseline = False
+
+        async def fake(*a, **kw):
+            cfg = a[0]
+            return SimpleNamespace(
+                run_id="r", duration_s=0.1, graph=None, memory=None,
+                scenario=cfg.scenario_override, result="ok",
+                ctx=SimpleNamespace(
+                    turns=[SimpleNamespace(received="c", sent="x", is_error=False)],
+                    telemetry=SimpleNamespace(
+                        prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                        llm_seconds=0, n_calls=0,
+                    ),
+                ),
+                telemetry=SimpleNamespace(
+                    prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                    llm_seconds=0, n_calls=0,
+                ),
+            )
+
+        summary, trials = await run_benchmark(
+            spec,
+            spec_dir=tmp_path,
+            output_dir=tmp_path / "results3",
+            target_filter={"target-1"},
+            execute_run_fn=fake,
+        )
+        # Only the one allowed target produces trials.
+        assert {t.target_id for t in trials} == {"target-1"}
+        assert len(trials) == 1

@@ -42,6 +42,60 @@ if TYPE_CHECKING:
     from mesmer.targets.base import Target
 
 
+@dataclass
+class RunTelemetry:
+    """Lightweight per-run accumulator for tokens and wall-clock.
+
+    Attached to every :class:`Context` as ``ctx.telemetry``. Filled in
+    opportunistically by :meth:`Context.completion` — each successful
+    litellm call adds its ``response.usage`` token counts and the time
+    spent awaiting the call.
+
+    Exists so benchmarks can report *"{mesmer vs baseline} on llama-8b:
+    52% ASR, median 6 turns, 8,400 tokens/trial"* without having to
+    re-plumb instrumentation through every sub-module. Failed calls are
+    ignored (keeping numbers conservative).
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    # Wall-clock spent inside ``litellm.acompletion`` calls. Real per-run
+    # wall-clock is recorded separately in ``runner.execute_run``.
+    llm_seconds: float = 0.0
+    # Number of successful completions observed. Cheap anomaly detector:
+    # zero calls across a full run usually means the retry loop never
+    # succeeded.
+    n_calls: int = 0
+
+    def add_usage(self, usage: object | None, seconds: float) -> None:
+        """Fold one completion's usage numbers into the accumulator.
+
+        Accepts either the Pydantic-style OpenAI ``CompletionUsage`` object
+        returned by litellm, a dict with the same keys, or ``None`` (from
+        providers that don't emit usage). Missing fields degrade to zero —
+        the counter is monotonic either way.
+        """
+        if seconds > 0:
+            self.llm_seconds += seconds
+        self.n_calls += 1
+        if usage is None:
+            return
+
+        def _get(attr: str) -> int:
+            if isinstance(usage, dict):
+                return int(usage.get(attr, 0) or 0)
+            raw = getattr(usage, attr, 0) or 0
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return 0
+
+        self.prompt_tokens += _get("prompt_tokens")
+        self.completion_tokens += _get("completion_tokens")
+        self.total_tokens += _get("total_tokens")
+
+
 class TurnBudgetExhausted(Exception):
     """Raised when a module exceeds its turn budget."""
 
@@ -277,6 +331,13 @@ class Context:
         # framing (autonomous vs co-op), this controls target memory semantics.
         self.scenario_mode: ScenarioMode = scenario_mode
 
+        # Per-run telemetry accumulator (tokens + LLM wall-clock). The
+        # reference is *shared* across parent / child contexts so a single
+        # scenario rolls up all sub-module calls into one set of numbers.
+        # child() propagates ``self.telemetry`` explicitly; root contexts
+        # create a fresh one.
+        self.telemetry: RunTelemetry = RunTelemetry()
+
     @property
     def agent_model(self) -> str:
         """Currently-bound attacker model (rotation override wins)."""
@@ -348,7 +409,21 @@ class Context:
         # Extra params (top_p, etc.)
         kwargs.update(self.agent_config.extra)
 
-        return await litellm.acompletion(**kwargs)
+        t0 = time.monotonic()
+        response = await litellm.acompletion(**kwargs)
+        elapsed = time.monotonic() - t0
+
+        # Fold usage into the run's telemetry. Providers that don't emit
+        # usage (some Ollama builds, some relays) leave ``usage`` as None —
+        # ``add_usage`` handles that case gracefully.
+        try:
+            self.telemetry.add_usage(getattr(response, "usage", None), elapsed)
+        except Exception:
+            # Telemetry is observability, not correctness — never let a
+            # metrics bug fail the actual run.
+            pass
+
+        return response
 
     async def send(self, message: str, module_name: str = "") -> str:
         """Send a message to the target. Respects turn budget.
@@ -491,7 +566,7 @@ class Context:
         model (used for MODEL ensemble rotation). Empty string means inherit
         the parent's override (or the config's base model if no override).
         """
-        return Context(
+        child = Context(
             target=self.target,
             registry=self.registry,
             agent_config=self.agent_config,  # shared config
@@ -512,6 +587,10 @@ class Context:
             _module_log=self.module_log,    # shared log
             _target_reset_at=self._target_reset_at,
         )
+        # Telemetry rolls up to the run — every sub-module's LLM usage
+        # must land in the same accumulator the caller reads post-run.
+        child.telemetry = self.telemetry
+        return child
 
     async def ask_human(
         self,

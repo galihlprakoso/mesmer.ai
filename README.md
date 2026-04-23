@@ -240,6 +240,50 @@ agent:
 | **rest** | Generic HTTP REST with configurable body templates and response path extraction |
 | **echo** | Mock target for testing — echoes messages back |
 
+## Benchmarks
+
+Mesmer ships a reproducible benchmark suite so claims in this README are
+numbers, not vibes. Each spec binds one module to one real public dataset,
+fires trials against a list of target models, and writes a versioned JSONL
++ summary.json + Markdown table.
+
+```bash
+# Fast smoke (2-3 rows, 1 trial):
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction-smoke.yaml
+
+# Iteration run on the full spec (50 rows × 3 trials):
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml --sample 50
+
+# Publication run (full dataset):
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml
+```
+
+### Current specs
+
+| Spec | Module | Dataset | Rows |
+|---|---|---|---|
+| [`tensor-trust-extraction-v1`](benchmarks/specs/tensor-trust-extraction-v1.yaml) | `system-prompt-extraction` | [Tensor Trust extraction-robustness v1](benchmarks/datasets/README.md#tensor-trust--extraction_robustness_datasetjsonl) (ICLR 2024) | 569 real player-crafted defenses |
+
+Every spec has **two arms**:
+
+- **mesmer** — the full multi-turn ReAct loop attacks the defense (that's the product under test).
+- **baseline** — the dataset's own single-turn `attack` field is replayed against the same target. Apples-to-apples control, so the published delta (*"multi-turn mesmer +33pp over single-turn baseline"*) is a meaningful scientific claim rather than a marketing one.
+
+Judging is **deterministic** — a ~40-line canary-substring matcher in
+[`mesmer/core/judges/canary.py`](mesmer/core/judges/canary.py) with full
+unit-test coverage. The in-loop LLM judge guides mesmer's next move but
+does **not** decide benchmark success. Datasets are SHA-pinned, model
+snapshots are pinned, seeds are committed. Full reproducibility contract:
+[`benchmarks/README.md`](benchmarks/README.md).
+
+### Published results
+
+_Initial publication runs pending — this section fills in from auto-generated
+Markdown at `benchmarks/results/<iso>-<spec>-README.md` after the first real
+run against a target with working credentials. The pipeline is
+end-to-end-verified (405 tests); filling the table is a matter of burning
+some API credit._
+
 ## Architecture
 
 ```
@@ -247,10 +291,13 @@ mesmer/
 ├── core/
 │   ├── loop.py      # ReAct loop: Plan→Execute→Judge→Reflect→Update
 │   ├── graph.py     # Attack graph (MCTS-inspired search tree)
-│   ├── judge.py     # Score attempts 1-10, extract insights
+│   ├── judge.py     # In-loop LLM judge — scores attempts 1-10
+│   ├── judges/      # Deterministic benchmark judges (canary substring, …)
+│   ├── bench.py     # Benchmark orchestrator (spec loader, trial dispatch, aggregation)
 │   ├── memory.py    # Per-target persistence + global technique stats
-│   ├── context.py   # Shared state, LLM calls via LiteLLM
+│   ├── context.py   # Shared state, LLM calls via LiteLLM, token telemetry
 │   ├── scenario.py  # YAML scenario loader with ${ENV_VAR} resolution
+│   ├── runner.py    # execute_run — shared CLI/web/bench entry point
 │   ├── module.py    # Module definition and execution
 │   ├── registry.py  # Module auto-discovery
 │   └── keys.py      # API key rotation

@@ -104,6 +104,15 @@ class AgentConfig:
     compression_target_ratio: float = 0.6
     compression_model: str = ""
 
+    # Optional PRNG seed for reproducibility. When set (non-None), the bench
+    # orchestrator uses this to seed Python's ``random`` module before each
+    # trial so technique selection, tie-breaks, and any other ``random.*``
+    # calls are deterministic across reruns. The attacker LLM's sampling is
+    # NOT deterministic even with seed set (provider-side temperature) —
+    # we use seed for the mesmer-level randomness and N-seed averaging for
+    # the LLM-level variance. ``None`` means "no reseeding" (legacy behaviour).
+    seed: int | None = None
+
     # Internal — populated from api_key if comma-separated
     _keys: list[str] = field(default_factory=list, repr=False)
     _pool: "object | None" = field(default=None, repr=False)
@@ -334,6 +343,12 @@ def load_scenario(path: str | Path) -> Scenario:
         max_turns=obj_data.get("max_turns", 25),
     )
 
+    raw_seed = agent_data.get("seed", None)
+    try:
+        seed_val = int(raw_seed) if raw_seed is not None else None
+    except (TypeError, ValueError):
+        seed_val = None
+
     agent = AgentConfig(
         model=agent_data.get("model", "openrouter/anthropic/claude-sonnet-4-20250514"),
         models=list(agent_data.get("models", []) or []),
@@ -350,6 +365,7 @@ def load_scenario(path: str | Path) -> Scenario:
         compression_keep_recent=agent_data.get("compression_keep_recent", 10),
         compression_target_ratio=agent_data.get("compression_target_ratio", 0.6),
         compression_model=str(agent_data.get("compression_model", "") or ""),
+        seed=seed_val,
     )
 
     judge_data = data.get("judge", {}) or {}

@@ -6,12 +6,14 @@ Extracts the core "run an attack" logic so both interfaces call the same code.
 from __future__ import annotations
 
 import json
+import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from mesmer.core.constants import ContextMode, ScenarioMode
-from mesmer.core.context import Context, HumanQuestionBroker
+from mesmer.core.context import Context, HumanQuestionBroker, RunTelemetry
 from mesmer.core.graph import AttackGraph
 from mesmer.core.loop import LogFn, run_react_loop
 from mesmer.core.memory import TargetMemory, GlobalMemory, generate_run_id
@@ -40,6 +42,15 @@ class RunConfig:
     # the scenario YAML's mode field wins. Set to ScenarioMode.TRIALS or
     # ScenarioMode.CONTINUOUS to force a mode regardless of YAML.
     scenario_mode_override: ScenarioMode | None = None
+    # When given, pre-built Scenario wins over ``scenario_path`` — used by
+    # ``mesmer bench`` which constructs scenarios programmatically per
+    # dataset row instead of writing 570 YAML files.
+    scenario_override: Scenario | None = None
+    # PRNG seed for this run. None = legacy "no reseeding"; an int seeds
+    # Python's ``random`` module before execute_run starts so technique
+    # tie-breaks and other mesmer-level randomness are reproducible.
+    # LLM sampling remains provider-side and is NOT made deterministic.
+    seed: int | None = None
 
 
 @dataclass
@@ -52,6 +63,17 @@ class RunResult:
     ctx: Context
     graph: AttackGraph
     memory: TargetMemory
+    # Wall-clock from the moment execute_run started to when it returned.
+    # Includes LLM calls + tool dispatch + graph persistence.
+    duration_s: float = 0.0
+    # Seed that was applied to ``random`` at the start of this run. None
+    # when no seed was set (legacy behaviour).
+    seed: int | None = None
+
+    @property
+    def telemetry(self) -> RunTelemetry:
+        """Convenience accessor — the run's per-call token/latency roll-up."""
+        return self.ctx.telemetry
 
 
 async def execute_run(
@@ -75,9 +97,24 @@ async def execute_run(
     """
     from mesmer.targets import create_target
 
-    # Load scenario
-    scenario = load_scenario(config.scenario_path)
+    # Load scenario — override wins over path, letting the bench runner
+    # construct synthetic scenarios in-memory per dataset row.
+    if config.scenario_override is not None:
+        scenario = config.scenario_override
+    else:
+        scenario = load_scenario(config.scenario_path)
     run_id = generate_run_id()
+
+    # Seed the PRNG if either the CLI or the scenario provided one. Order
+    # of precedence: explicit config.seed > scenario.agent.seed. A None
+    # seed leaves ``random`` untouched so legacy runs are unaffected.
+    effective_seed = (
+        config.seed if config.seed is not None else scenario.agent.seed
+    )
+    if effective_seed is not None:
+        random.seed(effective_seed)
+
+    run_started_at = time.monotonic()
 
     # Build registry
     registry = Registry()
@@ -215,6 +252,8 @@ async def execute_run(
         with open(config.output_path, "w") as f:
             json.dump(report, f, indent=2, default=str)
 
+    duration_s = time.monotonic() - run_started_at
+
     return RunResult(
         run_id=run_id,
         scenario=scenario,
@@ -222,6 +261,8 @@ async def execute_run(
         ctx=ctx,
         graph=graph,
         memory=memory,
+        duration_s=duration_s,
+        seed=effective_seed,
     )
 
 
