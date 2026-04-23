@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mesmer.core.bench import (
+from mesmer.bench import (
     BenchAttackerSpec,
     BenchBudget,
     BenchCellSummary,

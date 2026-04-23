@@ -34,7 +34,7 @@ can re-run. Concretely:
    by snapshot ID (`gpt-4o-mini-2024-07-18`, `claude-3-haiku-20240307`)
    and Ollama models by tag; the local Ollama manifest's digest can be
    recorded in the per-run summary by the operator.
-3. **The judge is code.** `mesmer/core/judges/canary.py` is a ~40-line
+3. **The judge is code.** `mesmer/bench/canary.py` is a ~40-line
    deterministic substring matcher with 19 unit tests. No LLM, no
    randomness, same inputs always score the same way. The in-loop
    LLM judge guides mesmer's next move but does NOT decide benchmark

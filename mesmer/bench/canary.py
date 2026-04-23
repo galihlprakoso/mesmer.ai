@@ -9,7 +9,7 @@ which is exactly what a reproducible benchmark judge needs.
 
 Typical use:
 
-    from mesmer.core.judges.canary import find_canary_in_turns
+    from mesmer.bench.canary import find_canary_in_turns
     result = find_canary_in_turns(ctx.turns, access_code)
     if result.success:
         print(f"Leaked at turn {result.canary_turn}")

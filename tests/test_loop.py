@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-from mesmer.core.agent.context import Context, TurnBudgetExhausted
+from mesmer.core.agent.context import Context
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.judge import JudgeResult
 from mesmer.core.agent import (
@@ -48,10 +48,9 @@ class FakeResponse:
         self.choices = [FakeChoice(message)]
 
 
-def _make_module(name="test-module", has_custom_run=False, sub_modules=None):
+def _make_module(name="test-module", sub_modules=None):
     mod = MagicMock()
     mod.name = name
-    mod.has_custom_run = has_custom_run
     mod.sub_modules = sub_modules or []
     mod.system_prompt = f"You are the {name} module."
     mod.description = "test module"
@@ -262,31 +261,6 @@ class TestCircuitBreaker:
 
         result = await run_react_loop(module, ctx, "test")
         assert "refused" in result.lower()
-
-
-# ---------------------------------------------------------------------------
-# run_react_loop — custom run modules
-# ---------------------------------------------------------------------------
-
-class TestCustomRun:
-    @pytest.mark.asyncio
-    async def test_custom_run_bypasses_loop(self):
-        module = _make_module(has_custom_run=True)
-        module.custom_run = AsyncMock(return_value="custom result")
-
-        ctx = _make_ctx()
-        result = await run_react_loop(module, ctx, "test instruction")
-        assert result == "custom result"
-        module.custom_run.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_custom_run_budget_exhausted(self):
-        module = _make_module(has_custom_run=True)
-        module.custom_run = AsyncMock(side_effect=TurnBudgetExhausted(5))
-
-        ctx = _make_ctx()
-        result = await run_react_loop(module, ctx, "test")
-        assert "Turn budget exhausted" in result
 
 
 # ---------------------------------------------------------------------------

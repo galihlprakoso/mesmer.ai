@@ -135,7 +135,6 @@ class LogEvent(str, Enum):
 
     # Module lifecycle
     MODULE_START = "module_start"
-    CUSTOM_RUN = "custom_run"
     CONCLUDE = "conclude"
 
     # LLM interaction

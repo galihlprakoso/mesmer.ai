@@ -10,7 +10,7 @@ from mesmer.core.module import ModuleConfig, load_module_config
 class Registry:
     """
     Module registry with filesystem auto-discovery.
-    Scans directories for module.yaml / module.py and builds a lookup table.
+    Scans directories for module.yaml and builds a lookup table.
     Converts modules to OpenAI function-calling tool format.
     """
 
@@ -34,7 +34,7 @@ class Registry:
     def auto_discover(self, *paths: str | Path):
         """
         Scan directories for modules. Each subdirectory containing
-        module.yaml or module.py is loaded as a module.
+        module.yaml is loaded as a module.
         Recurses into subdirectories to support nested organization.
         """
         for base_path in paths:
@@ -113,7 +113,6 @@ class Registry:
                 "name": mod.name,
                 "description": mod.description[:100],
                 "sub_modules": mod.sub_modules,
-                "has_custom_run": mod.has_custom_run,
             }
             for mod in self.modules.values()
         ]

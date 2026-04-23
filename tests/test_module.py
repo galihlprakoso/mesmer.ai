@@ -1,9 +1,4 @@
-"""Tests for mesmer.core.module — focused on ``judge_rubric`` parsing
-from both YAML and Python module sources."""
-
-import textwrap
-
-import pytest
+"""Tests for mesmer.core.module — YAML loader + ModuleConfig defaults."""
 
 from mesmer.core.module import ModuleConfig, load_module_config
 
@@ -42,39 +37,6 @@ class TestJudgeRubricField:
         assert cfg is not None
         assert cfg.judge_rubric == ""
 
-    def test_python_module_reads_judge_rubric_attribute(self, tmp_path):
-        module_dir = tmp_path / "pymod"
-        module_dir.mkdir()
-        (module_dir / "module.py").write_text(textwrap.dedent("""
-            class PyMod:
-                name = "pymod"
-                description = "py test"
-                theory = ""
-                system_prompt = "hi"
-                sub_modules: list = []
-                parameters: dict = {}
-                judge_rubric = "Python-side module rubric"
-        """))
-        cfg = load_module_config(module_dir)
-        assert cfg is not None
-        assert cfg.judge_rubric == "Python-side module rubric"
-
-    def test_python_module_without_judge_rubric_defaults_to_empty(self, tmp_path):
-        module_dir = tmp_path / "pymod2"
-        module_dir.mkdir()
-        (module_dir / "module.py").write_text(textwrap.dedent("""
-            class PyMod2:
-                name = "pymod2"
-                description = "py test"
-                theory = ""
-                system_prompt = "hi"
-                sub_modules: list = []
-                parameters: dict = {}
-        """))
-        cfg = load_module_config(module_dir)
-        assert cfg is not None
-        assert cfg.judge_rubric == ""
-
 
 class TestResetTargetField:
     def test_default_is_false(self):
@@ -106,19 +68,7 @@ class TestResetTargetField:
         assert cfg is not None
         assert cfg.reset_target is False
 
-    def test_python_module_reads_reset_target_attribute(self, tmp_path):
-        module_dir = tmp_path / "pyreset"
+    def test_missing_yaml_returns_none(self, tmp_path):
+        module_dir = tmp_path / "empty"
         module_dir.mkdir()
-        (module_dir / "module.py").write_text(textwrap.dedent("""
-            class PyReset:
-                name = "pyreset"
-                description = "py test"
-                theory = ""
-                system_prompt = "hi"
-                sub_modules: list = []
-                parameters: dict = {}
-                reset_target = True
-        """))
-        cfg = load_module_config(module_dir)
-        assert cfg is not None
-        assert cfg.reset_target is True
+        assert load_module_config(module_dir) is None

@@ -321,7 +321,6 @@ class TestCompressionHookedIntoReactLoop:
 
         module = MagicMock()
         module.name = "test"
-        module.has_custom_run = False
         module.sub_modules = []
         module.system_prompt = "sys"
         module.description = "d"
@@ -361,7 +360,6 @@ class TestCompressionHookedIntoReactLoop:
 
         module = MagicMock()
         module.name = "test"
-        module.has_custom_run = False
         module.sub_modules = []
         module.system_prompt = "sys"
         module.description = "d"

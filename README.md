@@ -165,22 +165,6 @@ sub_modules: []  # or list other modules this one can call
 
 Drop it in `modules/` and it auto-discovers.
 
-For custom logic, use Python:
-
-```python
-# modules/my-custom/module.py
-class MyCustomModule:
-    name = "my-custom"
-    description = "Module that needs programmatic control"
-    theory = "..."
-    system_prompt = ""
-    sub_modules = []
-
-    async def run(self, ctx, instruction=""):
-        reply = await ctx.send("probe message")
-        return f"Analysis: {reply}"
-```
-
 ## Scenario format
 
 Scenarios are declarative YAML with `${ENV_VAR}` placeholders:
@@ -270,7 +254,7 @@ Every spec has **two arms**:
 - **baseline** — the dataset's own single-turn `attack` field is replayed against the same target. Apples-to-apples control, so the published delta (*"multi-turn mesmer +33pp over single-turn baseline"*) is a meaningful scientific claim rather than a marketing one.
 
 Judging is **deterministic** — a ~40-line canary-substring matcher in
-[`mesmer/core/judges/canary.py`](mesmer/core/judges/canary.py) with full
+[`mesmer/bench/canary.py`](mesmer/bench/canary.py) with full
 unit-test coverage. The in-loop LLM judge guides mesmer's next move but
 does **not** decide benchmark success. Datasets are SHA-pinned, model
 snapshots are pinned, seeds are committed. Full reproducibility contract:
@@ -288,26 +272,35 @@ some API credit._
 
 ```
 mesmer/
-├── core/
-│   ├── loop.py      # ReAct loop: Plan→Execute→Judge→Reflect→Update
-│   ├── graph.py     # Attack graph (MCTS-inspired search tree)
-│   ├── judge.py     # In-loop LLM judge — scores attempts 1-10
-│   ├── judges/      # Deterministic benchmark judges (canary substring, …)
-│   ├── bench.py     # Benchmark orchestrator (spec loader, trial dispatch, aggregation)
-│   ├── memory.py    # Per-target persistence + global technique stats
-│   ├── context.py   # Shared state, LLM calls via LiteLLM, token telemetry
-│   ├── scenario.py  # YAML scenario loader with ${ENV_VAR} resolution
-│   ├── runner.py    # execute_run — shared CLI/web/bench entry point
-│   ├── module.py    # Module definition and execution
-│   ├── registry.py  # Module auto-discovery
-│   └── keys.py      # API key rotation
-├── targets/
-│   ├── base.py              # Abstract target interface
-│   ├── websocket_target.py  # Declarative WebSocket adapter
+├── core/                    # attacker runtime — agent consumes scenario/runner
+│   ├── agent/               # ReAct loop + tools + judge + compressor + memory
+│   │   ├── engine.py        # run_react_loop — Plan→Execute→Judge→Reflect→Update
+│   │   ├── tools/           # one file per tool (send_message, ask_human, …)
+│   │   ├── judge.py         # in-loop LLM judge (scores attempts 1-10)
+│   │   ├── compressor.py    # CONTINUOUS-mode summary-buffer compression
+│   │   ├── context.py       # shared state, LiteLLM completion, telemetry
+│   │   ├── memory.py        # per-target persistence
+│   │   └── prompts/         # prose prompt text (.prompt.md)
+│   ├── graph.py             # attack graph (MCTS-inspired search tree)
+│   ├── runner.py            # execute_run — shared CLI/web/bench entry point
+│   ├── scenario.py          # YAML scenario loader with ${ENV_VAR} resolution
+│   ├── module.py            # ModuleConfig + YAML loader
+│   ├── registry.py          # module auto-discovery
+│   ├── keys.py              # API key rotation
+│   ├── constants.py         # enums (ToolName, TurnKind, ScenarioMode, …)
+│   └── errors.py            # MesmerError hierarchy
+├── bench/                   # benchmark infrastructure (consumes core)
+│   ├── orchestrator.py      # spec loader, trial dispatch, aggregation, artifacts
+│   └── canary.py            # deterministic substring judge (benchmark success)
+├── targets/                 # adapter layer to external LLMs
+│   ├── base.py              # abstract Target interface
+│   ├── websocket_target.py  # declarative WebSocket adapter
 │   ├── openai_compat.py     # OpenAI-compatible REST
-│   ├── rest.py              # Generic HTTP REST
-│   └── echo.py              # Echo/mock for testing
-├── cli.py           # Click CLI (run, graph, hint, debrief, stats)
+│   ├── rest.py              # generic HTTP REST
+│   └── echo.py              # echo/mock for testing
+├── interfaces/
+│   ├── cli.py               # Click CLI (run, graph, hint, debrief, stats, bench)
+│   └── web/                 # FastAPI + SSE backend + Svelte frontend
 modules/
 ├── attacks/
 │   └── system-prompt-extraction/  # Leader orchestrator

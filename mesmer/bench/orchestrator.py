@@ -40,8 +40,8 @@ from typing import Awaitable, Callable
 
 import yaml
 
+from mesmer.bench.canary import find_canary_in_turns
 from mesmer.core.constants import ScenarioMode
-from mesmer.core.judges.canary import find_canary_in_turns
 from mesmer.core.runner import RunConfig, RunResult, execute_run
 from mesmer.core.scenario import AgentConfig, Objective, Scenario, TargetConfig
 

@@ -75,7 +75,6 @@ def _make_verbose_log():
             "budget":        ("bold red",     "\u26a0"),
             "circuit_break": ("bold yellow",  "\u26a1"),
             "hard_stop":     ("bold red",     "\U0001f6d1"),
-            "custom_run":    ("bold magenta", "\u25b6"),
             "judge":         ("bold blue",    "\u2696"),
             "judge_score":   ("bold blue",    "\U0001f4ca"),
             "judge_error":   ("red",          "\u2696\u2717"),
@@ -632,7 +631,7 @@ async def _bench(
     no_baseline: bool,
     verbose: bool,
 ):
-    from mesmer.core.bench import load_spec, run_benchmark
+    from mesmer.bench import load_spec, run_benchmark
 
     spec_path_obj = Path(spec_path).resolve()
     spec = load_spec(spec_path_obj)

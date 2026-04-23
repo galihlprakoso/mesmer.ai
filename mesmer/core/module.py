@@ -11,7 +11,7 @@ import yaml
 @dataclass
 class ModuleConfig:
     """
-    Configuration for a module. Can be loaded from YAML or defined in Python.
+    Configuration for a module, loaded from ``module.yaml``.
 
     Every module is a ReAct agent defined by:
     - name: unique identifier
@@ -38,13 +38,6 @@ class ModuleConfig:
     # (e.g. foot-in-door).
     reset_target: bool = False
 
-    # For Python modules that override the default ReAct loop
-    custom_run: object | None = None  # async def run(ctx, **kwargs) -> str
-
-    @property
-    def has_custom_run(self) -> bool:
-        return self.custom_run is not None
-
     def tool_description(self) -> str:
         """Full description for use as an OpenAI function-calling tool."""
         parts = [self.description]
@@ -54,23 +47,11 @@ class ModuleConfig:
 
 
 def load_module_config(path: Path) -> ModuleConfig | None:
-    """
-    Load a module from a directory. Checks for module.yaml first,
-    then module.py. Returns None if neither exists.
-    """
+    """Load a module from a directory. Returns None if ``module.yaml`` is missing."""
     yaml_path = path / "module.yaml"
-    py_path = path / "module.py"
-
-    if yaml_path.exists():
-        return _load_yaml_module(yaml_path)
-    elif py_path.exists():
-        return _load_python_module(py_path)
-    return None
-
-
-def _load_yaml_module(path: Path) -> ModuleConfig:
-    """Load a YAML-defined module."""
-    with open(path) as f:
+    if not yaml_path.exists():
+        return None
+    with open(yaml_path) as f:
         data = yaml.safe_load(f)
 
     return ModuleConfig(
@@ -83,35 +64,3 @@ def _load_yaml_module(path: Path) -> ModuleConfig:
         judge_rubric=data.get("judge_rubric", ""),
         reset_target=bool(data.get("reset_target", False)),
     )
-
-
-def _load_python_module(path: Path) -> ModuleConfig:
-    """
-    Load a Python-defined module. The module.py must define a class
-    that inherits from or duck-types Module with name, description,
-    theory, system_prompt, sub_modules, and an async run() method.
-    """
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(f"mesmer_module_{path.parent.name}", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    # Find the Module class — first class with a 'name' attribute
-    for attr_name in dir(mod):
-        attr = getattr(mod, attr_name)
-        if isinstance(attr, type) and hasattr(attr, "name") and attr_name != "Module":
-            instance = attr()
-            return ModuleConfig(
-                name=instance.name,
-                description=getattr(instance, "description", ""),
-                theory=getattr(instance, "theory", ""),
-                system_prompt=getattr(instance, "system_prompt", ""),
-                sub_modules=getattr(instance, "sub_modules", []),
-                parameters=getattr(instance, "parameters", {}),
-                judge_rubric=getattr(instance, "judge_rubric", ""),
-                reset_target=bool(getattr(instance, "reset_target", False)),
-                custom_run=getattr(instance, "run", None),
-            )
-
-    raise ValueError(f"No Module class found in {path}")

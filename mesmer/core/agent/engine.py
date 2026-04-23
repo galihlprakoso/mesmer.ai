@@ -15,7 +15,6 @@ Main features the engine still owns directly:
   - Graph-aware context injection on the leader's first user message.
   - Circuit breaker for models that refuse to use tools.
   - CONTINUOUS-mode compression before each LLM call.
-  - Custom-run bypass for Python modules that replace the ReAct loop.
   - ``conclude`` short-circuit (intercepted here so the loop exits cleanly
     instead of routing through the tool-result path).
 """
@@ -37,7 +36,6 @@ from mesmer.core.constants import (
     ScenarioMode,
     ToolName,
 )
-from mesmer.core.errors import TurnBudgetExhausted
 
 if TYPE_CHECKING:
     from mesmer.core.agent.context import Context
@@ -95,8 +93,8 @@ async def run_react_loop(
     log: LogFn | None = None,
 ) -> str:
     """
-    The universal ReAct loop. Runs any module — simple or complex,
-    YAML or Python. This is the entire framework runtime.
+    The universal ReAct loop. Runs any module — simple or complex.
+    This is the entire framework runtime.
 
     Features:
     - Graph context injection (anti-repetition, frontier, budget mode)
@@ -105,14 +103,6 @@ async def run_react_loop(
     - Circuit breaker for models that refuse
     """
     log = log or _noop_log
-
-    # Python modules with custom logic bypass the ReAct loop
-    if module.has_custom_run:
-        log(LogEvent.CUSTOM_RUN.value, module.name)
-        try:
-            return await module.custom_run(ctx, instruction=instruction)
-        except TurnBudgetExhausted as e:
-            return f"Turn budget exhausted after {e.turns_used} turns."
 
     tools = build_tool_list(module, ctx)
     tool_names = [t["function"]["name"] for t in tools]

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from mesmer.core.judges.canary import (
+from mesmer.bench.canary import (
     find_canary_in_turns,
     scan_canary,
 )
