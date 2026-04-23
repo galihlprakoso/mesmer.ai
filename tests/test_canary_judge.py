@@ -81,7 +81,7 @@ class TestScanCanary:
 
 @dataclass
 class _FakeTurn:
-    """Minimal stand-in for mesmer.core.context.Turn — duck-typed via ``.received``."""
+    """Minimal stand-in for mesmer.core.agent.context.Turn — duck-typed via ``.received``."""
     received: str
     sent: str = ""
 

@@ -388,7 +388,7 @@ class AttackGraph:
           - ``best_score``: int — 0 if untried, otherwise the prior best
 
         The LLM then refines each proposal into a concrete approach one-liner
-        (see :func:`mesmer.core.judge.refine_approach`). It cannot re-pick
+        (see :func:`mesmer.core.agent.judge.refine_approach`). It cannot re-pick
         modules because it is never shown a menu.
         """
         if not available_modules:

@@ -1,4 +1,4 @@
-"""Tests for mesmer.core.memory — TargetMemory and GlobalMemory."""
+"""Tests for mesmer.core.agent.memory — TargetMemory and GlobalMemory."""
 
 import json
 from pathlib import Path
@@ -7,9 +7,9 @@ from unittest.mock import patch
 import pytest
 
 from mesmer.core.graph import AttackGraph
-from mesmer.core.memory import TargetMemory, GlobalMemory, generate_run_id, MESMER_HOME
+from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id, MESMER_HOME
 from mesmer.core.scenario import TargetConfig
-from mesmer.core.context import Turn
+from mesmer.core.agent.context import Turn
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ class TestTargetMemory:
     @pytest.fixture
     def memory(self, target_config, tmp_path):
         """TargetMemory with home dir patched to tmp."""
-        with patch("mesmer.core.memory.MESMER_HOME", tmp_path / ".mesmer"):
+        with patch("mesmer.core.agent.memory.MESMER_HOME", tmp_path / ".mesmer"):
             mem = TargetMemory(target_config)
             mem.base_dir = tmp_path / ".mesmer" / "targets" / mem.target_hash
             yield mem
@@ -225,7 +225,7 @@ class TestTargetMemoryConversation:
 
     @pytest.fixture
     def memory(self, target_config, tmp_path):
-        with patch("mesmer.core.memory.MESMER_HOME", tmp_path / ".mesmer"):
+        with patch("mesmer.core.agent.memory.MESMER_HOME", tmp_path / ".mesmer"):
             mem = TargetMemory(target_config)
             mem.base_dir = tmp_path / ".mesmer" / "targets" / mem.target_hash
             yield mem

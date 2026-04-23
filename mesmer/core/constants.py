@@ -73,6 +73,46 @@ class ScenarioMode(str, Enum):
     CONTINUOUS = "continuous"
 
 
+class CompletionRole(str, Enum):
+    """The role a :meth:`Context.completion` call is playing.
+
+    Drives model selection (attacker vs judge cascade) and rotation
+    behaviour. ``ATTACKER`` uses the rotation override / scenario attacker
+    model; ``JUDGE`` always uses ``effective_judge_model`` so scoring
+    doesn't drift when the attacker rotation kicks in.
+    """
+
+    ATTACKER = "attacker"
+    JUDGE = "judge"
+
+
+class ToolName(str, Enum):
+    """Names of the built-in ReAct tools the engine owns directly.
+
+    Sub-module tools (one per registered ``ModuleConfig``) are dispatched
+    by ``ctx.registry`` and NOT enumerated here — those names are dynamic.
+    """
+
+    SEND_MESSAGE = "send_message"
+    ASK_HUMAN = "ask_human"
+    CONCLUDE = "conclude"
+
+
+class TurnKind(str, Enum):
+    """Discriminator on :class:`mesmer.core.agent.context.Turn`.
+
+    ``EXCHANGE`` — a real ``sent → received`` round-trip with the target.
+    ``SUMMARY`` — a synthetic LLM-authored recap produced by the C9
+    compressor when the CONTINUOUS-mode transcript overshoots the attacker
+    model's context window. Summary turns carry ``sent=""`` and
+    ``received=<summary text>`` and stack (a later compression can fold
+    earlier summaries into a new one).
+    """
+
+    EXCHANGE = "exchange"
+    SUMMARY = "summary"
+
+
 class BudgetMode(str, Enum):
     """Phase of the run based on turn-budget consumption.
 

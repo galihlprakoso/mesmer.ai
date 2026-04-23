@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
-from mesmer.core.context import (
+from mesmer.core.agent.context import (
     Context,
     HumanQuestionBroker,
     HumanQuestionTimeout,

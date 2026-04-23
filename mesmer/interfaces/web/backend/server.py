@@ -15,10 +15,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from mesmer.core.agent.context import HumanQuestionBroker
+from mesmer.core.agent.parsing import parse_llm_json
 from mesmer.core.constants import ContextMode, ScenarioMode
-from mesmer.core.context import HumanQuestionBroker
 from mesmer.core.graph import AttackGraph
-from mesmer.core.memory import TargetMemory, GlobalMemory
+from mesmer.core.agent.memory import TargetMemory, GlobalMemory
 from mesmer.core.runner import (
     RunConfig,
     execute_run,
@@ -459,16 +460,8 @@ Respond strictly as JSON: {{"reply": "...", "updated_plan": "..." | null}}
         try:
             response = await litellm.acompletion(**kwargs)
             raw = response.choices[0].message.content or "{}"
-            # Best-effort JSON parse — strip markdown fences if present
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.strip("`")
-                if cleaned.startswith("json"):
-                    cleaned = cleaned[4:]
-                cleaned = cleaned.strip()
-            try:
-                parsed = json.loads(cleaned)
-            except json.JSONDecodeError:
+            parsed = parse_llm_json(raw, default={"reply": raw, "updated_plan": None})
+            if not isinstance(parsed, dict):
                 parsed = {"reply": raw, "updated_plan": None}
 
             reply = parsed.get("reply", "")

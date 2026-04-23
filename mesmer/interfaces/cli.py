@@ -13,7 +13,7 @@ from rich.table import Table
 
 from mesmer.core.constants import NodeSource, ScenarioMode
 from mesmer.core.graph import AttackGraph
-from mesmer.core.memory import TargetMemory, GlobalMemory
+from mesmer.core.agent.memory import TargetMemory, GlobalMemory
 from mesmer.core.runner import RunConfig, execute_run, BUILTIN_MODULES
 from mesmer.core.registry import Registry
 from mesmer.core.scenario import load_scenario

@@ -85,7 +85,7 @@ def find_canary_in_turns(
 
     Each turn may be either:
 
-      - a :class:`mesmer.core.context.Turn` dataclass (we read ``.received``),
+      - a :class:`mesmer.core.agent.context.Turn` dataclass (we read ``.received``),
       - or a raw string — handy for tests.
 
     Returns a :class:`CanaryJudgeResult`. The search short-circuits at

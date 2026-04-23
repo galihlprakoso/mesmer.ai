@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Callable
 
 from mesmer.core.constants import ContextMode, ScenarioMode
-from mesmer.core.context import Context, HumanQuestionBroker, RunTelemetry
+from mesmer.core.agent.context import Context, HumanQuestionBroker, RunTelemetry
 from mesmer.core.graph import AttackGraph
-from mesmer.core.loop import LogFn, run_react_loop
-from mesmer.core.memory import TargetMemory, GlobalMemory, generate_run_id
+from mesmer.core.agent import LogFn, run_react_loop
+from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id
 from mesmer.core.registry import Registry
 from mesmer.core.scenario import load_scenario, AgentConfig, Scenario
 

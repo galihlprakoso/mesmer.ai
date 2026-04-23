@@ -19,10 +19,11 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mesmer.core.agent.context import Turn
+from mesmer.core.constants import TurnKind
 from mesmer.core.graph import AttackGraph, hash_target
 
 if TYPE_CHECKING:
-    from mesmer.core.context import Turn
     from mesmer.core.scenario import TargetConfig
 
 
@@ -130,7 +131,6 @@ class TargetMemory:
         conversation file shouldn't kill the run; the attacker just starts
         fresh and the next save overwrites the bad blob.
         """
-        from mesmer.core.context import Turn as _Turn
         p = self.conversation_path
         if not p.exists():
             return []
@@ -144,15 +144,16 @@ class TargetMemory:
             if not isinstance(item, dict):
                 continue
             try:
-                turns.append(_Turn(
+                # Turn.__post_init__ coerces the kind string (or missing value
+                # from older JSON files) into TurnKind. Unknown kind values
+                # raise ValueError — caught below and the row is dropped.
+                turns.append(Turn(
                     sent=str(item.get("sent", "") or ""),
                     received=str(item.get("received", "") or ""),
                     module=str(item.get("module", "") or ""),
                     timestamp=float(item.get("timestamp") or 0.0),
                     is_error=bool(item.get("is_error", False)),
-                    # C9 — summary Turns stored by prior runs round-trip here.
-                    # Older JSON files without the field default to "exchange".
-                    kind=str(item.get("kind", "exchange") or "exchange"),
+                    kind=TurnKind(item.get("kind") or TurnKind.EXCHANGE.value),
                 ))
             except (TypeError, ValueError):
                 continue

@@ -13,10 +13,17 @@ from mesmer.core.constants import (
     BUDGET_EXPLORE_UPPER_RATIO,
     TARGET_ERROR_MARKERS,
     BudgetMode,
+    CompletionRole,
     ContextMode,
     LogEvent,
     ScenarioMode,
+    TurnKind,
 )
+from mesmer.core.errors import HumanQuestionTimeout, TurnBudgetExhausted
+
+# Re-exported so ``from mesmer.core.agent.context import TurnBudgetExhausted``
+# (the pre-errors-module import path used by tests and engine) keeps working.
+__all_exceptions__ = ("HumanQuestionTimeout", "TurnBudgetExhausted")
 
 
 def is_target_error(reply: str) -> bool:
@@ -96,18 +103,6 @@ class RunTelemetry:
         self.total_tokens += _get("total_tokens")
 
 
-class TurnBudgetExhausted(Exception):
-    """Raised when a module exceeds its turn budget."""
-
-    def __init__(self, turns_used: int):
-        self.turns_used = turns_used
-        super().__init__(f"Turn budget exhausted after {turns_used} turns")
-
-
-class HumanQuestionTimeout(Exception):
-    """Raised when a human doesn't answer a co-op question in time."""
-
-
 class HumanQuestionBroker:
     """Coordinates ask_human round-trips between the loop and the UI.
 
@@ -183,14 +178,13 @@ class HumanQuestionBroker:
 class Turn:
     """A single exchange with the target.
 
-    Most Turns are ``kind="exchange"``: a real ``sent`` → ``received`` round
-    with the target model. CONTINUOUS-mode compression (C9) introduces a
-    second kind, ``"summary"``, where the Turn carries a synthetic LLM-
-    authored recap of multiple older exchanges that were compressed to fit
-    the attacker's context budget. Summary Turns have ``sent=""`` and
+    Most Turns are :attr:`TurnKind.EXCHANGE`: a real ``sent`` → ``received``
+    round with the target model. CONTINUOUS-mode compression (C9) introduces
+    :attr:`TurnKind.SUMMARY`, where the Turn carries a synthetic LLM-authored
+    recap of multiple older exchanges that were compressed to fit the
+    attacker's context budget. Summary Turns have ``sent=""`` and
     ``received=<summary text>``; ``is_error`` is always False for them.
-    Summary Turns can themselves be compressed later (they stack), so the
-    field choice is a simple string rather than a two-case enum.
+    Summary Turns can themselves be compressed later (they stack).
     """
 
     sent: str
@@ -202,10 +196,14 @@ class Turn:
     # real reply from the target model. Judge and tool-result formatting
     # use this to avoid scoring an error as a refusal.
     is_error: bool = False
-    # C9 — "exchange" (default) or "summary". Summary turns are compressed
-    # blocks of older history; formatters render them as ``[Summary of N
-    # earlier turns: ...]`` so attacker + judge can read them plainly.
-    kind: str = "exchange"
+    kind: TurnKind = TurnKind.EXCHANGE
+
+    def __post_init__(self) -> None:
+        # Coerce string inputs (legacy JSON payloads, test fixtures that pass
+        # ``kind="summary"``) into the enum so downstream ``==`` checks have
+        # a consistent type.
+        if not isinstance(self.kind, TurnKind):
+            self.kind = TurnKind(self.kind)
 
     def to_dict(self) -> dict:
         return {
@@ -214,7 +212,7 @@ class Turn:
             "module": self.module,
             "timestamp": self.timestamp,
             "is_error": self.is_error,
-            "kind": self.kind,
+            "kind": self.kind.value,
         }
 
 
@@ -293,10 +291,6 @@ class Context:
         # Attack graph — shared across parent/child
         self.graph: AttackGraph | None = graph
 
-        # Track messages for current module execution (for judge)
-        self.current_messages_sent: list[str] = []
-        self.current_responses: list[str] = []
-
         # Shared across parent/child — same list reference
         self.turns: list[Turn] = _turns if _turns is not None else []
         self.module_log: list[ModuleRun] = _module_log if _module_log is not None else []
@@ -315,8 +309,8 @@ class Context:
         # P5 — when a scenario declares an attacker-model ensemble, each
         # child context is bound to a specific model chosen round-robin by
         # ctx.run_module(). Empty string means "use agent_config.model".
-        # The judge role (see completion(role="judge")) bypasses this and
-        # always uses agent_config.effective_judge_model.
+        # CompletionRole.JUDGE bypasses this and always resolves to
+        # agent_config.effective_judge_model.
         self.attacker_model_override: str = attacker_model_override
 
         # P6 — nesting depth for log display. Root context has depth 0;
@@ -343,16 +337,16 @@ class Context:
         """Currently-bound attacker model (rotation override wins)."""
         return self.attacker_model_override or self.agent_config.model
 
-    def _resolve_model(self, role: str) -> str:
+    def _resolve_model(self, role: CompletionRole) -> str:
         """Pick the model to use for an LLM call based on its role.
 
-        - ``attacker`` (default): the rotation-assigned attacker model if
-          bound on this context, otherwise the config's base attacker model.
-        - ``judge``: the scenario's judge model (stable across rotation).
-
-        Unknown roles are treated as attacker for forward-compat.
+        - :attr:`CompletionRole.ATTACKER` (default): the rotation-assigned
+          attacker model if bound on this context, otherwise the config's
+          base attacker model.
+        - :attr:`CompletionRole.JUDGE`: the scenario's judge model (stable
+          across rotation).
         """
-        if role == "judge":
+        if role == CompletionRole.JUDGE:
             return self.agent_config.effective_judge_model
         return self.attacker_model_override or self.agent_config.model
 
@@ -361,16 +355,16 @@ class Context:
         messages: list[dict],
         tools: list[dict] | None = None,
         *,
-        role: str = "attacker",
+        role: CompletionRole = CompletionRole.ATTACKER,
     ):
         """
         Call the LLM via litellm. Returns an OpenAI-compatible response.
         Supports any provider: openrouter/, anthropic/, openai/, gemini/, etc.
 
         ``role`` picks which model to use (see :meth:`_resolve_model`).
-        Keep it ``"attacker"`` for ReAct-loop LLM calls; pass ``"judge"``
-        from judge/refinement code so scoring doesn't drift with the
-        attacker-model rotation.
+        Keep it :attr:`CompletionRole.ATTACKER` for ReAct-loop LLM calls;
+        pass :attr:`CompletionRole.JUDGE` from judge/refinement code so
+        scoring doesn't drift with the attacker-model rotation.
 
         Side effect: `self._last_key_used` is set to whichever API key was
         selected for this call (or "" when none). The retry loop reads it
@@ -443,19 +437,7 @@ class Context:
             Turn(sent=message, received=reply, module=module_name, is_error=error)
         )
         self.turns_used += 1
-
-        # Track for judge evaluation
-        self.current_messages_sent.append(message)
-        self.current_responses.append(reply)
-
         return reply
-
-    async def generate(self, prompt: str, temperature: float = 0.7) -> str:
-        """Use the LLM to generate content (for modules that craft messages)."""
-        response = await self.completion(
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.choices[0].message.content
 
     async def run_module(
         self,
@@ -478,7 +460,7 @@ class Context:
           and ignored — breaking continuity would defeat the point of
           continuous mode.
         """
-        from mesmer.core.loop import run_react_loop
+        from mesmer.core.agent import run_react_loop
 
         module = self.registry.get(name)
         if module is None:
@@ -531,11 +513,6 @@ class Context:
             )
         )
         return result
-
-    def reset_current_tracking(self) -> None:
-        """Reset per-module message tracking (called before each module run)."""
-        self.current_messages_sent = []
-        self.current_responses = []
 
     @property
     def budget_mode(self) -> str:
@@ -632,7 +609,7 @@ class Context:
 
         lines = []
         for turn in recent:
-            if getattr(turn, "kind", "exchange") == "summary":
+            if turn.kind == TurnKind.SUMMARY:
                 lines.append(f"[Summary of compressed earlier turns: {turn.received}]")
                 lines.append("")
                 continue
@@ -657,7 +634,7 @@ class Context:
 
         lines = []
         for turn in recent:
-            if getattr(turn, "kind", "exchange") == "summary":
+            if turn.kind == TurnKind.SUMMARY:
                 lines.append(f"[Summary of compressed earlier turns: {turn.received}]")
                 lines.append("")
                 continue

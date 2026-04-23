@@ -1,9 +1,10 @@
 """Core runtime — Context, Module, Registry, ReAct loop."""
 
-from mesmer.core.context import Context, Turn, ModuleRun, TurnBudgetExhausted
+from mesmer.core.agent.context import Context, Turn, ModuleRun
+from mesmer.core.errors import TurnBudgetExhausted
 from mesmer.core.module import ModuleConfig, load_module_config
 from mesmer.core.registry import Registry
-from mesmer.core.loop import run_react_loop
+from mesmer.core.agent import run_react_loop
 from mesmer.core.scenario import Scenario, Objective, load_scenario
 from mesmer.core.keys import KeyPool
 

@@ -9,7 +9,7 @@ from click.testing import CliRunner
 
 from mesmer.interfaces.cli import cli
 from mesmer.core.graph import AttackGraph
-from mesmer.core.memory import GlobalMemory
+from mesmer.core.agent.memory import GlobalMemory
 
 
 # ---------------------------------------------------------------------------

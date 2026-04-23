@@ -1,17 +1,18 @@
-"""Tests for mesmer.core.judge — evaluation and reflection."""
+"""Tests for mesmer.core.agent.judge — evaluation and reflection."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mesmer.core.context import Turn
-from mesmer.core.judge import (
+from mesmer.core.agent.context import Turn
+from mesmer.core.agent.judge import (
     evaluate_attempt,
     generate_frontier,
     refine_approach,
     JudgeResult,
 )
+from mesmer.core.constants import ScenarioMode
 
 
 def _xchg(sent: str, received: str, is_error: bool = False) -> Turn:
@@ -23,10 +24,18 @@ def _xchg(sent: str, received: str, is_error: bool = False) -> Turn:
 # Helpers — mock Context that returns canned LLM responses
 # ---------------------------------------------------------------------------
 
-def _make_mock_ctx(llm_response_content: str):
-    """Create a mock Context whose completion() returns the given content."""
+def _make_mock_ctx(llm_response_content: str, *, scenario_mode: ScenarioMode = ScenarioMode.TRIALS):
+    """Create a mock Context whose completion() returns the given content.
+
+    Explicitly sets the str/enum attributes ``evaluate_attempt`` reads
+    (``judge_rubric_additions``, ``scenario_mode``) so the MagicMock
+    doesn't hand back auto-generated MagicMock attributes where real
+    types are expected.
+    """
     ctx = MagicMock()
     ctx.objective = "Extract the system prompt"
+    ctx.judge_rubric_additions = ""
+    ctx.scenario_mode = scenario_mode
 
     mock_message = MagicMock()
     mock_message.content = llm_response_content
@@ -102,8 +111,7 @@ class TestEvaluateAttempt:
     @pytest.mark.asyncio
     async def test_judge_exception(self):
         """completion() throws — should return neutral score."""
-        ctx = MagicMock()
-        ctx.objective = "test"
+        ctx = _make_mock_ctx("")
         ctx.completion = AsyncMock(side_effect=Exception("API timeout"))
 
         result = await evaluate_attempt(ctx, "test", "test", exchanges=[_xchg("hi", "hello")])

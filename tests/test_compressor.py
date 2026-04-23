@@ -1,4 +1,4 @@
-"""Tests for mesmer.core.compressor — summary-buffer compression (C9).
+"""Tests for mesmer.core.agent.compressor — summary-buffer compression (C9).
 
 The compressor only fires under CONTINUOUS mode and only when the current
 messages payload overshoots the effective context budget. Tests cover the
@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mesmer.core.compressor import maybe_compress
+from mesmer.core.agent.compressor import maybe_compress
 from mesmer.core.constants import LogEvent, ScenarioMode
-from mesmer.core.context import Context, Turn
+from mesmer.core.agent.context import Context, Turn
 from mesmer.core.graph import AttackGraph
 from mesmer.core.scenario import AgentConfig
 
@@ -291,7 +291,7 @@ class TestCompressionHookedIntoReactLoop:
     @pytest.mark.asyncio
     async def test_attacker_hook_fires_in_continuous(self):
         from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.loop import run_react_loop
+        from mesmer.core.agent import run_react_loop
 
         # Stage a completion that immediately concludes — we only care that
         # maybe_compress was called on the first (and only) iteration.
@@ -327,7 +327,7 @@ class TestCompressionHookedIntoReactLoop:
         module.description = "d"
         module.theory = "t"
 
-        with patch("mesmer.core.compressor.maybe_compress", new=_AsyncMock(return_value=False)) as mock_compress:
+        with patch("mesmer.core.agent.compressor.maybe_compress", new=_AsyncMock(return_value=False)) as mock_compress:
             await run_react_loop(module, ctx, "probe")
 
         # Must be called at least once per iteration — one iteration here.
@@ -341,7 +341,7 @@ class TestCompressionHookedIntoReactLoop:
         """TRIALS runs must never call maybe_compress — the compressor's
         own TRIALS guard is defense-in-depth; the loop also short-circuits."""
         from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.loop import run_react_loop
+        from mesmer.core.agent import run_react_loop
 
         def _make_completion():
             conclude_msg = MagicMock()
@@ -367,7 +367,7 @@ class TestCompressionHookedIntoReactLoop:
         module.description = "d"
         module.theory = "t"
 
-        with patch("mesmer.core.compressor.maybe_compress", new=_AsyncMock(return_value=False)) as mock_compress:
+        with patch("mesmer.core.agent.compressor.maybe_compress", new=_AsyncMock(return_value=False)) as mock_compress:
             await run_react_loop(module, ctx, "probe")
 
         assert mock_compress.await_count == 0
@@ -380,16 +380,16 @@ class TestCompressionHookedIntoJudge:
     @pytest.mark.asyncio
     async def test_judge_hook_fires_in_continuous(self):
         from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.judge import JudgeResult
-        from mesmer.core.loop import _judge_module_result
+        from mesmer.core.agent.judge import JudgeResult
+        from mesmer.core.agent import _judge_module_result
 
         ctx = _make_ctx(scenario_mode=ScenarioMode.CONTINUOUS,
                         turns=_make_turns(5))
 
         fake_result = JudgeResult(5, "leaked", "angle", "", "next")
-        with patch("mesmer.core.compressor.maybe_compress",
+        with patch("mesmer.core.agent.compressor.maybe_compress",
                    new=_AsyncMock(return_value=False)) as mock_compress, \
-             patch("mesmer.core.judge.evaluate_attempt",
+             patch("mesmer.core.agent.judge.evaluate_attempt",
                    new=_AsyncMock(return_value=fake_result)):
             result = await _judge_module_result(
                 ctx, "mod", "approach",
@@ -407,16 +407,16 @@ class TestCompressionHookedIntoJudge:
     @pytest.mark.asyncio
     async def test_judge_hook_skipped_in_trials(self):
         from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.judge import JudgeResult
-        from mesmer.core.loop import _judge_module_result
+        from mesmer.core.agent.judge import JudgeResult
+        from mesmer.core.agent import _judge_module_result
 
         ctx = _make_ctx(scenario_mode=ScenarioMode.TRIALS,
                         turns=_make_turns(5))
         fake_result = JudgeResult(5, "", "", "", "")
 
-        with patch("mesmer.core.compressor.maybe_compress",
+        with patch("mesmer.core.agent.compressor.maybe_compress",
                    new=_AsyncMock(return_value=False)) as mock_compress, \
-             patch("mesmer.core.judge.evaluate_attempt",
+             patch("mesmer.core.agent.judge.evaluate_attempt",
                    new=_AsyncMock(return_value=fake_result)):
             await _judge_module_result(
                 ctx, "mod", "approach",
@@ -435,8 +435,8 @@ class TestCompressionHookedIntoReflect:
     @pytest.mark.asyncio
     async def test_refine_hook_fires_in_continuous(self):
         from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.judge import JudgeResult
-        from mesmer.core.loop import _reflect_and_expand
+        from mesmer.core.agent.judge import JudgeResult
+        from mesmer.core.agent import _reflect_and_expand
 
         ctx = _make_ctx(scenario_mode=ScenarioMode.CONTINUOUS,
                         turns=_make_turns(5))
@@ -449,9 +449,9 @@ class TestCompressionHookedIntoReflect:
         async def fake_refine(ctx, *, module, rationale, judge_result, **kw):
             return "x"
 
-        with patch("mesmer.core.compressor.maybe_compress",
+        with patch("mesmer.core.agent.compressor.maybe_compress",
                    new=_AsyncMock(return_value=False)) as mock_compress, \
-             patch("mesmer.core.judge.refine_approach", new=fake_refine):
+             patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
                 ctx, "foo", "a", judge, current_node,
                 log=lambda *a, **kw: None,
@@ -465,8 +465,8 @@ class TestCompressionHookedIntoReflect:
     @pytest.mark.asyncio
     async def test_refine_hook_skipped_in_trials(self):
         from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.judge import JudgeResult
-        from mesmer.core.loop import _reflect_and_expand
+        from mesmer.core.agent.judge import JudgeResult
+        from mesmer.core.agent import _reflect_and_expand
 
         ctx = _make_ctx(scenario_mode=ScenarioMode.TRIALS,
                         turns=_make_turns(5))
@@ -479,9 +479,9 @@ class TestCompressionHookedIntoReflect:
         async def fake_refine(ctx, *, module, rationale, judge_result, **kw):
             return "x"
 
-        with patch("mesmer.core.compressor.maybe_compress",
+        with patch("mesmer.core.agent.compressor.maybe_compress",
                    new=_AsyncMock(return_value=False)) as mock_compress, \
-             patch("mesmer.core.judge.refine_approach", new=fake_refine):
+             patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
                 ctx, "foo", "a", judge, current_node,
                 log=lambda *a, **kw: None,
@@ -503,11 +503,11 @@ class TestCompressionPersistsAcrossRuns:
 
     @pytest.mark.asyncio
     async def test_compressed_state_round_trips_across_runs(self, tmp_path):
-        from mesmer.core.memory import TargetMemory
+        from mesmer.core.agent.memory import TargetMemory
         from mesmer.core.scenario import TargetConfig
 
         target_config = TargetConfig(adapter="echo", url="e2e://test")
-        with patch("mesmer.core.memory.MESMER_HOME", tmp_path / ".mesmer"):
+        with patch("mesmer.core.agent.memory.MESMER_HOME", tmp_path / ".mesmer"):
             memory = TargetMemory(target_config)
             memory.base_dir = tmp_path / ".mesmer" / "targets" / memory.target_hash
 
@@ -565,11 +565,11 @@ class TestCompressionPersistsAcrossRuns:
     def test_fresh_flag_wipes_conversation_for_continuous(self, tmp_path):
         """``--fresh`` with CONTINUOUS must delete the persisted transcript —
         otherwise a "start over" invocation silently inherits old state."""
-        from mesmer.core.memory import TargetMemory
+        from mesmer.core.agent.memory import TargetMemory
         from mesmer.core.scenario import TargetConfig
 
         target_config = TargetConfig(adapter="echo", url="e2e://fresh")
-        with patch("mesmer.core.memory.MESMER_HOME", tmp_path / ".mesmer"):
+        with patch("mesmer.core.agent.memory.MESMER_HOME", tmp_path / ".mesmer"):
             memory = TargetMemory(target_config)
             memory.base_dir = tmp_path / ".mesmer" / "targets" / memory.target_hash
 
@@ -588,20 +588,20 @@ class TestCompressionPersistsAcrossRuns:
 class TestTokenCountingHelpers:
     def test_char_fallback_empty_returns_zero(self):
         """Empty string → 0 tokens (guards division-by-zero downstream)."""
-        from mesmer.core.compressor import _char_fallback
+        from mesmer.core.agent.compressor import _char_fallback
         assert _char_fallback("") == 0
         assert _char_fallback(None) == 0  # type: ignore[arg-type]
 
     def test_char_fallback_short_string_returns_one(self):
         """Any non-empty text counts as >= 1 token so compression signal
         stays monotonic."""
-        from mesmer.core.compressor import _char_fallback
+        from mesmer.core.agent.compressor import _char_fallback
         assert _char_fallback("x") == 1
 
     def test_count_tokens_exception_falls_back(self):
         """litellm raises → char fallback, not 0 (which would disable
         compression silently on every unknown model)."""
-        from mesmer.core.compressor import _count_tokens
+        from mesmer.core.agent.compressor import _count_tokens
         with patch("litellm.token_counter", side_effect=RuntimeError("boom")):
             # 40 chars / 4 ≈ 10 tokens — monotonic with text length.
             assert _count_tokens("unknown/model", "x" * 40) == 10
@@ -609,7 +609,7 @@ class TestTokenCountingHelpers:
     def test_count_tokens_non_int_return_falls_back(self):
         """litellm returning a non-int (None, str, etc.) is treated as a
         failed tokenizer; char fallback wins."""
-        from mesmer.core.compressor import _count_tokens
+        from mesmer.core.agent.compressor import _count_tokens
         with patch("litellm.token_counter", return_value=None):
             assert _count_tokens("x/y", "xxxxx") > 0
         with patch("litellm.token_counter", return_value="nope"):
@@ -618,13 +618,13 @@ class TestTokenCountingHelpers:
     def test_count_message_tokens_uses_litellm_when_available(self):
         """When litellm can tokenise the full messages payload, that value
         wins — we don't override it with the fallback."""
-        from mesmer.core.compressor import _count_message_tokens
+        from mesmer.core.agent.compressor import _count_message_tokens
         with patch("litellm.token_counter", return_value=777):
             assert _count_message_tokens("real/model", [{"content": "x"}]) == 777
 
     def test_count_message_tokens_fallback_on_exception(self):
         """Exception → sum of contents via char fallback. Monotonic, non-zero."""
-        from mesmer.core.compressor import _count_message_tokens
+        from mesmer.core.agent.compressor import _count_message_tokens
         msgs = [{"content": "x" * 20}, {"content": "y" * 20}]
         with patch("litellm.token_counter", side_effect=Exception("x")):
             # Two 20-char messages joined with \n = 41 chars → ~10 tokens.
@@ -633,17 +633,19 @@ class TestTokenCountingHelpers:
 
     def test_estimate_turns_tokens_empty_list_is_zero(self):
         """No turns → 0 tokens. Used to short-circuit size checks."""
-        from mesmer.core.compressor import _estimate_turns_tokens
+        from mesmer.core.agent.compressor import _estimate_turns_tokens
         assert _estimate_turns_tokens("x/y", []) == 0
 
 
 class TestSummariseBlockFailurePaths:
     @pytest.mark.asyncio
-    async def test_summarise_block_catches_ctx_completion_exception(self):
-        """When ctx.completion raises (network, auth, etc.) the summariser
-        must return "" so maybe_compress keeps the transcript intact
-        rather than blowing up the run."""
-        from mesmer.core.compressor import _summarise_block
+    async def test_summarise_block_wraps_ctx_completion_exception(self):
+        """When ctx.completion raises, the summariser must surface a typed
+        CompressionLLMError so the caller can log a real reason. The
+        ``maybe_compress`` boundary is the only place that translates the
+        error into a logged no-op."""
+        from mesmer.core.agent.compressor import _summarise_block
+        from mesmer.core.errors import CompressionLLMError
 
         ctx = _make_ctx(turns=_make_turns(5))
 
@@ -651,18 +653,21 @@ class TestSummariseBlockFailurePaths:
             raise RuntimeError("provider down")
         ctx.completion = boom
 
-        out = await _summarise_block(
-            ctx, ctx.turns,
-            explicit_compression_model="",  # no override → routes through ctx.completion
-        )
-        assert out == ""
+        with pytest.raises(CompressionLLMError) as exc_info:
+            await _summarise_block(
+                ctx, ctx.turns,
+                explicit_compression_model="",  # no override → routes through ctx.completion
+            )
+        assert "provider down" in str(exc_info.value)
+        assert isinstance(exc_info.value.cause, RuntimeError)
 
     @pytest.mark.asyncio
     async def test_summarise_block_restores_attacker_override_after_call(self):
         """Summariser temporarily clears attacker_model_override so role=
         judge wins; it must restore the prior value, including on failure,
         so the attacker rotation state isn't corrupted."""
-        from mesmer.core.compressor import _summarise_block
+        from mesmer.core.agent.compressor import _summarise_block
+        from mesmer.core.errors import CompressionLLMError
 
         ctx = _make_ctx(turns=_make_turns(5))
         ctx.attacker_model_override = "rotated/model-B"
@@ -671,9 +676,31 @@ class TestSummariseBlockFailurePaths:
             raise RuntimeError("x")
         ctx.completion = boom
 
-        await _summarise_block(ctx, ctx.turns, explicit_compression_model="")
+        with pytest.raises(CompressionLLMError):
+            await _summarise_block(ctx, ctx.turns, explicit_compression_model="")
         # Prior override restored even on exception.
         assert ctx.attacker_model_override == "rotated/model-B"
+
+    @pytest.mark.asyncio
+    async def test_summarise_block_rejects_empty_completion(self):
+        """Empty content from the judge completion is also a compression
+        failure — raise typed error so maybe_compress can log a specific
+        reason instead of silently dropping the summary."""
+        from mesmer.core.agent.compressor import _summarise_block
+        from mesmer.core.errors import CompressionLLMError
+
+        ctx = _make_ctx(turns=_make_turns(5))
+
+        async def empty(messages, tools=None, *, role="attacker"):
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message = MagicMock()
+            resp.choices[0].message.content = "   "
+            return resp
+        ctx.completion = empty
+
+        with pytest.raises(CompressionLLMError):
+            await _summarise_block(ctx, ctx.turns, explicit_compression_model="")
 
 
 class TestRawCompletionPath:
@@ -683,7 +710,7 @@ class TestRawCompletionPath:
 
     @pytest.mark.asyncio
     async def test_raw_completion_forwards_api_base_when_set(self):
-        from mesmer.core.compressor import _raw_completion
+        from mesmer.core.agent.compressor import _raw_completion
 
         ctx = _make_ctx(turns=[])
         ctx.agent_config.api_base = "https://custom.endpoint/v1"
@@ -707,10 +734,13 @@ class TestRawCompletionPath:
         assert captured["api_base"] == "https://custom.endpoint/v1"
 
     @pytest.mark.asyncio
-    async def test_raw_completion_returns_empty_on_exception(self):
-        """litellm raises → return "" so maybe_compress treats it as a
-        failed compression (leaves ctx.turns intact)."""
-        from mesmer.core.compressor import _raw_completion
+    async def test_raw_completion_raises_on_exception(self):
+        """litellm raises → we raise :class:`CompressionLLMError` so the
+        failure has a typed reason the caller can log. ``maybe_compress``
+        is the single catch boundary that turns this into a logged no-op,
+        leaving ctx.turns intact."""
+        from mesmer.core.agent.compressor import _raw_completion
+        from mesmer.core.errors import CompressionLLMError
 
         ctx = _make_ctx(turns=[])
 
@@ -718,8 +748,31 @@ class TestRawCompletionPath:
             raise RuntimeError("provider down")
 
         with patch("litellm.acompletion", new=fake_acompletion):
-            out = await _raw_completion(ctx, "override/model", [{"content": "x"}])
-        assert out == ""
+            with pytest.raises(CompressionLLMError) as exc_info:
+                await _raw_completion(ctx, "override/model", [{"content": "x"}])
+        assert "override/model" in str(exc_info.value)
+        assert isinstance(exc_info.value.cause, RuntimeError)
+
+    @pytest.mark.asyncio
+    async def test_raw_completion_raises_on_empty_content(self):
+        """An empty reply is treated the same as a call failure — the
+        caller has nothing to stitch in as the summary, so surface a
+        typed error instead of returning a blank string."""
+        from mesmer.core.agent.compressor import _raw_completion
+        from mesmer.core.errors import CompressionLLMError
+
+        ctx = _make_ctx(turns=[])
+
+        async def fake_acompletion(**kwargs):
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message = MagicMock()
+            resp.choices[0].message.content = ""
+            return resp
+
+        with patch("litellm.acompletion", new=fake_acompletion):
+            with pytest.raises(CompressionLLMError):
+                await _raw_completion(ctx, "override/model", [{"content": "x"}])
 
 
 class TestMaybeCompressMessagesArg:
@@ -767,5 +820,5 @@ class TestMaybeCompressMessagesArg:
         )
         assert ran is False
         compression_logs = [e for e in events if e[0] == LogEvent.COMPRESSION.value]
-        # Two events: one announcing the attempt, one announcing the miss.
-        assert any("returned empty" in d or "intact" in d for _, d in compression_logs)
+        # Two events: one announcing the attempt, one announcing the abort with a reason.
+        assert any("Compression aborted" in d and "empty" in d for _, d in compression_logs)

@@ -1,14 +1,14 @@
-"""Tests for mesmer.core.loop — the ReAct loop with judge/reflect/graph cycle."""
+"""Tests for mesmer.core.agent — the ReAct loop with judge/reflect/graph cycle."""
 
 import json
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-from mesmer.core.context import Context, TurnBudgetExhausted
+from mesmer.core.agent.context import Context, TurnBudgetExhausted
 from mesmer.core.graph import AttackGraph
-from mesmer.core.judge import JudgeResult
-from mesmer.core.loop import (
+from mesmer.core.agent.judge import JudgeResult
+from mesmer.core.agent import (
     run_react_loop,
     _build_graph_context,
     _reflect_and_expand,
@@ -317,13 +317,13 @@ class TestErrorHandling:
         module = _make_module()
 
         # Patch the retry delays to be instant for tests
-        import mesmer.core.loop as loop_mod
-        original_delays = loop_mod.RETRY_DELAYS
-        loop_mod.RETRY_DELAYS = [0, 0, 0]
+        import mesmer.core.agent as agent_mod
+        original_delays = agent_mod.RETRY_DELAYS
+        agent_mod.RETRY_DELAYS = [0, 0, 0]
         try:
             result = await run_react_loop(module, ctx, "test")
         finally:
-            loop_mod.RETRY_DELAYS = original_delays
+            agent_mod.RETRY_DELAYS = original_delays
 
         assert "LLM error" in result or "retries exhausted" in result
         assert call_count[0] == 3  # tried 3 times
@@ -345,13 +345,13 @@ class TestErrorHandling:
         ctx.completion = flaky_completion
         module = _make_module()
 
-        import mesmer.core.loop as loop_mod
-        original_delays = loop_mod.RETRY_DELAYS
-        loop_mod.RETRY_DELAYS = [0, 0, 0]
+        import mesmer.core.agent as agent_mod
+        original_delays = agent_mod.RETRY_DELAYS
+        agent_mod.RETRY_DELAYS = [0, 0, 0]
         try:
             result = await run_react_loop(module, ctx, "test")
         finally:
-            loop_mod.RETRY_DELAYS = original_delays
+            agent_mod.RETRY_DELAYS = original_delays
 
         assert result == "recovered!"
         assert call_count[0] == 2  # failed once, succeeded on retry
@@ -409,13 +409,13 @@ class TestErrorHandling:
         module = _make_module()
 
         # No sleeps — rate-limit path doesn't backoff on the dead key
-        import mesmer.core.loop as loop_mod
-        original_delays = loop_mod.RETRY_DELAYS
-        loop_mod.RETRY_DELAYS = [0, 0, 0]
+        import mesmer.core.agent as agent_mod
+        original_delays = agent_mod.RETRY_DELAYS
+        agent_mod.RETRY_DELAYS = [0, 0, 0]
         try:
             result = await run_react_loop(module, ctx, "test")
         finally:
-            loop_mod.RETRY_DELAYS = original_delays
+            agent_mod.RETRY_DELAYS = original_delays
 
         assert result == "rotated ok"
         # Two distinct keys were picked: the first (rate-limited) got cooled,
@@ -448,13 +448,13 @@ class TestErrorHandling:
         def log(event, detail=""):
             events.append((event, detail))
 
-        import mesmer.core.loop as loop_mod
-        original_delays = loop_mod.RETRY_DELAYS
-        loop_mod.RETRY_DELAYS = [0, 0, 0]
+        import mesmer.core.agent as agent_mod
+        original_delays = agent_mod.RETRY_DELAYS
+        agent_mod.RETRY_DELAYS = [0, 0, 0]
         try:
             result = await run_react_loop(module, ctx, "test", log=log)
         finally:
-            loop_mod.RETRY_DELAYS = original_delays
+            agent_mod.RETRY_DELAYS = original_delays
 
         # Run ends — ideally with a clean rate_limit_wall signal
         assert any(evt == "rate_limit_wall" for evt, _ in events) or "LLM error" in result
@@ -1128,7 +1128,7 @@ class TestReflectAndExpandGraphFirst:
         async def fake_refine(ctx, *, module, rationale, judge_result, **kwargs):
             return f"refined-for-{module}"
 
-        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+        with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
                 ctx, "foot-in-door", "initial foothold", judge,
                 current_node, log=lambda *a, **kw: None,
@@ -1171,7 +1171,7 @@ class TestReflectAndExpandGraphFirst:
         async def fake_refine(ctx, *, module, rationale, judge_result, **kwargs):
             return f"refined-{module}"
 
-        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+        with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
                 ctx, "foot-in-door", "x", judge, current_node,
                 log=lambda *a, **kw: None,
@@ -1222,7 +1222,7 @@ class TestReflectAndExpandGraphFirst:
         async def empty_refine(ctx, *, module, rationale, judge_result, **kwargs):
             return ""
 
-        with patch("mesmer.core.judge.refine_approach", new=empty_refine):
+        with patch("mesmer.core.agent.judge.refine_approach", new=empty_refine):
             await _reflect_and_expand(
                 ctx, "foo", "a", judge, current_node,
                 log=lambda *a, **kw: None,
@@ -1298,7 +1298,7 @@ class TestRefineApproachTranscriptTail:
     @pytest.mark.asyncio
     async def test_transcript_tail_empty_in_trials(self):
         from mesmer.core.constants import ScenarioMode
-        from mesmer.core.context import Turn
+        from mesmer.core.agent.context import Turn
 
         ctx = _make_ctx()
         graph = ctx.graph
@@ -1316,7 +1316,7 @@ class TestRefineApproachTranscriptTail:
             return "x"
 
         assert ctx.scenario_mode == ScenarioMode.TRIALS
-        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+        with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
                 ctx, "foo", "a", judge, current_node,
                 log=lambda *a, **kw: None,
@@ -1329,7 +1329,7 @@ class TestRefineApproachTranscriptTail:
     @pytest.mark.asyncio
     async def test_transcript_tail_populated_in_continuous(self):
         from mesmer.core.constants import ScenarioMode
-        from mesmer.core.context import Turn
+        from mesmer.core.agent.context import Turn
 
         ctx = _make_ctx()
         ctx.scenario_mode = ScenarioMode.CONTINUOUS
@@ -1345,7 +1345,7 @@ class TestRefineApproachTranscriptTail:
             captured.setdefault("tails", []).append(transcript_tail)
             return "x"
 
-        with patch("mesmer.core.judge.refine_approach", new=fake_refine):
+        with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
                 ctx, "foo", "a", judge, current_node,
                 log=lambda *a, **kw: None,

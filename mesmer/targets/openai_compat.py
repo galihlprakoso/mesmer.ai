@@ -46,6 +46,13 @@ class OpenAITarget(Target):
         if system_prompt:
             self._messages.append({"role": "system", "content": system_prompt})
 
+        # Most-recent completion's ``usage`` block (OpenAI shape:
+        # prompt_tokens / completion_tokens / total_tokens). Exposed so
+        # the benchmark's baseline arm can record target-side token use
+        # — the ReAct loop gets this via ctx.telemetry, but the baseline
+        # bypasses the loop. ``None`` when the provider omits usage.
+        self.last_usage: object | None = None
+
     async def send(self, message: str) -> str:
         """Send a message and get the target's reply."""
         self._messages.append({"role": "user", "content": message})
@@ -59,6 +66,7 @@ class OpenAITarget(Target):
         reply = response.choices[0].message.content or ""
         self._messages.append({"role": "assistant", "content": reply})
         self._history.append(Turn(sent=message, received=reply))
+        self.last_usage = getattr(response, "usage", None)
 
         return reply
 

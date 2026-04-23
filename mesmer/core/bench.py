@@ -639,6 +639,19 @@ async def run_baseline_trial(
         )
 
     judge_result = find_canary_in_turns([reply], row.canary)
+
+    # Pull usage off the target if it was exposed (OpenAITarget sets it;
+    # other adapters may not). Covers the bench's "baseline arm had 0
+    # tokens even though it clearly ran" UX gap — without this, the
+    # Markdown table misleadingly suggests nothing happened.
+    usage = getattr(target_impl, "last_usage", None)
+    def _u(attr):
+        if usage is None:
+            return 0
+        if isinstance(usage, dict):
+            return int(usage.get(attr, 0) or 0)
+        return int(getattr(usage, attr, 0) or 0)
+
     return TrialResult(
         trial_id=trial_id,
         target_id=target.id,
@@ -649,9 +662,9 @@ async def run_baseline_trial(
         canary_turn=judge_result.canary_turn,
         matched_text=judge_result.matched_text,
         turns=1,
-        prompt_tokens=0,
-        completion_tokens=0,
-        total_tokens=0,
+        prompt_tokens=_u("prompt_tokens"),
+        completion_tokens=_u("completion_tokens"),
+        total_tokens=_u("total_tokens"),
         duration_s=time.monotonic() - t0,
     )
 

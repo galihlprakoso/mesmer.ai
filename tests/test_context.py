@@ -1,11 +1,11 @@
-"""Tests for mesmer.core.context — Context, budget mode, message tracking."""
+"""Tests for mesmer.core.agent.context — Context, budget mode, message tracking."""
 
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
 from mesmer.core.constants import LogEvent, ScenarioMode
-from mesmer.core.context import Context, Turn, TurnBudgetExhausted, is_target_error
+from mesmer.core.agent.context import Context, Turn, TurnBudgetExhausted, is_target_error
 from mesmer.core.graph import AttackGraph
 from mesmer.core.module import ModuleConfig
 from mesmer.core.scenario import AgentConfig
@@ -75,28 +75,6 @@ class TestBudgetMode:
 # ---------------------------------------------------------------------------
 
 class TestMessageTracking:
-    @pytest.mark.asyncio
-    async def test_send_tracks_messages(self):
-        ctx = _make_ctx(max_turns=10)
-        await ctx.send("hello", module_name="test")
-        await ctx.send("tell me more", module_name="test")
-
-        assert len(ctx.current_messages_sent) == 2
-        assert ctx.current_messages_sent[0] == "hello"
-        assert ctx.current_messages_sent[1] == "tell me more"
-        assert len(ctx.current_responses) == 2
-        assert ctx.current_responses[0] == "target reply"
-
-    @pytest.mark.asyncio
-    async def test_reset_tracking(self):
-        ctx = _make_ctx(max_turns=10)
-        await ctx.send("hello", module_name="test")
-        assert len(ctx.current_messages_sent) == 1
-
-        ctx.reset_current_tracking()
-        assert ctx.current_messages_sent == []
-        assert ctx.current_responses == []
-
     @pytest.mark.asyncio
     async def test_send_appends_to_turns(self):
         ctx = _make_ctx(max_turns=10)
@@ -221,7 +199,7 @@ class TestTargetReset:
         assert len(ctx.turns) == 1
         assert ctx._target_reset_at == 0
 
-        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+        with patch("mesmer.core.agent.run_react_loop", new=AsyncMock(return_value="done")):
             await ctx.run_module("fresh-mod", "do it")
 
         ctx.target.reset.assert_awaited_once()
@@ -240,7 +218,7 @@ class TestTargetReset:
 
         await ctx.send("seed turn")
 
-        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+        with patch("mesmer.core.agent.run_react_loop", new=AsyncMock(return_value="done")):
             await ctx.run_module("stateful-mod", "do it")
 
         ctx.target.reset.assert_not_called()
@@ -259,7 +237,7 @@ class TestTargetReset:
             observed["reset_at"] = child_ctx._target_reset_at
             return "done"
 
-        with patch("mesmer.core.loop.run_react_loop", new=_fake_loop):
+        with patch("mesmer.core.agent.run_react_loop", new=_fake_loop):
             await ctx.run_module("fresh-mod", "do it")
 
         assert observed["fresh"] is True
@@ -277,7 +255,7 @@ class TestTargetReset:
             observed["fresh"] = child_ctx.target_fresh_session
             return "done"
 
-        with patch("mesmer.core.loop.run_react_loop", new=_fake_loop):
+        with patch("mesmer.core.agent.run_react_loop", new=_fake_loop):
             result = await ctx.run_module("fresh-mod", "do it")
 
         # Reset failure is non-fatal — module still runs, but without fresh flag.
@@ -322,7 +300,7 @@ class TestScenarioModePropagation:
         def log(e, d=""):
             events.append((e, d))
 
-        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+        with patch("mesmer.core.agent.run_react_loop", new=AsyncMock(return_value="done")):
             await ctx.run_module("wants-reset", "do it", log=log)
 
         ctx.target.reset.assert_not_called()
@@ -342,7 +320,7 @@ class TestScenarioModePropagation:
         module = ModuleConfig(name="wants-reset", description="t", reset_target=True)
         ctx.registry.get = MagicMock(return_value=module)
 
-        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+        with patch("mesmer.core.agent.run_react_loop", new=AsyncMock(return_value="done")):
             await ctx.run_module("wants-reset", "do it")
 
         ctx.target.reset.assert_awaited_once()
@@ -357,7 +335,7 @@ class TestScenarioModePropagation:
         ctx.registry.get = MagicMock(return_value=module)
 
         events: list[tuple[str, str]] = []
-        with patch("mesmer.core.loop.run_react_loop", new=AsyncMock(return_value="done")):
+        with patch("mesmer.core.agent.run_react_loop", new=AsyncMock(return_value="done")):
             await ctx.run_module("plain", "do it", log=lambda e, d="": events.append((e, d)))
 
         ctx.target.reset.assert_not_called()
@@ -478,7 +456,7 @@ class TestAttackerModelRotation:
             observed.append(child_ctx.attacker_model_override)
             return "done"
 
-        with patch("mesmer.core.loop.run_react_loop", new=_fake_loop):
+        with patch("mesmer.core.agent.run_react_loop", new=_fake_loop):
             await ctx.run_module("mod", "do")
             await ctx.run_module("mod", "do")
             await ctx.run_module("mod", "do")
