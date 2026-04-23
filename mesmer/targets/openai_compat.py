@@ -23,10 +23,12 @@ class OpenAITarget(Target):
         api_key_env: str = "",
         system_prompt: str = "",
         temperature: float = 0.7,
+        user_turn_suffix: str = "",
     ):
         self.model = model
         self.system_prompt = system_prompt
         self.temperature = temperature
+        self.user_turn_suffix = user_turn_suffix
         self._history: list[Turn] = []
 
         # Resolve API key: explicit > env var name > OPENAI_API_KEY
@@ -55,7 +57,11 @@ class OpenAITarget(Target):
 
     async def send(self, message: str) -> str:
         """Send a message and get the target's reply."""
-        self._messages.append({"role": "user", "content": message})
+        # Per-turn defence suffix (e.g. Tensor Trust post_prompt) gets baked
+        # into the user message the API actually sees; history + Turn record
+        # the wrapped text too, so logs reflect exactly what the target read.
+        wrapped = self._apply_suffix(message)
+        self._messages.append({"role": "user", "content": wrapped})
 
         response = await self._client.chat.completions.create(
             model=self.model,
@@ -65,7 +71,7 @@ class OpenAITarget(Target):
 
         reply = response.choices[0].message.content or ""
         self._messages.append({"role": "assistant", "content": reply})
-        self._history.append(Turn(sent=message, received=reply))
+        self._history.append(Turn(sent=wrapped, received=reply))
         self.last_usage = getattr(response, "usage", None)
 
         return reply

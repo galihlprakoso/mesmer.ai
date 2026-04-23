@@ -22,17 +22,22 @@ class RESTTarget(Target):
         headers: dict | None = None,
         body_template: str = "",
         response_path: str = "",
+        user_turn_suffix: str = "",
     ):
         self.url = url
         self.method = method.upper()
         self.headers = headers or {}
         self.body_template = body_template
         self.response_path = response_path
+        self.user_turn_suffix = user_turn_suffix
         self._history: list[Turn] = []
         self._messages: list[dict] = []
 
     async def send(self, message: str) -> str:
         """Send a message via REST API."""
+        # Apply the per-turn defence suffix before anything else so body
+        # templates and history all see the same wrapped text.
+        message = self._apply_suffix(message)
         self._messages.append({"role": "user", "content": message})
 
         # Build request body from template
@@ -62,12 +67,21 @@ class RESTTarget(Target):
         return list(self._history)
 
     def _build_body(self, message: str) -> dict:
-        """Build request body from template, substituting placeholders."""
+        """Build request body from template, substituting placeholders.
+
+        The message is JSON-escaped (without surrounding quotes) before
+        substitution so embedded newlines / quotes / backslashes survive
+        the final ``json.loads``. Load-bearing for `user_turn_suffix`
+        values that contain newlines.
+        """
         if not self.body_template:
             return {"message": message, "history": self._messages}
 
-        # Replace {{message}} and {{history}} in the template
-        body_str = self.body_template.replace("{{message}}", message)
+        # Replace {{message}} and {{history}} in the template. `message` is
+        # JSON-encoded then stripped of its outer quotes so the template's
+        # own quotes around the placeholder are preserved.
+        escaped_message = json.dumps(message)[1:-1]
+        body_str = self.body_template.replace("{{message}}", escaped_message)
         body_str = body_str.replace("{{history}}", json.dumps(self._messages))
         return json.loads(body_str)
 

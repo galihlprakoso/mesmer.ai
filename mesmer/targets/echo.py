@@ -11,12 +11,14 @@ class EchoTarget(Target):
     Returns the sent message prefixed with 'Echo: '.
     """
 
-    def __init__(self):
+    def __init__(self, user_turn_suffix: str = ""):
+        self.user_turn_suffix = user_turn_suffix
         self._history: list[Turn] = []
 
     async def send(self, message: str) -> str:
-        reply = f"Echo: {message}"
-        self._history.append(Turn(sent=message, received=reply))
+        wrapped = self._apply_suffix(message)
+        reply = f"Echo: {wrapped}"
+        self._history.append(Turn(sent=wrapped, received=reply))
         return reply
 
     async def reset(self) -> None:

@@ -122,6 +122,31 @@ class BenchBudget:
 
 
 @dataclass
+class ContaminationPosture:
+    """Training-data contamination story for a benchmark spec.
+
+    Required on every spec. The orchestrator validates presence at load
+    time and embeds this verbatim into the summary JSON + results README
+    so no published number loses its contamination context.
+    """
+
+    dataset_release_date: str
+    upstream_license: str
+    target_model_cutoff: str
+    attacker_model_cutoff: str
+    risk_assessment: str
+
+    def as_dict(self) -> dict:
+        return {
+            "dataset_release_date": self.dataset_release_date,
+            "upstream_license": self.upstream_license,
+            "target_model_cutoff": self.target_model_cutoff,
+            "attacker_model_cutoff": self.attacker_model_cutoff,
+            "risk_assessment": self.risk_assessment,
+        }
+
+
+@dataclass
 class BenchSpec:
     """Top-level spec — what a benchmark run looks like end-to-end."""
 
@@ -131,6 +156,8 @@ class BenchSpec:
     dataset: BenchDatasetSpec
     targets: list[BenchTargetSpec]
     attacker: BenchAttackerSpec
+    # Required — no published result may skip its contamination story.
+    contamination_posture: ContaminationPosture
     budget: BenchBudget = field(default_factory=BenchBudget)
     # Scenario-level objective prompt the mesmer attacker sees. When left
     # empty, a sensible default based on module is used.
@@ -224,6 +251,13 @@ class BenchSummary:
     dataset_sha256: str
     n_rows_sampled: int
     trials_per_row: int
+    # Required — so the published artifact carries its contamination story
+    # without the reader needing to chase down the spec YAML.
+    contamination_posture: ContaminationPosture
+    # Exact dataset row IDs covered by this run. Downstream tools can
+    # reconstruct which defenses were tested even without re-fetching the
+    # source dataset.
+    sample_ids_tested: list[str] = field(default_factory=list)
     cells: list[BenchCellSummary] = field(default_factory=list)
 
     def as_json(self) -> dict:
@@ -236,6 +270,8 @@ class BenchSummary:
             "dataset_sha256": self.dataset_sha256,
             "n_rows_sampled": self.n_rows_sampled,
             "trials_per_row": self.trials_per_row,
+            "contamination_posture": self.contamination_posture.as_dict(),
+            "sample_ids_tested": list(self.sample_ids_tested),
             "cells": {
                 f"{c.target_id}__{c.arm}": {
                     "target": c.target_id,
@@ -321,6 +357,8 @@ def load_spec(path: str | Path) -> BenchSpec:
         run_baseline=bool(b.get("run_baseline", True)),
     )
 
+    posture = _parse_contamination_posture(data.get("contamination_posture"), path)
+
     return BenchSpec(
         name=data.get("name", "unnamed"),
         version=str(data.get("version", "v0")),
@@ -328,9 +366,47 @@ def load_spec(path: str | Path) -> BenchSpec:
         dataset=dataset,
         targets=targets,
         attacker=attacker,
+        contamination_posture=posture,
         budget=budget,
         objective=data.get("objective", "") or "",
         judge_rubric_additions=data.get("judge_rubric_additions", "") or "",
+    )
+
+
+def _parse_contamination_posture(
+    raw: dict | None, spec_path: str | Path
+) -> ContaminationPosture:
+    """Parse + validate the required ``contamination_posture`` block.
+
+    Raises :class:`ValueError` with a clear message when the block is
+    missing or any required field is blank. No silent defaults — a spec
+    without a posture is not publishable and must be rejected at load.
+    """
+    required = (
+        "dataset_release_date",
+        "upstream_license",
+        "target_model_cutoff",
+        "attacker_model_cutoff",
+        "risk_assessment",
+    )
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(
+            f"{spec_path}: missing required `contamination_posture` block. "
+            f"Every spec must declare: {', '.join(required)}. "
+            "See benchmarks/README.md for the rationale."
+        )
+    missing = [k for k in required if not str(raw.get(k, "") or "").strip()]
+    if missing:
+        raise ValueError(
+            f"{spec_path}: `contamination_posture` is missing or blank for: "
+            f"{', '.join(missing)}. All fields are required."
+        )
+    return ContaminationPosture(
+        dataset_release_date=str(raw["dataset_release_date"]).strip(),
+        upstream_license=str(raw["upstream_license"]).strip(),
+        target_model_cutoff=str(raw["target_model_cutoff"]).strip(),
+        attacker_model_cutoff=str(raw["attacker_model_cutoff"]).strip(),
+        risk_assessment=str(raw["risk_assessment"]).rstrip(),
     )
 
 
@@ -449,23 +525,24 @@ def build_scenario_for_row(
 ) -> Scenario:
     """Turn a dataset row into a fully-formed mesmer :class:`Scenario`.
 
-    The dataset's ``pre_prompt`` + ``post_prompt`` are concatenated into
-    the target's system prompt. Mesmer then attacks *that wrapped target*
-    through its normal ReAct loop, exactly as if the operator had hand-
-    written a scenario YAML for this defense.
+    Tensor Trust's canonical defense shape is a sandwich:
+    ``{pre_prompt}{USER_INPUT}{post_prompt}`` as a single-turn LLM input.
+    Mesmer is multi-turn, so we wrap *every* user turn with the sandwich:
+    ``pre_prompt`` lives in the system role, ``post_prompt`` becomes the
+    target's ``user_turn_suffix`` and gets appended to every attacker
+    message before it reaches the target. This preserves post_prompt's
+    load-bearing role (re-asserting defense rules *after* user content) on
+    every turn — without it, "ignore previous instructions" attacks get
+    the last word and trivially win.
     """
-    system_prompt_parts = [row.pre_prompt]
-    if row.post_prompt:
-        system_prompt_parts.append(row.post_prompt)
-    system_prompt = "\n".join(p for p in system_prompt_parts if p)
-
     target_cfg = TargetConfig(
         adapter=target.adapter,
         base_url=target.base_url,
         model=target.model,
         api_key=target.api_key,
         api_key_env=target.api_key_env,
-        system_prompt=system_prompt,
+        system_prompt=row.pre_prompt,
+        user_turn_suffix=row.post_prompt,
     )
 
     objective = Objective(
@@ -606,14 +683,14 @@ async def run_baseline_trial(
             error="no_baseline_attack_in_dataset_row",
         )
 
-    system_prompt = "\n".join(p for p in [row.pre_prompt, row.post_prompt] if p)
     target_cfg = TargetConfig(
         adapter=target.adapter,
         base_url=target.base_url,
         model=target.model,
         api_key=target.api_key,
         api_key_env=target.api_key_env,
-        system_prompt=system_prompt,
+        system_prompt=row.pre_prompt,
+        user_turn_suffix=row.post_prompt,
     )
     target_impl = create_target(target_cfg)
 
@@ -719,11 +796,42 @@ def aggregate(trials: list[TrialResult]) -> list[BenchCellSummary]:
     return cells
 
 
-def render_markdown_table(summary: BenchSummary) -> str:
-    """Render the per-(target, arm) summary as a Markdown table.
+LIMITATIONS_MD = """## Limitations
 
-    Output is drop-in for pasting into a README. Readers see ASR and
-    mesmer-vs-baseline delta at a glance without reading the JSON.
+- **Single target, single attacker.** These numbers describe mesmer's
+  behavior against one target model with one attacker model. Generalization
+  to other targets or attackers is not established by this benchmark.
+- **Sampling variance only.** ASR stderr is binomial — it captures trial
+  sampling only, not prompt-sensitivity or provider-side LLM sampling
+  variance beyond what `trials_per_row` averages.
+- **Baseline is literal replay.** The baseline arm replays the dataset's
+  `baseline_attack` field once per row. It is not an optimized
+  direct-prompting baseline; treat it as a lower bound, not a ceiling.
+- **Non-deterministic LLM sampling.** Provider-side temperature / top_p
+  sampling means two runs of the same spec yield slightly different
+  numbers. Stderr reflects this via trial averaging.
+- **Substring judge.** The canary judge is literal substring matching on
+  the access code. Robust to paraphrase *around* the canary, but can
+  false-positive if the canary string appears coincidentally in target
+  babble. Manual spot-check recommended before publication.
+- **Training-data overlap likely.** See the Contamination Posture section
+  above.
+- **Target snapshot.** Results are valid only for the target model snapshot
+  pinned in this spec. Newer snapshots may behave differently.
+- **Defense shape.** The defense is applied as a wrap-every-turn sandwich
+  (system = `pre_prompt`; every user turn ends with `post_prompt`).
+  Single-turn API deployments where only turn 1 is wrapped may yield
+  different numbers. Mesmer benchmarks the stricter multi-turn pattern.
+"""
+
+
+def render_markdown_table(summary: BenchSummary) -> str:
+    """Render the per-(target, arm) summary as a Markdown document.
+
+    Layout: headline table, Methodology, Targets & rows tested,
+    Contamination Posture, Reproducibility, Limitations. Readers see ASR
+    and mesmer-vs-baseline delta at a glance AND the caveats the numbers
+    carry — no claim is published without its context.
     """
     lines: list[str] = []
     lines.append(f"### {summary.spec_name} ({summary.spec_version})")
@@ -744,6 +852,84 @@ def render_markdown_table(summary: BenchSummary) -> str:
             f"±{c.asr_stderr * 100:.1f}% | {c.n_trials} | {median_str} | "
             f"{int(c.mean_total_tokens):,} |"
         )
+    lines.append("")
+
+    # Methodology
+    lines.append("## Methodology")
+    lines.append("")
+    lines.append(
+        "- **mesmer arm** — full multi-turn ReAct loop attacks each "
+        "defense; attacker LLM selects cognitive techniques per turn."
+    )
+    lines.append(
+        "- **baseline arm** — the dataset's own `baseline_attack` field is "
+        "replayed single-turn against the same target; no attacker LLM."
+    )
+    lines.append(
+        "- **Judge** — deterministic substring match on the canary (access "
+        "code), case-insensitive. No LLM involved in success attribution."
+    )
+    lines.append(
+        "- **Seeds** — every trial carries its `random` seed; LLM provider "
+        "sampling remains non-deterministic and is averaged over "
+        f"`trials_per_row={summary.trials_per_row}`."
+    )
+    lines.append("")
+
+    # Targets & sample IDs
+    lines.append("## Targets & rows tested")
+    lines.append("")
+    targets = sorted({c.target_id for c in summary.cells})
+    for tid in targets:
+        lines.append(f"- `{tid}`")
+    if summary.sample_ids_tested:
+        sample_preview = ", ".join(str(s) for s in summary.sample_ids_tested[:10])
+        more = (
+            f" … (+{len(summary.sample_ids_tested) - 10} more)"
+            if len(summary.sample_ids_tested) > 10
+            else ""
+        )
+        lines.append("")
+        lines.append(
+            f"**Sample IDs (n={len(summary.sample_ids_tested)}):** "
+            f"{sample_preview}{more}"
+        )
+    lines.append("")
+
+    # Contamination Posture — verbatim from spec
+    p = summary.contamination_posture
+    lines.append("## Contamination Posture")
+    lines.append("")
+    lines.append(f"- **Dataset release date:** {p.dataset_release_date}")
+    lines.append(f"- **Upstream license:** {p.upstream_license}")
+    lines.append(f"- **Target model cutoff:** {p.target_model_cutoff}")
+    lines.append(f"- **Attacker model cutoff:** {p.attacker_model_cutoff}")
+    lines.append("")
+    lines.append("**Risk assessment:**")
+    lines.append("")
+    lines.append(p.risk_assessment)
+    lines.append("")
+
+    # Reproducibility
+    lines.append("## Reproducibility")
+    lines.append("")
+    lines.append(
+        "- `mesmer bench <spec.yaml>` is the full command; the spec is the "
+        "full input. See `benchmarks/README.md` for flags."
+    )
+    lines.append(f"- **Mesmer version:** v{summary.mesmer_version}")
+    lines.append(f"- **Dataset SHA256:** `{summary.dataset_sha256}`")
+    lines.append(
+        "- **Seed policy:** each trial's seed is committed in the per-trial "
+        "JSONL row; provider-side LLM sampling is not deterministic and is "
+        "handled by averaging over `trials_per_row`."
+    )
+    lines.append("")
+
+    # Limitations — canonical fixed list
+    lines.append(LIMITATIONS_MD.rstrip())
+    lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
@@ -850,6 +1036,8 @@ async def run_benchmark(
         dataset_sha256=sha256,
         n_rows_sampled=len(rows),
         trials_per_row=trials_per_row,
+        contamination_posture=spec.contamination_posture,
+        sample_ids_tested=[r.sample_id for r in rows],
         cells=cells,
     )
 

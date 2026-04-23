@@ -67,6 +67,8 @@ class WebSocketTarget(Target):
         # Timeouts
         connect_timeout: float = 10.0,
         receive_timeout: float = 90.0,
+        # Per-turn defence suffix (e.g. Tensor Trust post_prompt)
+        user_turn_suffix: str = "",
     ):
         self.base_url = url
         self.send_template = send_template
@@ -76,6 +78,7 @@ class WebSocketTarget(Target):
         self.headers = headers or {}
         self.connect_timeout = connect_timeout
         self.receive_timeout = receive_timeout
+        self.user_turn_suffix = user_turn_suffix
         self._history: list[Turn] = []
         self._ws = None
 
@@ -127,6 +130,9 @@ class WebSocketTarget(Target):
 
     async def send(self, message: str) -> str:
         """Send a message with auto-reconnect on connection drop."""
+        # Apply the per-turn defence suffix *before* escaping into the JSON
+        # payload so the target sees pre/attacker/post in a single user turn.
+        message = self._apply_suffix(message)
         max_retries = 2
         for attempt in range(max_retries):
             try:

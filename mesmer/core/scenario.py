@@ -37,6 +37,11 @@ class TargetConfig:
     api_key_env: str = ""      # legacy: env var name to read
     api_keys: list[str] = field(default_factory=list)
     system_prompt: str = ""
+    # Appended to every user message sent to this target. Used by the bench
+    # runner to put each attacker turn inside a `pre_prompt + attacker +
+    # post_prompt` sandwich — matches Tensor Trust's canonical defense shape
+    # and generalises to any per-turn defence suffix. Default "" = no-op.
+    user_turn_suffix: str = ""
 
     # WebSocket declarative config
     send_template: str = '{"message": "{{message}}"}'
@@ -327,6 +332,7 @@ def load_scenario(path: str | Path) -> Scenario:
         api_key_env=target_data.get("api_key_env", ""),
         api_keys=target_data.get("api_keys", []),
         system_prompt=target_data.get("system_prompt", ""),
+        user_turn_suffix=target_data.get("user_turn_suffix", ""),
         # WebSocket declarative
         send_template=target_data.get("send_template", '{"message": "{{message}}"}'),
         receive=target_data.get("receive"),

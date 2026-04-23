@@ -12,6 +12,7 @@ __all__ = ["Target", "Turn", "OpenAITarget", "RESTTarget", "EchoTarget", "WebSoc
 def create_target(config) -> Target:
     """Factory: create a target from a TargetConfig."""
     adapter = config.adapter.lower()
+    suffix = config.user_turn_suffix
 
     if adapter == "openai":
         return OpenAITarget(
@@ -20,6 +21,7 @@ def create_target(config) -> Target:
             api_key=config.api_key,
             api_key_env=config.api_key_env,
             system_prompt=config.system_prompt,
+            user_turn_suffix=suffix,
         )
     elif adapter == "rest":
         return RESTTarget(
@@ -28,6 +30,7 @@ def create_target(config) -> Target:
             headers=config.headers,
             body_template=config.body_template,
             response_path=config.response_path,
+            user_turn_suffix=suffix,
         )
     elif adapter in ("websocket", "ws"):
         return WebSocketTarget(
@@ -39,8 +42,9 @@ def create_target(config) -> Target:
             headers=config.headers,
             connect_timeout=getattr(config, "connect_timeout", 10.0),
             receive_timeout=getattr(config, "receive_timeout", 90.0),
+            user_turn_suffix=suffix,
         )
     elif adapter == "echo":
-        return EchoTarget()
+        return EchoTarget(user_turn_suffix=suffix)
     else:
         raise ValueError(f"Unknown target adapter: {adapter}")
