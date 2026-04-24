@@ -4,11 +4,12 @@ description: Get mesmer running on your machine in under two minutes.
 ---
 
 Mesmer requires **Python 3.10+** and uses [`uv`](https://docs.astral.sh/uv/)
-for dependency management. All provider calls go through **LiteLLM**, so any
-model string LiteLLM understands (`openrouter/...`, `anthropic/...`,
-`ollama/...`, `gemini/...`) works as-is.
+for dependency management (`uv.lock` is committed). All provider calls go
+through **LiteLLM**, so any model string LiteLLM understands
+(`openrouter/...`, `anthropic/...`, `openai/...`, `ollama/...`,
+`gemini/...`, `gemini/gemini-2.5-flash`) works as-is.
 
-## From source (recommended for v0.1)
+## From source (recommended for v0.2)
 
 ```bash
 git clone https://github.com/galihlprakoso/mesmer.git
@@ -16,7 +17,7 @@ cd mesmer
 uv sync
 ```
 
-Optional: pull in the web UI extras.
+Optional: pull in the web UI extras (FastAPI + uvicorn for `mesmer serve`).
 
 ```bash
 uv sync --extra web
@@ -24,26 +25,29 @@ uv sync --extra web
 
 ## API keys
 
-Mesmer uses whatever provider your scenario references. At minimum you'll need
-one of:
+Mesmer uses whatever provider your scenario references. At minimum you'll
+need one of:
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."
 # or
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
+export GEMINI_API_KEY="..."
+export GROQ_API_KEY="gsk_..."
 ```
 
 **Pro tip.** Mesmer supports **round-robin key rotation**: pass a
-comma-separated list and rate-limits cool down individual keys instead of
-sleeping the whole run.
+comma-separated list and rate-limits cool down individual keys via the
+`KeyPool` cooldown mechanism instead of sleeping the whole run.
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-aaa,sk-or-bbb,sk-or-ccc"
 ```
 
-See [CLI Reference](/docs/cli) for all flags, or jump to the
-[Quickstart](/docs/getting-started/quickstart) to run your first attack.
+For hard rate-limit caps (e.g. free-tier Groq at 15 rpm), add a
+`throttle:` block to the scenario's `agent:` or `target:` config — see
+[Writing scenarios](/docs/scenarios/walkthrough).
 
 ## Verify the install
 
@@ -52,4 +56,19 @@ uv run mesmer --help
 uv run pytest
 ```
 
-The test suite runs in ~3 seconds against echo targets — no external calls.
+The suite runs ~580 tests in ~3 seconds against echo targets — no external
+calls. Use it as a regression gate when you tweak a module or add a tool.
+
+## What ships
+
+- **CLI** — `mesmer run`, `mesmer graph {show,reset}`, `mesmer hint`,
+  `mesmer debrief`, `mesmer stats`, `mesmer modules {list,describe}`,
+  `mesmer serve`, `mesmer bench`, `mesmer bench-viz`. Full reference at
+  [CLI](/docs/cli).
+- **Web UI** — FastAPI + SSE + Svelte 5 / D3 attack-graph viewer, behind
+  the `web` extra.
+- **Bench harness** — reproducible benchmark spec → JSONL + `summary.json`
+  + per-trial interactive D3 HTML viz.
+
+Next: [Quickstart](/docs/getting-started/quickstart) runs your first
+attack end-to-end.

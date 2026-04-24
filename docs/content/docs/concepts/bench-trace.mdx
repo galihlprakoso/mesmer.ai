@@ -1,0 +1,140 @@
+---
+title: Bench tracing & viz
+description: Per-trial forensic traces, structured events, and the interactive D3 mind-map.
+---
+
+Every `mesmer bench` trial captures a **forensic trace** — not just
+box-score. Three artifacts land per trial under
+`benchmarks/results/{date}/events/`:
+
+1. **`{trial_id}.jsonl`** — one row per `LogFn` event with monotonic
+   `t` seconds, the event name, and the detail payload.
+2. **`{trial_id}.graph.json`** — trial-scoped slice of the attack graph
+   (root + only this `run_id`'s nodes). Diffable across runs.
+3. **Per-(target, arm) JSONL row** (`{stem}-{target}__{arm}.jsonl`) —
+   carries a `trace` envelope with derived telemetry.
+
+Plus one run-wide HTML: **`{stem}-viz.html`** — self-contained D3
+mind-map, auto-generated at end of `run_benchmark` unless you pass
+`--no-viz`. Backfill with `mesmer bench-viz <summary.json>`.
+
+## Structured events — the forensic four
+
+Four events carry JSON payloads designed for surgical debugging. Every
+callsite passes an event name from the `LogEvent` enum in
+`core/constants.py`.
+
+| Event | Payload | Answers |
+|---|---|---|
+| `tier_gate` | `{selected_tier, escape_hatch, by_tier: {0: {live, dead_or_stale}, …}, available, tiers}` | why did the leader only see T0? |
+| `judge_verdict` | Full `JudgeResult` — `score + leaked_info + promising_angle + dead_end + suggested_next` | why did the judge score what it scored? |
+| `delegate` | `{module, tier, max_turns, frontier_id, instruction}` | what did the leader tell the sub-module to do? |
+| `llm_completion` | `{role, model, elapsed_s, prompt_tokens, completion_tokens, total_tokens, n_messages, tools}` | attacker vs judge vs compressor cost mix |
+
+Every `ctx.completion` (attacker, judge, compressor) auto-emits
+`llm_completion` — callers never thread `log` through inner signatures.
+`Context.log` is bound by `execute_run` and propagated through
+`Context.child()`.
+
+## Derived telemetry per trial
+
+`bench/trace.py::extract_trial_telemetry` walks the trial's graph + the
+recorder and produces:
+
+```python
+{
+  "n_llm_calls": 17,
+  "modules_called": ["target-profiler", "attack-planner", "prefix-commitment"],
+  "tier_sequence": [0, 0, 1],
+  "winning_module": "prefix-commitment",
+  "winning_tier": 1,
+  "per_module_scores": {"target-profiler": 6, "attack-planner": 0, "prefix-commitment": 9},
+  "dead_ends": [],
+  "profiler_ran_first": true,
+  "ladder_monotonic": true,
+  "compression_events": 0,
+  "event_counts": {"tier_gate": 3, "judge_verdict": 3, "delegate": 3, "llm_completion": 17},
+  "events_path": "events/{trial_id}.jsonl"
+}
+```
+
+Winning-module attribution: first tries `ctx.turns[canary_turn - 1].module`
+(engine stamps every Turn with the sub-module that produced it —
+authoritative). Falls back to the highest-scoring node ≥ 7 in this run.
+`None` when neither applies.
+
+## Cell-level aggregates
+
+`BenchCellSummary` (one per target × arm) adds:
+
+- `wins_by_tier`, `wins_by_module`
+- `profiler_first_rate`, `ladder_respect_rate`
+- `dead_end_rate_by_tier`, `median_judge_score_by_tier`
+- `mean_llm_calls`, `mean_compression_events`
+- `errors_by_class`
+
+The markdown `{stem}-README.md` renders these in a "TAPER trace" section
+beside the headline ASR table.
+
+## The interactive viz
+
+`mesmer bench-viz` (or the auto-invocation at end of `run_benchmark`)
+produces `{stem}-viz.html` — a self-contained D3 mind-map:
+
+- One pan-and-zoom attack tree per trial, side panel shows per-node
+  details (module, tier, score, sent messages, target responses,
+  reflection, leaked info).
+- Leader verdict renders as a **square** with verdict-colored fill
+  (green = objective met, red = not) so every tree ends on the leader's
+  decision.
+- Opens offline. Pass `--offline` to inline the vendored D3 bundle
+  (~280 KB) so it renders with no network.
+- Above `VIZ_INLINE_BYTES_LIMIT` (50 MB of JSON), the generator splits
+  per-target and emits `{stem}-viz-index.html` as the entry point.
+
+## Debugging cookbook
+
+When a bench run looks wrong, read `{stem}-summary.json` and the
+`events/` dir — no need to rerun with extra logging:
+
+```bash
+# Cell-level: where did wins come from?
+jq '.cells | to_entries[] | {cell: .key, asr: .value.asr, wins_by_tier: .value.wins_by_tier}' summary.json
+
+# Did the tier gate ever fire the escape hatch?
+cat events/*.jsonl | jq -r 'select(.event=="tier_gate") | .detail | fromjson | .escape_hatch' | sort | uniq -c
+
+# Per-trial: which modules actually ran, in what order?
+jq '.trace | {modules: .modules_called, tiers: .tier_sequence, winner: .winning_module, ladder: .ladder_monotonic}' <(head -1 *__mesmer.jsonl)
+
+# Judge scored <5 — show the dead_end reasons
+cat events/*.jsonl | jq -r 'select(.event=="judge_verdict") | .detail | fromjson | select(.score < 5) | "\(.module) score=\(.score): \(.dead_end)"'
+
+# LLM cost mix — attacker vs judge token load
+cat events/*.jsonl | jq -r 'select(.event=="llm_completion") | .detail | fromjson | "\(.role) \(.total_tokens)"' | awk '{roles[$1]+=$2} END {for (r in roles) print r, roles[r]}'
+
+# Show the exact tree at end of a trial
+jq '.nodes | to_entries[] | {id: .key, module: .value.module, score: .value.score, status: .value.status}' events/{trial_id}.graph.json
+```
+
+If a signal you need isn't in the events file, the fix is to **emit a
+new structured event**, not to add a side channel: add the enum value
+in `core/constants.py::LogEvent`, emit JSON from the call site, extend
+`BenchCellSummary` / `TrialResult` if it's worth aggregating, and write
+a test in `test_trace_events.py`.
+
+## `--verbose` vs trace capture
+
+The events file is **always** written, on every run. `--verbose` only
+controls whether events are also teed to the terminal. If you're
+looking for a trace post-hoc, always check
+`benchmarks/results/{date}/events/` first before rerunning.
+
+## Trial-scoped vs cross-run graphs
+
+Two files with similar names, different purposes — don't compare them:
+
+| File | Contents | Purpose |
+|---|---|---|
+| `benchmarks/results/{date}/events/{trial_id}.graph.json` | Root + only this run's nodes | Diffable per-trial forensics |
+| `~/.mesmer/targets/{hash}/graph.json` | Full history across every run against this target | Cross-run persistence, frontier proposer source |

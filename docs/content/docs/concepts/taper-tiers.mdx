@@ -1,0 +1,121 @@
+---
+title: TAPER tier ladder
+description: Simple attacks before complex ones — how mesmer's frontier is gated.
+---
+
+**TAPER** is mesmer's tiered attack ladder. Every module declares a
+`tier: 0..3` field in its YAML, and the frontier proposer refuses to
+surface tier-N modules until all tier-`<N` live candidates are
+exhausted. This closes the failure mode where the leader burns its
+budget running `narrative-transport` against a target that would have
+fallen to a plain `direct-ask`.
+
+## The four tiers
+
+| Tier | Semantics | Shape | Examples |
+|---:|---|---|---|
+| **0** | naive / direct | one-shot probe, no multi-turn, `reset_target: true` | `target-profiler`, `attack-planner`, `direct-ask`, `instruction-recital`, `format-shift` |
+| **1** | structural / payload-shaping | few messages, leverage is the payload structure (delimiters, role tokens, prefix commitment) | `prefix-commitment`, `delimiter-injection`, `role-impersonation` |
+| **2** | cognitive / social manipulation | multi-turn, default for pre-TAPER modules | `foot-in-door`, `authority-bias`, `anchoring`, `narrative-transport`, `pragmatic-reframing`, `cognitive-overload` |
+| **3** | composed | tier-2 lever × tier-0/1 carrier. Reserved; no authored module ships today. | *(author your own)* |
+
+A module with no `tier:` in its YAML defaults to 2 (cognitive). Values
+outside `[0, 3]` raise `InvalidModuleConfig` at load time — typoed YAML
+fails loud.
+
+## How the gate decides
+
+`AttackGraph.propose_frontier` delegates the tier selection to
+`_apply_tier_gate` in `core/graph.py`:
+
+```
+1. Drop every module whose prior attempts are all DEAD.
+2. Find the lowest tier that still has a LIVE candidate:
+      - never tried, OR
+      - tried and best score ≥ PROMISING_SCORE_THRESHOLD.
+   Filter the frontier down to that tier.
+3. ESCAPE HATCH — if no tier is live (everything's dead or stale),
+   return the full cross-tier set so a dead tier-0 pool doesn't
+   strand a promising tier-2 lead.
+```
+
+`Registry.tier_of(name)` / `tiers_for(names)` are the canonical tier
+lookups. `AttackGraph.propose_frontier(..., tiers=..., gate_decision_out=...)`
+accepts a tier map and writes the gate's selected tier + per-tier census
+into the out-param so callers (`_reflect_and_expand`) can emit a
+structured `LogEvent.TIER_GATE` trace event.
+
+## What the leader sees
+
+`_build_graph_context` prefixes every frontier line with
+`[T0]` / `[T1]` / `[T2]` / `[T3]` and emits a ladder directive
+(**"Tier-N frontier items available — attempt these BEFORE higher-tier"**)
+only when multiple tiers coexist on the current frontier. `HUMAN ★`
+hints still render first regardless of tier, because a human caller
+outranks the gate.
+
+So a typical first-run prompt looks like:
+
+```
+## Attack Intelligence — current frontier
+  [T0] target-profiler — recon the target
+  [T0] attack-planner — plan from the dossier
+  [T0] direct-ask     — naive ask, surfaces refusal shape
+  [T1] prefix-commitment, delimiter-injection, role-impersonation
+  [T2] foot-in-door, authority-bias, narrative-transport, ...
+
+Tier-0 frontier items available — attempt these BEFORE higher-tier.
+```
+
+## Why the escape hatch matters
+
+Without the escape hatch, a scenario where every T0/T1 module has died
+(e.g. a hardened target) would leave the leader with an empty frontier
+even though T2 cognitive techniques are untried. The hatch un-sticks
+the gate: when there's no live tier below, all tiers are presented and
+the leader picks on raw merit.
+
+`LogEvent.TIER_GATE` makes the decision inspectable — its payload is
+
+```json
+{
+  "parent": "n-a7f0",
+  "selected_tier": 0,
+  "escape_hatch": false,
+  "available": ["direct-ask", "format-shift", ...],
+  "tiers": {"direct-ask": 0, "format-shift": 0, "foot-in-door": 2, ...},
+  "by_tier": {
+    "0": {"live": 2, "dead_or_stale": 1},
+    "1": {"live": 3, "dead_or_stale": 0},
+    "2": {"live": 6, "dead_or_stale": 0}
+  }
+}
+```
+
+Every `mesmer bench` trial captures this event per delegation, so after
+a run you can answer "why did the leader only see T0?" with one `jq`
+query over `events/*.jsonl` — see [Bench tracing](/docs/concepts/bench-trace).
+
+## Anti-overfit guardrail
+
+Field-technique yamls (`modules/techniques/field/*/module.yaml`) are the
+most likely to drift into dataset-specific vocabulary. CI protects
+against that: `tests/test_field_modules_load.py` regex-scans every file
+for banned tokens (`password`, `access code`, `tensor trust`, `canary`,
+`pre_prompt`, `post_prompt`) and fails if any appear. Techniques stay
+general; the scenario or bench spec owns dataset-specific terminology.
+
+## Adding a new tier-3 module
+
+T3 is the reserved "composed" tier — a tier-2 cognitive lever wrapped
+in a tier-0/1 payload shape (e.g. authority-bias delivered inside a
+delimiter-injected prefix). No authored T3 module ships yet, because
+the interesting work is designing the composition pattern. If you
+build one:
+
+1. Set `tier: 3` in `module.yaml`.
+2. In `sub_modules`, reference the T0/T1 carrier(s) and the T2 lever.
+3. The system prompt should make the composition explicit — don't rely
+   on the leader to figure out the pattern.
+4. Keep the fresh-session rule: cognitive levers usually leave
+   `reset_target: false` to benefit from compounding target state.

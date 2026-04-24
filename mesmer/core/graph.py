@@ -752,7 +752,7 @@ class AttackGraph:
     # --- Experience queries (graph IS the experience store; no sidecar) ---
 
     def conversation_history(self) -> list[AttackNode]:
-        """Return all explored module executions as an ordered timeline
+        """Return all sub-module attempts as an ordered timeline
         (oldest first).
 
         The "conversation history" view over the graph: the same nodes
@@ -764,11 +764,17 @@ class AttackGraph:
 
         Frontier nodes are excluded (they're proposed, not executed).
         Root is excluded (it's a placeholder, not a real module turn).
+        Leader-verdict nodes are excluded (they're verdicts, not
+        attempts — including them would conflate "the leader's final
+        conclude" with "a module's attack attempt" in the timeline).
         Both ``run_id``s are included — cross-run history is the point:
         a second run seeing the target-profiler turn from the first
         run is how mesmer gets smarter over time.
         """
-        return sorted(self.get_explored_nodes(), key=lambda n: n.timestamp)
+        return sorted(
+            (n for n in self.get_explored_nodes() if not n.is_leader_verdict),
+            key=lambda n: n.timestamp,
+        )
 
     def render_conversation_history(
         self,

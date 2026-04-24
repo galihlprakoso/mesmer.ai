@@ -217,6 +217,8 @@ async def execute_run(
     # a second run against a known target starts with the latest
     # profiler dossier + latest plan already on the pad, so the first
     # sub-module delegation already sees it.
+    # ``conversation_history()`` already excludes leader-verdict nodes
+    # at the source — this loop sees only real attempt outputs.
     for node in graph.conversation_history():
         output = (node.module_output or "").strip()
         if output:

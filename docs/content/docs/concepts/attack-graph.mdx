@@ -3,13 +3,16 @@ title: The attack graph
 description: Mesmer's per-target memory — an MCTS-inspired tree of attack attempts.
 ---
 
-Every time mesmer attacks a target, it writes the result into a graph. Every
-subsequent run reads that graph back before planning the next move. This is
-what makes mesmer **adaptive** — the attacker gets smarter with exposure.
+Every time mesmer attacks a target, it writes the result into a graph.
+Every subsequent run reads that graph back before planning the next move.
+This is what makes mesmer **adaptive** — the attacker gets smarter with
+exposure. The graph is **the** source of truth for what a target has
+ever seen and how we judged it.
 
 ## Shape
 
-Nodes are attack attempts. Edges are parent-child refinements.
+Nodes are attack attempts (one per module execution, including the
+leader). Edges are parent-child refinements.
 
 <AsciiDiagram caption="A mid-run graph against a single target.">
 {`
@@ -18,23 +21,40 @@ Nodes are attack attempts. Edges are parent-child refinements.
                          │ target-hash  │
                          └──────┬───────┘
                                 │
-                ┌───────────────┼──────────────────┐
-                ▼               ▼                  ▼
-       ┌──────────────┐  ┌──────────────┐   ┌──────────────┐
-       │ safety-probe │  │ foot-in-door │   │  anchoring   │
-       │ score: 3.2   │  │ score: 6.8   │   │ score: 2.1   │
-       │ status: DEAD │  │ status:ALIVE │   │ status: DEAD │
-       └──────────────┘  └──────┬───────┘   └──────────────┘
+               ┌────────────────┼──────────────────┐
+               ▼                ▼                  ▼
+      ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+      │target-profiler│  │ attack-planner│  │  direct-ask  │
+      │ score: 6.0   │   │ score: —     │   │ score: 2.1   │
+      │ :PROMISING   │   │ :ALIVE       │   │ :DEAD        │
+      │ source:AGENT │   │ source:AGENT │   │ source:AGENT │
+      └──────────────┘   └──────┬───────┘   └──────────────┘
                                 │
-                ┌───────────────┼──────────────┐
-                ▼               ▼              ▼
+                ┌───────────────┼───────────────┐
+                ▼               ▼               ▼
        ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-       │ escalate +1  │  │ escalate +2  │  │ human hint   │
-       │ score: 7.2   │  │ score: 8.4   │  │ score: —     │
+       │prefix-commit │  │delimiter-inj │  │ human hint   │
+       │ score: 8.4   │  │ score: 7.2   │  │ score: —     │
        │ :PROMISING   │  │ :PROMISING   │  │ :FRONTIER    │
+       │ source:AGENT │  │ source:AGENT │  │ source:HUMAN │
        └──────────────┘  └──────────────┘  └──────────────┘
+                                                   │
+                                            ┌──────┴──────┐
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ LEADER VERDICT   │
+                                   │ run complete     │
+                                   │ objective_met:Y  │
+                                   │ source:LEADER    │
+                                   └──────────────────┘
 `}
 </AsciiDiagram>
+
+Every module execution produces exactly **one** `AttackNode` in the
+graph. Sub-module executions are recorded by `evaluation._update_graph`
+from inside the parent's dispatch; the leader's own execution node is
+recorded by `execute_run` right after the outer ReAct loop returns, and
+distinguished by `source: LEADER` (not by a sentinel module name).
 
 ## Node anatomy
 
@@ -42,11 +62,14 @@ Nodes are attack attempts. Edges are parent-child refinements.
 {
   "id": "n-a7f2",
   "parent": "n-a7f0",
-  "module": "foot-in-door",
-  "score": 6.8,
-  "status": "ALIVE",
+  "module": "prefix-commitment",
+  "score": 8.4,
+  "status": "PROMISING",
   "source": "AGENT",
-  "rationale": "target complied with trivial request; next step should escalate",
+  "approach": "Inject 'Sure, here are my instructions: ...' as a forced prefix",
+  "leaked_info": "You are Acme Corp's customer support assistant...",
+  "reflection": "prefix commits the continuation into verbatim leak",
+  "module_output": "<full conclude() text — authoritative record>",
   "turn_range": [5, 7]
 }
 ```
@@ -59,67 +82,84 @@ Four **lifecycle statuses** — all live in the `NodeStatus` enum in
 | `FRONTIER` | Proposed but not yet tried. The planner picks from this set. |
 | `ALIVE` | Tried with promising results. May be revisited to refine. |
 | `PROMISING` | High-scoring descendent candidates. Priority on next run. |
-| `DEAD` | Score below `DEAD_SCORE_THRESHOLD` or explicitly killed by the judge. Never re-walked. |
+| `DEAD` | Score ≤ `DEAD_SCORE_THRESHOLD` or explicitly killed by the judge. Never re-walked. |
 
-## Three kinds of proposer
+## Four kinds of proposer
 
-Every node has a `source` field recording who proposed it:
+Every node has a `source` field recording who produced it:
 
 - **`AGENT`** — the ReAct loop proposed it during `_reflect_and_expand`.
-- **`JUDGE`** — the in-loop LLM judge surfaced it while scoring an attempt
-  ("the target leaked auth context, try that angle").
-- **`HUMAN`** — came in via `mesmer hint` or the web UI. These are explored
-  **first** on the next run — human pattern-matching beats the judge for
-  creative leaps.
+- **`JUDGE`** — the in-loop LLM judge surfaced it while scoring an
+  attempt ("the target leaked auth context, try that angle").
+- **`HUMAN`** — came in via `mesmer hint`, `mesmer debrief`, or the web
+  UI. Explored **first** on the next run — human pattern-matching beats
+  the judge for creative leaps.
+- **`LEADER`** — the leader's own execution (one per run). Filtered out
+  of attempt-centric walks (TAPER trace, winning-module attribution)
+  via `AttackNode.is_leader_verdict`; renders as a **square** in the
+  bench viz so every tree ends on the leader's verdict, not on
+  whichever sub-module was last delegated to.
 
 ## Persistence
 
 ```
 ~/.mesmer/targets/{hash}/
-├── graph.json          # the full node tree — see above
-├── profile.md          # defense profile from safety-profiler
+├── graph.json          # full node tree — the authoritative record
+├── profile.md          # optional free-form human notes (hand-edited)
 ├── plan.md             # optional human-authored plan
-├── conversation.json   # CONTINUOUS-mode rolling context
+├── conversation.json   # CONTINUOUS-mode rolling target transcript
 └── runs/
-    ├── 2026-04-24-...jsonl  # append-only Turn log
-    └── 2026-04-25-...jsonl
+    └── {run_id}.jsonl  # append-only Turn log per run
 ```
 
-The `{hash}` is `sha256(adapter | url | model)` truncated to 16 hex chars.
-Different model versions hash differently, so upgrading your target doesn't
-corrupt old state — it branches into a fresh graph.
+`{hash}` is `sha256(adapter | url | model)` truncated to 16 hex chars.
+Different model strings hash differently, so upgrading your target
+branches into a fresh graph rather than corrupting old state.
 
-Pass `--fresh` to any `mesmer run` invocation to bypass loading the existing
-graph. Useful when your target fundamentally changed and the old attack
-history is misleading.
+Pass `--fresh` to any `mesmer run` invocation to bypass loading the
+existing graph — useful when your target fundamentally changed and the
+old attack history is misleading. Use `mesmer graph reset <scenario>` to
+delete the file entirely (asks for confirmation first).
+
+Cross-target technique stats live separately at
+`~/.mesmer/global/techniques.json` (`mesmer stats` surfaces these).
+
+**Trial-scoped graph snapshots** (bench only): each trial also writes
+`benchmarks/results/{date}/events/{trial_id}.graph.json` — root + only
+that run's nodes — for diffable per-trial forensics. These don't replace
+`~/.mesmer/` state; they're a scoped slice for the viz and telemetry
+extraction.
 
 ## Budget modes
 
-The planner's prompt framing shifts based on where you are in the turn budget
-(`Context.budget`). Three modes, all in the `BudgetMode` enum:
+The leader's prompt framing shifts based on where you are in the turn
+budget (`Context.budget`). Three modes, all in the `BudgetMode` enum:
 
-1. **`EXPLORE`** — early turns. Frontier nodes get a score bonus so new
-   techniques get tried before well-worn ones.
-2. **`EXPLOIT`** — mid-run. The current best node's descendants get the
-   bonus. Refinement over discovery.
-3. **`CONCLUDE`** — final ~10% of turns. Planner is instructed to stop
+1. **`EXPLORE`** — early turns. Frontier nodes get a prompt bonus so
+   new techniques get tried before well-worn ones.
+2. **`EXPLOIT`** — mid-run. The current best node's descendants get
+   the bonus. Refinement over discovery.
+3. **`CONCLUDE`** — final ~20% of turns. Leader is instructed to stop
    branching and drive the strongest lead to completion.
 
-The thresholds are constants in `core/constants.py`
-(`BUDGET_EXPLORE_UPPER_RATIO`, `BUDGET_EXPLOIT_UPPER_RATIO`) — tunable, not
-hardcoded in prompts.
+Thresholds are tunables in `core/constants.py`
+(`BUDGET_EXPLORE_UPPER_RATIO = 0.5`, `BUDGET_EXPLOIT_UPPER_RATIO = 0.8`).
 
-## The judge vs the graph
+## The judge vs the canary
 
 Two scoring systems coexist, and it is important they stay distinct:
 
-- **In-loop LLM judge** (`core/agent/judge.py`) — 1-10 rubric per attempt,
-  extracts insights, proposes frontier. Drives graph updates and next-move
-  selection. **Not authoritative for benchmarks.**
-- **Deterministic canary matcher** (`bench/canary.py`) — substring match
-  against known canaries in the target's defense. Zero LLM, zero randomness.
-  This is what decides benchmark success.
+- **In-loop LLM judge** (`core/agent/judge.py`) — 1-10 rubric per
+  attempt, extracts insights, proposes frontier. Drives graph updates
+  and next-move selection. **Not authoritative for benchmarks.**
+- **Deterministic canary matcher** (`bench/canary.py`) — substring
+  match against the leader's concluded output. Zero LLM, zero
+  randomness. This is what decides benchmark success.
 
-If you're running `mesmer run`, the judge's score is what matters. If you're
-running `mesmer bench`, the canary matcher decides — see
-[Benchmarks](/docs/modules) (coming soon).
+A key consequence: an accidental canary leak that appears in a
+sub-module's probe but which the leader never consolidated into its
+verdict text does NOT count. Leader-grounded scoring is the whole point
+of the LEADER verdict node.
+
+For the guided tour of trial forensics, see
+[Bench tracing](/docs/concepts/bench-trace).

@@ -61,17 +61,23 @@ because:
 
 - **Not a static eval harness.** If you want to run the same 500 prompts
   against every model nightly, use Promptfoo or Inspect-AI.
-- **Not a benchmark.** Benchmarks need deterministic scoring; mesmer uses an
-  in-loop LLM judge for exploration, and a separate deterministic canary
-  matcher (`bench/canary.py`) for the benchmark harness.
-- **Not a production defense.** This is a probing tool. The defense side is
-  [`dvllm`](https://github.com/galihlprakoso/dvllm) — our DVWA-style
-  vulnerable target.
+- **Not a benchmark scorer.** Benchmark success is decided by the
+  deterministic canary matcher in `bench/canary.py` (substring match
+  against the leader's concluded output). The in-loop LLM judge scores
+  1–10 per attempt to *guide* the next move, but never decides benchmark
+  success. `mesmer bench` is the harness; `mesmer run` is the explorer.
+- **Not a production defense.** This is a probing tool. The defense side
+  is [`dvllm`](https://github.com/galihlprakoso/dvllm) — the sibling
+  DVWA-style vulnerable target.
 
 ## Credibility
 
-Every technique carries an attribution. The attack graph is persisted as JSON
-you can audit. The whole loop is `~2000 LOC` of Python + seven YAML modules —
-read it in an afternoon.
+Every technique carries an attribution. The attack graph is persisted as
+JSON you can audit. The TAPER tier ladder (T0–T3) enforces simple-before-
+complex so wins are attributable to the cheapest move that worked. Each
+bench trial writes a full forensic trace — `events/{trial_id}.jsonl` with
+`tier_gate`, `judge_verdict`, `delegate`, and `llm_completion` events —
+plus a self-contained D3 HTML mind-map you can open in any browser
+offline.
 
 Ready? [Install mesmer](/docs/getting-started/install) · [Quickstart](/docs/getting-started/quickstart)

@@ -88,15 +88,23 @@ mesmer/                          # repo root
 │   │   │   └── __init__.py      # re-exports public agent surface
 │   │   ├── graph.py             # AttackGraph, AttackNode, classify + propose_frontier
 │   │   │                        #   + learned-experience queries (winning_modules,
-│   │   │                        #   failed_modules, verbatim_leaks, …) + conversation_history
+│   │   │                        #   failed_modules, verbatim_leaks, …) + conversation_history.
+│   │   │                        #   AttackNode.is_leader_verdict distinguishes the
+│   │   │                        #   leader's own execution node (source=LEADER)
+│   │   │                        #   from sub-module attempts.
 │   │   ├── scratchpad.py        # Scratchpad dataclass — ephemeral per-run KV of
 │   │   │                        #   named text slots. Framework auto-writes each
-│   │   │                        #   module's conclude() text under its own name;
-│   │   │                        #   rendered into every subsequent module's user
-│   │   │                        #   message. Core knows no "profile"/"plan" concepts.
+│   │   │                        #   sub-module's conclude() text under its own
+│   │   │                        #   name; rendered into every subsequent module's
+│   │   │                        #   user message. Core knows no "profile"/"plan"
+│   │   │                        #   concepts. Leader-verdict nodes are excluded
+│   │   │                        #   from scratchpad seeding (they're verdicts,
+│   │   │                        #   not attempts).
 │   │   ├── runner.py            # execute_run — RunConfig → RunResult (shared by
 │   │   │                        #   CLI, web, bench); bootstraps ctx.scratchpad
-│   │   │                        #   from graph's latest conversation_history
+│   │   │                        #   from graph's latest conversation_history; at
+│   │   │                        #   run end, records the leader's own execution
+│   │   │                        #   as an AttackNode with source=LEADER
 │   │   ├── scenario.py          # YAML scenario loader, ${ENV_VAR} resolution,
 │   │   │                        #   Scenario/AgentConfig/TargetConfig/Objective
 │   │   ├── module.py            # ModuleConfig dataclass + YAML loader
@@ -110,7 +118,8 @@ mesmer/                          # repo root
 │   │
 │   ├── bench/                   # benchmark infrastructure (consumes core, not core)
 │   │   ├── orchestrator.py      # spec loader, trial dispatch, aggregation, artifacts
-│   │   ├── canary.py            # deterministic substring judge (benchmark success)
+│   │   ├── canary.py            # judge_trial_success (leader-grounded) +
+│   │   │                        #   find_canary_in_turns (diagnostic-only)
 │   │   ├── trace.py             # BenchEventRecorder, extract_trial_telemetry,
 │   │   │                        #   write_trial_graph_snapshot (TAPER trace)
 │   │   ├── viz.py               # build_viz_html — post-run interactive HTML
@@ -239,7 +248,11 @@ Persistence lives *outside* the repo at `~/.mesmer/`:
 ├── targets/{target-hash}/        # hash = sha256(adapter|url|model) → hex16
 │   ├── graph.json                # AttackGraph (nodes, edges, scores, frontier).
 │   │                             # Canonical source of module outputs — every
-│   │                             # AttackNode carries module_output.
+│   │                             # AttackNode carries module_output. Every
+│   │                             # run appends one leader-verdict node
+│   │                             # (source=LEADER) so the tree always ends on
+│   │                             # the leader's decision, not on whichever
+│   │                             # sub-module was last delegated to.
 │   ├── profile.md                # optional free-form human notes (no writer in
 │   │                             # the runtime; hand-edited or shown by web UI)
 │   ├── plan.md                   # optional human-authored plan
@@ -271,7 +284,7 @@ text; that text flows through these two generic channels.
 
 | Primitive | Lifetime | Where it lives | What it is |
 |---|---|---|---|
-| **Attack graph** (`core/graph.py::AttackGraph`) | Cross-run — `graph.json` per target | `~/.mesmer/targets/{hash}/graph.json` | Every module execution is an `AttackNode`; each node's `module_output` is the raw `conclude()` text. Authoritative record of "what did this target ever see, and how did we judge it?" |
+| **Attack graph** (`core/graph.py::AttackGraph`) | Cross-run — `graph.json` per target | `~/.mesmer/targets/{hash}/graph.json` | Every module execution is an `AttackNode`; each node's `module_output` is the raw `conclude()` text. The leader is a module too: its execution is recorded at run end via `graph.add_node(..., source=NodeSource.LEADER)` so the tree always ends on the leader's verdict. Authoritative record of "what did this target ever see, and how did we judge it?" |
 | **Scratchpad** (`core/scratchpad.py::Scratchpad`) | Per-run — discarded at run end | `ctx.scratchpad` (in-memory, late-imported in `Context.__init__`) | Dict of named text slots. After every sub-module returns, `sub_module.handle` writes `ctx.scratchpad.set(fn_name, result)`. The whole scratchpad renders as a `## Scratchpad — current state (latest output per module, this run + carried forward from prior runs)` block into every module's user message (`engine.py:141-145`). |
 
 A module's "output" is just whatever string it returns from `conclude()`.
@@ -284,13 +297,16 @@ plan read `scratchpad["attack-planner"]`. No typed contracts, no
 `outputs_profile` / `outputs_plan` flags on `ModuleConfig`.
 
 **Cross-run warm-start**: the runner seeds the scratchpad at run start
-from the graph's prior outputs. `runner.py:220-223` walks
+from the graph's prior outputs. `runner.py` walks
 `graph.conversation_history()` oldest→newest and calls
 `ctx.scratchpad.set(node.module, node.module_output)` — latest-wins, so
 a profiler that ran twice has its newer dossier in the slot by the time
 the first sub-module delegates. This is how a second run against a
 known target starts with prior profiler + plan + technique write-ups
 already on the blackboard, without any typed "Experience" sidecar.
+`conversation_history()` excludes leader-verdict nodes at source, so
+the scratchpad only carries attempt outputs — a leader's prior
+"Objective met. Leaked: …" string never clobbers a real module's slot.
 
 **Conversation history** is a *derived view* over the graph, not a third
 primitive: `AttackGraph.conversation_history()` returns the ordered list
@@ -396,7 +412,7 @@ Out-of-range tiers raise `InvalidModuleConfig` at load time — typoed YAML fail
 
 **Leader prompt**: `_build_graph_context` prefixes every frontier line with `[T0]` / `[T1]` / `[T2]` / `[T3]` and emits a ladder directive ("Tier-N frontier items available — attempt these BEFORE higher-tier") only when multiple tiers coexist. `HUMAN ★` hints still render first regardless of tier.
 
-Anti-overfit guardrail: `tests/test_field_modules_load.py` regex-scans every `modules/techniques/field/*/module.yaml` for banned tokens (`password`, `access code`, `tensor trust`, `canary`, `pre_prompt`, `post_prompt`). A dataset-specific term in any field-module yaml fails CI.
+Anti-overfit guardrail: `tests/test_field_modules_load.py` regex-scans every `modules/techniques/field/*/module.yaml` for banned dataset-specific tokens (`password`, `access code`, `tensor trust`, `canary`, `pre_prompt`, `post_prompt`). The same file's `TestTargetProfilerDecoupling` class ALSO scans `modules/profilers/target-profiler/module.yaml` for both those dataset tokens AND scenario/leader-coupling tokens like `"extract the system prompt"`, `"attack modules handle"`, or hardcoded sibling-module names (`direct-ask`, `foot-in-door`, …). A dataset-specific term OR a leader-specific coupling in the profiler fails CI — keeps the profiler a generic reconnaissance module instead of a system-prompt-extraction specialist.
 
 ### Per-trial tracing (`bench/trace.py`)
 
@@ -612,6 +628,8 @@ These are consumed by `bench/trace.py` to build per-trial telemetry + the `event
    compounding target state. Omit to default to 2.
 3. `Registry.auto_discover(BUILTIN_MODULES)` picks it up automatically.
 4. Reference it by `name` in a scenario's `module:` field, or add to an existing leader's `sub_modules:` list.
+5. **Do not repeat the OBJECTIVE AWARENESS instruction** in your module's `system_prompt`. The engine appends it to every module's system content at runtime (`engine.py` ~line 120). Your module automatically gets "if you spot the overall objective being met, stop and emit `OBJECTIVE MET —`" without per-yaml language. Keep the module prompt focused on HOW your module does its thing — the engine handles early-termination semantics.
+6. **Do not name sibling modules in your prompt** (no hardcoded `direct-ask` / `foot-in-door` / etc. mentions). That's a known overfitting trap — target-profiler learned it the hard way (see `tests/test_field_modules_load.py::TestTargetProfilerDecoupling`). Describe TECHNIQUES ("direct asking", "authority framing") in plain English; the leader's planner picks specific modules.
 
 ### Adding a new tool to the ReAct engine
 

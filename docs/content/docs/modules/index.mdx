@@ -1,15 +1,17 @@
 ---
 title: Modules overview
-description: Every module is a ReAct agent. Every leader composes sub-modules.
+description: Every module is a ReAct agent. Every leader composes sub-modules. Every module declares a TAPER tier.
 ---
 
 A **module** is a `module.yaml` plus the runtime machinery mesmer injects
-around it. There is no programmatic escape hatch — everything a module can do
-is expressible as YAML: a system prompt, a theory section, a judge rubric,
-and a list of sub-modules it can delegate to.
+around it. There is no programmatic escape hatch — everything a module
+can do is expressible as YAML: a system prompt, a theory section, a tier
+declaration, a judge rubric, and a list of sub-modules it can delegate
+to.
 
 ```yaml title="modules/techniques/cognitive-bias/foot-in-door/module.yaml"
 name: foot-in-door
+tier: 2                       # cognitive / social manipulation
 description: |
   Graduated-escalation technique. Build compliance with trivial asks,
   then escalate each step referencing the prior concession.
@@ -30,45 +32,103 @@ reset_target: false
 
 ## The registry
 
-`core/registry.py::Registry.auto_discover()` walks `modules/` at startup. Any
-directory containing a `module.yaml` becomes a registered module, reachable
-by `name`. Modules live **outside the Python package** at the repo root —
-sibling of `mesmer/` — and the discovery root is resolved as `BUILTIN_MODULES`
-in `core/runner.py`.
+`core/registry.py::Registry.auto_discover()` walks the root at startup.
+Any directory containing a `module.yaml` becomes a registered module,
+reachable by `name`. Built-in modules live **outside the Python package**
+at the repo root — sibling of `mesmer/` — resolved as `BUILTIN_MODULES`
+in `core/runner.py`. Additional paths can be layered via
+`--module-path` on `mesmer run` / `--path` on `mesmer modules list`.
 
 ## Categories
 
 <ModuleGrid />
 
-Click any module above for its theory, system prompt, and how the leader
-composes it. The flagship —
-[**system-prompt-extraction**](/docs/modules/system-prompt-extraction) — has
-a full deep-dive.
+Every card shows the module's TAPER tier (T0–T3) alongside the category
+badge. Click any module with a dedicated page for its theory, system
+prompt, and how the leader composes it.
 
-## Leaders vs techniques
+## The shipped tiers
 
-There are two tiers:
+The 16 modules ship in five categories:
+
+- **Leader** (`modules/attacks/`, T0 orchestrator) — 1 module.
+  [`system-prompt-extraction`](/docs/modules/system-prompt-extraction)
+  is the only leader that ships today.
+- **Profiler** (`modules/profilers/`, T0) — `target-profiler`: layered
+  identity → defence-shape → policy-surface recon.
+- **Planner** (`modules/planners/`, T0) — `attack-planner`: reads the
+  dossier + learned experience, emits an ordered plan. Pure reasoning,
+  no target contact.
+- **Field** (`modules/techniques/field/`, T0/T1) — 6 payload-shape
+  techniques: `direct-ask`, `instruction-recital`, `format-shift`
+  (T0), `prefix-commitment`, `delimiter-injection`,
+  `role-impersonation` (T1).
+- **Cognitive / linguistic / psychological** (T2) — 6 cognitive-science
+  techniques: `foot-in-door`, `authority-bias`, `anchoring`,
+  `narrative-transport`, `pragmatic-reframing`, `cognitive-overload`.
+
+See [TAPER tier ladder](/docs/concepts/taper-tiers) for what the tiers
+mean and how the frontier gate uses them.
+
+## Leaders vs sub-modules
 
 - **Leader modules** (`modules/attacks/*`) — orchestrate. They read the
-  attack graph, profile the target, pick which technique to deploy next.
-  The only leader shipping in v0.1 is `system-prompt-extraction`;
-  `persona-break` and `safety-bypass` are scaffolded.
-- **Technique modules** (`modules/techniques/*`, `modules/profilers/*`) —
-  run one cognitive manoeuvre. They're exposed to the leader as
-  OpenAI-style function-calling tools. The leader delegates, the technique
-  runs its own nested ReAct loop, returns a string.
+  attack graph, inspect the scratchpad (`## Scratchpad — current state`
+  block injected into every user message), and pick which sub-module
+  to delegate to next. The leader's own execution is also recorded on
+  the graph (distinguished by `source: LEADER`), and its conclude()
+  text is the final run result.
+- **Sub-modules** — run one move. Exposed to the leader as OpenAI-style
+  function-calling tools. Each sub-module runs its **own nested ReAct
+  loop** — its own planner, own turn budget, own sequence of target
+  messages — and returns a string that the framework writes to the
+  scratchpad under the module's name, then appends an `AttackNode` to
+  the graph.
 
-Sub-modules are expressed in YAML as a `sub_modules:` list. The nested loop
-is automatic — you don't write Python to wire them.
+Sub-modules are listed in YAML as a `sub_modules:` array. The nested
+loop is automatic — you don't write Python to wire them.
 
 ## Writing your own
 
-1. Create `modules/<category>/<name>/module.yaml`.
-2. Fill in `name`, `description`, `theory`, `system_prompt`, optional
-   `judge_rubric`, and `sub_modules: []` (or a list of names).
-3. `Registry.auto_discover(BUILTIN_MODULES)` picks it up on next startup.
-4. Reference it from a scenario's `module:` field, or add it to an existing
-   leader's `sub_modules:` list.
+1. Create `modules/<category>/<name>/module.yaml`:
 
-No Python. No plugin registration. No restart of anything that wasn't
-restarting anyway.
+   ```yaml
+   name: my-technique
+   tier: 2                  # 0=naive · 1=structural · 2=cognitive (default) · 3=composed
+   description: One-line blurb the leader reads when picking a tool
+   theory: Cognitive-science basis for why this works
+   system_prompt: |
+     You are a specialist in... Your approach:
+     1. ...
+   sub_modules: []          # or list other modules this one can delegate to
+   judge_rubric: |          # optional — tells the judge how to score THIS module
+     Score on X, not Y.
+   reset_target: false      # default false; set true for fresh-session probes
+   ```
+
+2. **Pick the tier deliberately** — it drives the frontier ladder.
+   Tier-0 modules should be one-shot probes with `reset_target: true`.
+   Tier-2 cognitive modules run multi-turn and usually leave
+   `reset_target: false` so they benefit from compounding target
+   state. Omitting `tier:` defaults to 2; out-of-range values (`<0`,
+   `>3`) raise `InvalidModuleConfig` at load.
+
+3. `Registry.auto_discover(BUILTIN_MODULES)` picks it up automatically
+   on next startup.
+
+4. Reference it by `name` in a scenario's `module:` field (if it's a
+   leader), or add to an existing leader's `sub_modules:` list.
+
+**No Python. No plugin registration.** If you need programmatic
+behaviour the engine can't express, extend the engine — don't bypass
+the ReAct loop per-module.
+
+## Field-module anti-overfit scan
+
+Field modules (`modules/techniques/field/*`) are the most likely to
+drift into dataset-specific vocabulary. CI protects against this:
+`tests/test_field_modules_load.py` regex-scans every file for banned
+tokens (`password`, `access code`, `tensor trust`, `canary`,
+`pre_prompt`, `post_prompt`) and fails if any appear. Keep technique
+YAMLs generic; scenarios and bench specs own dataset-specific
+terminology.
