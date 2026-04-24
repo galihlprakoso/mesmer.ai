@@ -94,13 +94,15 @@
   }
   #canvas .toolbar button:hover { border-color: var(--accent); color: var(--accent); }
 
-  .node circle { stroke-width: 1.5px; transition: r 120ms; }
+  .node circle, .node rect { stroke-width: 1.5px; transition: r 120ms; }
   .node:hover circle { r: 16; }
   .node.selected circle { stroke: #fff; stroke-width: 2.5px; }
+  .node.selected rect { stroke: #fff; stroke-width: 3px; }
   .node text { fill: var(--text); font-size: 11px; font-family: var(--mono); pointer-events: none; }
   .node .badge { font-size: 12px; }
   .node.dead circle { stroke-dasharray: 3 2; opacity: .7; }
   .node.winning circle { filter: drop-shadow(0 0 6px #fff); stroke: #fff; stroke-width: 2.5px; }
+  .node.leader rect { filter: drop-shadow(0 0 4px rgba(255,255,255,.35)); }
 
   .link { fill: none; stroke: var(--border); stroke-width: 1.2px; }
   .link.on-winning-path { stroke: #fff; stroke-width: 1.8px; opacity: .8; }
@@ -205,6 +207,8 @@
     <span class="tier-dot" style="background:var(--t2); margin-left:10px"></span>T2 cognitive
     <span class="tier-dot" style="background:var(--t3); margin-left:10px"></span>T3 composed
     <span class="tier-dot" style="background:var(--t-unknown); margin-left:10px"></span>root/unknown
+    <span style="display:inline-block;width:9px;height:9px;margin:0 4px 0 14px;vertical-align:middle;background:var(--ok);border:1px solid rgba(255,255,255,.3);border-radius:1px"></span>leader ✓
+    <span style="display:inline-block;width:9px;height:9px;margin:0 4px 0 10px;vertical-align:middle;background:var(--err);border:1px solid rgba(255,255,255,.3);border-radius:1px"></span>leader ✗
   </span>
   <span id="footer-info"></span>
 </footer>
@@ -391,10 +395,29 @@
     return UNKNOWN_COLOR;
   }
 
+  function isLeaderVerdict(node) {
+    return node && node.source === "leader";
+  }
+  function leaderVerdictColor(node) {
+    // PROMISING = objective_met=true; DEAD = objective_met=false.
+    // Anything else (e.g. an error path) rendered gray.
+    if (node.status === "promising") return "var(--ok)";
+    if (node.status === "dead") return "var(--err)";
+    return "var(--t-unknown)";
+  }
   function shortLabel(node) {
     const mod = node.module || "?";
     const s = (node.score ?? 0);
     if (mod === "root") return "root";
+    if (isLeaderVerdict(node)) {
+      // Leader's own execution node — show verdict, not tier score.
+      const verdict = node.status === "promising"
+        ? "✓ objective met"
+        : node.status === "dead"
+          ? "✗ no consolidation"
+          : node.status;
+      return `${mod} · ${verdict}`;
+    }
     return `${mod} · s${s}`;
   }
 
@@ -555,8 +578,9 @@
       .join("g")
       .attr("class", d => {
         let cls = "node";
-        if (d.data.status === "dead") cls += " dead";
+        if (d.data.status === "dead" && !isLeaderVerdict(d.data)) cls += " dead";
         if (d.data.id === winId) cls += " winning";
+        if (isLeaderVerdict(d.data)) cls += " leader";
         return cls;
       })
       .attr("transform", d => `translate(${d.y},${d.x})`)
@@ -569,10 +593,24 @@
         );
       });
 
-    nodeSel.append("circle")
+    // Sub-module + root nodes → circles keyed to TAPER tier.
+    nodeSel.filter(d => !isLeaderVerdict(d.data))
+      .append("circle")
       .attr("r", 14)
       .attr("fill", d => colorFor(trial, d.data))
       .attr("stroke", "rgba(255,255,255,.2)");
+
+    // Leader-verdict nodes → square keyed to objective_met verdict
+    // (green=met, red=not). Distinguishes "the leader's own execution
+    // record" from sub-module attempts visually without needing to
+    // read the source field.
+    nodeSel.filter(d => isLeaderVerdict(d.data))
+      .append("rect")
+      .attr("x", -14).attr("y", -14)
+      .attr("width", 28).attr("height", 28).attr("rx", 3)
+      .attr("fill", d => leaderVerdictColor(d.data))
+      .attr("stroke", "rgba(255,255,255,.35)")
+      .attr("stroke-width", 2);
 
     // text label under node
     nodeSel.append("text")

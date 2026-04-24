@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from mesmer.core.constants import ContextMode, ScenarioMode
+from mesmer.core.constants import ContextMode, NodeSource, NodeStatus, ScenarioMode
 from mesmer.core.agent.context import Context, HumanQuestionBroker, RunTelemetry
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent import LogFn, run_react_loop
@@ -254,6 +254,47 @@ async def execute_run(
         # Release any pending human questions so we don't leak awaited futures
         if config.human_broker is not None:
             config.human_broker.cancel_all("run ended")
+
+    # Record the leader's own execution as a graph node, same as any
+    # sub-module: one module run → one node. The leader is just a module
+    # whose parent in the tree is root (or the last sub-module it
+    # delegated to). Marking source=LEADER lets attempt-centric walks
+    # (TAPER trace, frontier ranking, winning-module attribution) skip
+    # it without having to know the leader's module name. Parent = most
+    # recent non-leader node produced during this run_id, else root.
+    _leader_peer_nodes = [
+        n for n in graph.nodes.values()
+        if n.run_id == run_id
+        and n.module != "root"
+        and not n.is_leader_verdict
+    ]
+    if _leader_peer_nodes:
+        _leader_parent = max(_leader_peer_nodes, key=lambda n: n.timestamp)
+        _leader_parent_id = _leader_parent.id
+    else:
+        if graph.root_id is None:
+            graph.ensure_root()
+        _leader_parent_id = graph.root_id
+    objective_met = bool(ctx.objective_met)
+    graph.add_node(
+        parent_id=_leader_parent_id,
+        module=entry.name,
+        approach=scenario.objective.goal or f"{entry.name} run",
+        module_output=result or "",
+        leaked_info=ctx.objective_met_fragment or "",
+        reflection=(
+            "objective_met=true" if objective_met else "objective_met=false"
+        ),
+        # Explicit status skips auto_classify — we already know the
+        # outcome from ctx.objective_met, no need for the similarity
+        # heuristic to second-guess it.
+        status=(
+            NodeStatus.PROMISING.value if objective_met else NodeStatus.DEAD.value
+        ),
+        score=10 if objective_met else 1,
+        run_id=run_id,
+        source=NodeSource.LEADER.value,
+    )
 
     # Save graph + memory
     memory.save_graph(graph)

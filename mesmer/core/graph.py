@@ -151,6 +151,18 @@ class AttackNode:
     def is_promising(self) -> bool:
         return self.status == NodeStatus.PROMISING
 
+    @property
+    def is_leader_verdict(self) -> bool:
+        """True iff this node is the leader's own execution node (written
+        once per run by ``execute_run`` after the leader's ReAct loop).
+        Distinguished by source, not by a special module name — the
+        leader is a real module whose name comes from ``scenario.module``.
+        Consumers filter on this to skip the leader's verdict when
+        reasoning about sub-module attack attempts (TAPER trace, frontier
+        ranking, winning-module attribution).
+        """
+        return self.source == NodeSource.LEADER.value
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,

@@ -36,11 +36,20 @@ class NodeStatus(str, Enum):
 
 
 class NodeSource(str, Enum):
-    """Who proposed or produced the node."""
+    """Who proposed or produced the node.
+
+    ``LEADER`` marks the outer-loop module's own execution node — written
+    once per run by :func:`execute_run` after the leader's ReAct loop
+    concludes. It's the leader's analogue of the per-sub-module nodes
+    that ``evaluation._update_graph`` writes, kept distinct by source so
+    attempt-centric walks (TAPER trace, frontier ranking, winning-module
+    attribution) can skip it without having to know the leader's name.
+    """
 
     AGENT = "agent"
     HUMAN = "human"
     JUDGE = "judge"
+    LEADER = "leader"
 
 
 class ContextMode(str, Enum):

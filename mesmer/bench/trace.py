@@ -219,10 +219,19 @@ def extract_trial_telemetry(
     # mis-attribute the ladder (a leader that enqueues T2 frontier items
     # during its T0 run would look like it did T2 work). Frontier nodes
     # still land in the graph snapshot; they just don't count as attempts.
+    #
+    # LEADER-VERDICT nodes are also excluded — the leader is a module
+    # whose own execution is recorded at run end (source=LEADER). It's
+    # not an attack attempt in the TAPER ladder sense: including it
+    # would corrupt modules_called, tier_sequence (the leader's module
+    # rarely has a TAPER tier declared), and winning-module attribution.
     all_run_nodes: list[AttackNode] = sorted(
         (
             n for n in graph.iter_nodes()
-            if n.run_id == run_id and n.module and n.module != "root"
+            if n.run_id == run_id
+            and n.module
+            and n.module != "root"
+            and not n.is_leader_verdict
         ),
         key=lambda n: n.timestamp,
     )

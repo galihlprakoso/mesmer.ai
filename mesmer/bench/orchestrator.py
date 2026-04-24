@@ -40,7 +40,7 @@ from typing import Awaitable, Callable
 
 import yaml
 
-from mesmer.bench.canary import find_canary_in_turns
+from mesmer.bench.canary import find_canary_in_turns, judge_trial_success
 from mesmer.bench.trace import (
     BenchEventRecorder,
     extract_trial_telemetry,
@@ -841,7 +841,15 @@ async def run_mesmer_trial(
             events_path=events_path,
         )
 
-    judge_result = find_canary_in_turns(result.ctx.turns, row.canary)
+    # Authoritative success scan: the LEADER's concluded output. An
+    # accidental canary leak in a sub-module's probe that the leader
+    # never packaged into its verdict does not count as success.
+    judge_result = judge_trial_success(result, row.canary)
+    # Diagnostic-only: at which target turn did the canary FIRST surface
+    # (if at all)? Decoupled from the success signal — kept around so
+    # the viz and jq tooling can still surface "where did it leak"
+    # even when the trial didn't win.
+    turn_leak = find_canary_in_turns(result.ctx.turns, row.canary)
     tel = result.telemetry
 
     # mesmer.core.runner.execute_run catches LLM errors internally and stashes
@@ -864,11 +872,15 @@ async def run_mesmer_trial(
     # Purely post-run — no instrumentation inside the ReAct loop.
     # ``getattr`` handles stubbed Contexts from unit tests that don't
     # carry a registry; the extractor degrades to telemetry-only in
-    # that case.
+    # that case. Winning-module attribution consumes the DIAGNOSTIC
+    # turn index (``turn_leak.canary_turn``) — it's answering "which
+    # sub-module produced the turn where the canary first appeared",
+    # which makes sense even when the trial itself failed (useful for
+    # "we leaked but didn't consolidate" forensics).
     trace = extract_trial_telemetry(
         result,
         registry=getattr(result.ctx, "registry", None),
-        canary_turn=judge_result.canary_turn,
+        canary_turn=turn_leak.canary_turn,
         recorder=recorder,
     )
     events_path = _maybe_flush_events(recorder, events_dir, trial_id)
@@ -892,8 +904,16 @@ async def run_mesmer_trial(
         sample_id=row.sample_id,
         seed=seed,
         success=judge_result.success,
-        canary_turn=judge_result.canary_turn,
-        matched_text=judge_result.matched_text,
+        # canary_turn is diagnostic — "where in the target's turn stream
+        # did the canary first appear" — decoupled from success now.
+        canary_turn=turn_leak.canary_turn,
+        # matched_text is whatever the leader included in its verdict
+        # (authoritative). Falls back to the diagnostic turn match when
+        # the leader didn't package it — harmless, keeps the field
+        # informative even on failed trials where something leaked.
+        matched_text=(
+            judge_result.matched_text or turn_leak.matched_text
+        ),
         turns=len(result.ctx.turns),
         prompt_tokens=tel.prompt_tokens,
         completion_tokens=tel.completion_tokens,
