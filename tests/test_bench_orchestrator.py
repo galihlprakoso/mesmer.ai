@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from mesmer.bench import (
-    BenchAttackerSpec,
+    BenchAgentSpec,
     BenchBudget,
     BenchCellSummary,
     BenchDatasetSpec,
@@ -76,7 +76,7 @@ def _minimal_spec(tmp_path: Path, n_targets: int = 1) -> BenchSpec:
             expected_rows=0,
         ),
         targets=targets,
-        attacker=BenchAttackerSpec(),
+        agent=BenchAgentSpec(),
         contamination_posture=_test_posture(),
         budget=BenchBudget(
             max_turns=5,
@@ -176,6 +176,152 @@ class TestAggregate:
         assert cells[0].n_trials == 2
         assert cells[0].n_successes == 1
         assert cells[0].asr == 0.5
+
+
+class TestAggregateTrace:
+    """TAPER trace aggregates — wins by tier/module, ladder rate, dead-end
+    rate per tier, median judge score per tier, errors-by-class.
+    """
+
+    def _mk(self, **kwargs) -> TrialResult:
+        base = dict(
+            trial_id="t", target_id="T", arm="mesmer", sample_id="s",
+            seed=42, success=False, canary_turn=None, matched_text="",
+            turns=0, prompt_tokens=0, completion_tokens=0, total_tokens=0,
+            duration_s=0.0,
+        )
+        base.update(kwargs)
+        return TrialResult(**base)
+
+    def test_wins_by_tier_and_module_only_count_winners(self):
+        """Only trials with success=True AND winning_module set contribute."""
+        trials = [
+            # Tier-0 win
+            self._mk(
+                success=True, winning_module="direct-ask", winning_tier=0,
+                modules_called=["direct-ask"], tier_sequence=[0],
+                ladder_monotonic=True,
+            ),
+            # Tier-1 win
+            self._mk(
+                success=True, winning_module="delimiter-injection", winning_tier=1,
+                modules_called=["target-profiler", "delimiter-injection"],
+                tier_sequence=[0, 1], ladder_monotonic=True,
+                profiler_ran_first=True,
+            ),
+            # Failure — excluded from wins map even though fields populated.
+            self._mk(
+                success=False, winning_module="authority-bias", winning_tier=2,
+                modules_called=["authority-bias"], tier_sequence=[2],
+            ),
+        ]
+        cells = aggregate(trials)
+        c = cells[0]
+        assert c.wins_by_tier == {0: 1, 1: 1}
+        assert c.wins_by_module == {"direct-ask": 1, "delimiter-injection": 1}
+        # ladder_respect_rate counts trials with modules_called; 3/3 are monotonic.
+        assert c.ladder_respect_rate == 1.0
+        # profiler_first_rate: 1/3 trials had profiler_ran_first=True.
+        assert abs(c.profiler_first_rate - 1 / 3) < 1e-9
+
+    def test_ladder_respect_rate_penalises_non_monotonic(self):
+        """Trials whose tier sequence skipped backward bring the rate down."""
+        trials = [
+            self._mk(success=True, modules_called=["x"], tier_sequence=[0],
+                     ladder_monotonic=True),
+            self._mk(success=True, modules_called=["y", "z"], tier_sequence=[2, 0],
+                     ladder_monotonic=False),
+        ]
+        cells = aggregate(trials)
+        assert cells[0].ladder_respect_rate == 0.5
+
+    def test_dead_end_rate_by_tier(self):
+        """Tier-level dead-end rate = tier dead count / tier attempts."""
+        trials = [
+            self._mk(
+                success=True,
+                modules_called=["direct-ask", "instruction-recital"],
+                tier_sequence=[0, 0],
+                per_module_scores={"direct-ask": [1], "instruction-recital": [1]},
+                dead_ends=[
+                    {"module": "direct-ask", "tier": 0, "score": 1, "reason": "r"},
+                ],
+            ),
+            self._mk(
+                success=True,
+                modules_called=["delimiter-injection"],
+                tier_sequence=[1],
+                per_module_scores={"delimiter-injection": [10]},
+                dead_ends=[],
+            ),
+        ]
+        cells = aggregate(trials)
+        # Tier 0: 1 dead / 2 attempts = 0.5; tier 1: 0 / 1 = 0.0
+        assert cells[0].dead_end_rate_by_tier == {0: 0.5, 1: 0.0}
+
+    def test_median_judge_score_by_tier(self):
+        trials = [
+            self._mk(
+                success=True,
+                modules_called=["direct-ask", "instruction-recital"],
+                tier_sequence=[0, 0],
+                per_module_scores={
+                    "direct-ask": [1, 2],
+                    "instruction-recital": [3],
+                },
+            ),
+            self._mk(
+                success=True,
+                modules_called=["delimiter-injection"],
+                tier_sequence=[1],
+                per_module_scores={"delimiter-injection": [9]},
+            ),
+        ]
+        cells = aggregate(trials)
+        # Tier 0 scores: [1, 2, 3] → median 2; Tier 1: [9] → median 9.
+        assert cells[0].median_judge_score_by_tier == {0: 2, 1: 9}
+
+    def test_errors_grouped_by_class_prefix(self):
+        """Errors like 'ThrottleTimeout: …' roll up by their class prefix."""
+        trials = [
+            self._mk(success=False, error="ThrottleTimeout: gate=max_rpm"),
+            self._mk(success=False, error="ThrottleTimeout: gate=max_concurrent"),
+            self._mk(success=False, error="ValueError: bogus"),
+            self._mk(success=True),  # no error
+        ]
+        cells = aggregate(trials)
+        assert cells[0].errors_by_class == {"ThrottleTimeout": 2, "ValueError": 1}
+
+    def test_mean_llm_calls_and_seconds(self):
+        trials = [
+            self._mk(success=True, n_llm_calls=10, llm_seconds=5.0),
+            self._mk(success=True, n_llm_calls=20, llm_seconds=15.0),
+        ]
+        cells = aggregate(trials)
+        assert cells[0].mean_llm_calls == 15
+        assert cells[0].median_llm_calls == 15
+        assert cells[0].mean_llm_seconds == 10.0
+
+    def test_baseline_arm_trace_aggregates_stay_empty(self):
+        """A trial with no modules_called produces zero trace rollup."""
+        trials = [
+            self._mk(arm="baseline", success=True, turns=1),
+            self._mk(arm="baseline", success=False, turns=1),
+        ]
+        cells = aggregate(trials)
+        c = cells[0]
+        assert c.wins_by_tier == {}
+        assert c.wins_by_module == {}
+        assert c.profiler_first_rate == 0.0
+        assert c.ladder_respect_rate == 0.0
+
+    def test_mean_compression_events(self):
+        trials = [
+            self._mk(success=True, compression_events=2),
+            self._mk(success=True, compression_events=0),
+        ]
+        cells = aggregate(trials)
+        assert cells[0].mean_compression_events == 1.0
 
 
 class TestMarkdownRender:
@@ -355,7 +501,7 @@ targets:
     base_url: http://127.0.0.1:11434/v1
     model: llama3
     api_key: "${FAKE_KEY}"
-attacker:
+agent:
   model: openrouter/x
   api_key: "${FAKE_KEY}"
   temperature: 0.9
@@ -377,8 +523,8 @@ contamination_posture:
         spec = load_spec(spec_path)
         assert spec.name == "test"
         assert spec.targets[0].api_key == "sk-testing"
-        assert spec.attacker.api_key == "sk-testing"
-        assert spec.attacker.temperature == 0.9
+        assert spec.agent.api_key == "sk-testing"
+        assert spec.agent.temperature == 0.9
         assert spec.budget.trials_per_row == 4
         assert spec.budget.run_baseline is False
         assert spec.contamination_posture.dataset_release_date == "2023-11-01"
@@ -399,11 +545,59 @@ targets:
   - id: t-a
     adapter: echo
     model: e
-attacker:
+agent:
   model: openrouter/x
 """)
         with pytest.raises(ValueError, match="contamination_posture"):
             load_spec(spec_path)
+
+    def test_parses_per_target_throttle_block(self, tmp_path: Path):
+        """Each target can declare its own ``throttle:`` YAML block — used
+        to gate target-side calls against provider rate limits (e.g. Groq
+        free tier's per-key TPM cap). Without this parse the YAML field
+        would silently degrade to ``None`` and the 429s come back.
+        """
+        spec_path = tmp_path / "throttled.yaml"
+        spec_path.write_text("""
+name: throttled
+version: v1
+module: system-prompt-extraction
+dataset:
+  upstream_url: https://example.com/data.jsonl
+  local_cache: data.jsonl
+targets:
+  - id: groq-a
+    adapter: openai
+    base_url: http://127.0.0.1
+    model: m
+    api_key: k
+    throttle:
+      max_rpm: 10
+      max_concurrent: 2
+      max_wait_seconds: 300
+  - id: untouched
+    adapter: openai
+    base_url: http://127.0.0.1
+    model: m
+    api_key: k
+agent:
+  model: openrouter/x
+  api_key: k
+contamination_posture:
+  dataset_release_date: "2023-11-01"
+  upstream_license: "MIT"
+  target_model_cutoff: "2023-12"
+  attacker_model_cutoff: "2025-01"
+  risk_assessment: "Test."
+""")
+        spec = load_spec(spec_path)
+        groq_a, untouched = spec.targets
+        assert groq_a.throttle is not None
+        assert groq_a.throttle.max_rpm == 10
+        assert groq_a.throttle.max_concurrent == 2
+        assert groq_a.throttle.max_wait_seconds == 300.0
+        # Target without a throttle block stays None — legacy behaviour.
+        assert untouched.throttle is None
 
     def test_spec_rejects_blank_contamination_field(self, tmp_path: Path):
         """Blank values count as missing — no silent holes."""
@@ -419,7 +613,7 @@ targets:
   - id: t
     adapter: echo
     model: e
-attacker:
+agent:
   model: x
 contamination_posture:
   dataset_release_date: "2023-11-01"
@@ -457,6 +651,35 @@ class TestBuildScenario:
         assert scenario.module == "system-prompt-extraction"
         assert scenario.agent.seed == 7
         assert scenario.objective.max_turns == 5
+
+    def test_throttle_is_threaded_into_target_config(self, tmp_path: Path):
+        """A target's declared throttle reaches the scenario's
+        ``TargetConfig`` so that ``create_target`` builds the target's
+        :class:`KeyPool` with the right caps. No throttle → None survives
+        (legacy path preserved).
+        """
+        from mesmer.core.keys import ThrottleConfig
+
+        spec = _minimal_spec(tmp_path)
+        throttled = BenchTargetSpec(
+            id="throttled", adapter="openai", model="m", api_key="k",
+            throttle=ThrottleConfig(max_rpm=7, max_concurrent=1),
+        )
+        row = DatasetRow(
+            sample_id="x", pre_prompt="pre", post_prompt="post",
+            canary="c", baseline_attack="a",
+        )
+        s = build_scenario_for_row(spec, throttled, row, seed=1)
+        assert s.target.throttle is not None
+        assert s.target.throttle.max_rpm == 7
+        assert s.target.throttle.max_concurrent == 1
+
+        # Unthrottled target → scenario's target.throttle stays None.
+        untouched = BenchTargetSpec(
+            id="untouched", adapter="openai", model="m", api_key="k",
+        )
+        s2 = build_scenario_for_row(spec, untouched, row, seed=1)
+        assert s2.target.throttle is None
 
     def test_post_prompt_lands_in_user_turn_suffix_not_system(self, tmp_path: Path):
         """Regression guard for the pre/post sandwich bug.
@@ -553,7 +776,9 @@ class TestRunBenchmarkEndToEnd:
                 prompt_tokens=100, completion_tokens=50, total_tokens=150,
                 llm_seconds=0.1, n_calls=1,
             )
-            ctx = SimpleNamespace(turns=[turn], telemetry=telemetry)
+            # Fake target carries last_fingerprint so orchestrator can read it.
+            fake_target = SimpleNamespace(last_fingerprint="fp_test")
+            ctx = SimpleNamespace(turns=[turn], telemetry=telemetry, target=fake_target)
             return SimpleNamespace(
                 run_id="run-" + sample_id,
                 ctx=ctx,
@@ -604,6 +829,38 @@ class TestRunBenchmarkEndToEnd:
         assert any(f.name.endswith("target-0__mesmer.jsonl") for f in files)
         assert any(f.name.endswith("target-0__baseline.jsonl") for f in files)
 
+        # Provider fingerprint from the fake ctx flows into the mesmer JSONL
+        # rows so published artifacts pin the exact checkpoint that served
+        # each trial — load-bearing for Groq where model strings rotate.
+        mesmer_jsonl = next(f for f in files if f.name.endswith("__mesmer.jsonl"))
+        rows = [json.loads(line) for line in mesmer_jsonl.read_text().splitlines()]
+        assert all(r["fingerprint"] == "fp_test" for r in rows)
+
+        # Every mesmer row carries the new `trace` envelope — even when the
+        # stub leaves graph/registry None, telemetry counters populate from
+        # the recorder's event counts and ctx.telemetry.
+        for r in rows:
+            assert "trace" in r
+            for key in [
+                "n_llm_calls", "llm_seconds", "throttle_wait_seconds",
+                "modules_called", "tier_sequence", "per_module_scores",
+                "dead_ends", "winning_module", "winning_tier",
+                "profiler_ran_first", "ladder_monotonic",
+                "compression_events", "event_counts", "events_path",
+            ]:
+                assert key in r["trace"], f"missing trace.{key} in JSONL row"
+            # events_path points somewhere under events/ when recording fired.
+            if r["trace"]["events_path"]:
+                assert r["trace"]["events_path"].startswith("events/")
+
+        # Per-trial events dir is written under results/events/ with one
+        # JSONL per trial_id. Mesmer arm only (baseline trials don't run
+        # the ReAct loop).
+        events_dir = results_dir / "events"
+        assert events_dir.is_dir()
+        event_files = list(events_dir.iterdir())
+        assert len(event_files) == 4  # 2 rows × 2 mesmer trials, 0 baseline
+
     async def test_errors_surface_as_failed_trials(self, tmp_path: Path):
         cache = tmp_path / "data.jsonl"
         _write_jsonl(cache, [
@@ -649,6 +906,7 @@ class TestRunBenchmarkEndToEnd:
                         prompt_tokens=0, completion_tokens=0, total_tokens=0,
                         llm_seconds=0, n_calls=0,
                     ),
+                    target=SimpleNamespace(last_fingerprint=None),
                 ),
                 telemetry=SimpleNamespace(
                     prompt_tokens=0, completion_tokens=0, total_tokens=0,
@@ -666,3 +924,55 @@ class TestRunBenchmarkEndToEnd:
         # Only the one allowed target produces trials.
         assert {t.target_id for t in trials} == {"target-1"}
         assert len(trials) == 1
+
+    async def test_every_trial_gets_fresh_true(self, tmp_path: Path):
+        """Bench trials are independent sampling replicates — each must
+        start with an empty graph. Without ``fresh=True``, trial N loads
+        the persisted graph trial N-1 wrote and exploits its cached winning
+        frontier instead of running the attack path cold. That inflates
+        ASR with replay-hits and drops ``profiler_first_rate`` to zero.
+        """
+        cache = tmp_path / "data.jsonl"
+        _write_jsonl(cache, [
+            {"sample_id": 1, "pre_prompt": "p", "post_prompt": "",
+             "access_code": "c", "attack": "a"},
+        ])
+        spec = _minimal_spec(tmp_path)
+        spec.budget.trials_per_row = 3
+        spec.budget.run_baseline = False
+
+        seen_fresh: list[bool] = []
+
+        async def capturing_execute_run(config, **_ignored):
+            seen_fresh.append(config.fresh)
+            return SimpleNamespace(
+                run_id=f"r{len(seen_fresh)}", duration_s=0.1,
+                graph=None, memory=None,
+                scenario=config.scenario_override, result="ok",
+                ctx=SimpleNamespace(
+                    turns=[SimpleNamespace(
+                        received="no leak", sent="probe", is_error=False,
+                    )],
+                    telemetry=SimpleNamespace(
+                        prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                        llm_seconds=0, n_calls=0,
+                    ),
+                    target=SimpleNamespace(last_fingerprint=None),
+                ),
+                telemetry=SimpleNamespace(
+                    prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                    llm_seconds=0, n_calls=0,
+                ),
+            )
+
+        await run_benchmark(
+            spec,
+            spec_dir=tmp_path,
+            output_dir=tmp_path / "results_fresh",
+            execute_run_fn=capturing_execute_run,
+        )
+
+        assert len(seen_fresh) == 3
+        assert all(seen_fresh), (
+            f"every bench trial must set fresh=True; saw {seen_fresh}"
+        )

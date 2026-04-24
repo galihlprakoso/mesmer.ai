@@ -69,7 +69,7 @@ async def _judge_module_result(
     flag (P4) without a parallel side-list.
 
     ``module_result`` is the sub-module's ``conclude()`` text. For modules
-    whose artifact lives in the conclude (e.g. safety-profiler's defense
+    whose artifact lives in the conclude (e.g. target-profiler's defense
     profile), the probe messages alone are insufficient to score — the
     judge also needs the summary the module produced.
 
@@ -128,6 +128,27 @@ async def _judge_module_result(
             prior_transcript_summary=prior_transcript_summary,
         )
         log(LogEvent.JUDGE_SCORE.value, f"Score: {result.score}/10 — {result.leaked_info}")
+        # JUDGE_VERDICT carries the full JudgeResult as JSON — the forensic
+        # view. JUDGE_SCORE stays as the one-line terminal signal.
+        import json as _json
+        log(LogEvent.JUDGE_VERDICT.value, _json.dumps({
+            "module": module_name,
+            "approach": approach,
+            "score": result.score,
+            "leaked_info": result.leaked_info,
+            "promising_angle": result.promising_angle,
+            "dead_end": result.dead_end,
+            "suggested_next": result.suggested_next,
+            "objective_met": result.objective_met,
+            "echo_ratio": round(result.echo_ratio, 3),
+        }, sort_keys=True, default=str))
+        # Propagate the early-terminate signal to the leader's context.
+        # ``ctx`` here is the PARENT (leader) context that called
+        # sub_module.handle — its engine loop checks ctx.objective_met
+        # after each tool dispatch and short-circuits to conclude.
+        if result.objective_met:
+            ctx.objective_met = True
+            ctx.objective_met_fragment = result.leaked_info
         return result
     except Exception as e:
         log(LogEvent.JUDGE_ERROR.value, f"Judge failed: {e}")
@@ -143,6 +164,7 @@ def _update_graph(
     *,
     messages_sent: list[str] | None = None,
     target_responses: list[str] | None = None,
+    module_output: str = "",
     frontier_id: str | None = None,
 ) -> AttackNode | None:
     """Record an explored attempt in the attack graph.
@@ -197,6 +219,7 @@ def _update_graph(
                 target_responses=resps,
                 score=score,
                 leaked_info=leaked,
+                module_output=module_output,
                 reflection=reflection,
                 run_id=ctx.run_id,
                 module=module_name,
@@ -225,6 +248,7 @@ def _update_graph(
             target_responses=resps,
             score=score,
             leaked_info=leaked,
+            module_output=module_output,
             reflection=reflection,
             run_id=ctx.run_id,
         )
@@ -244,8 +268,6 @@ def _update_graph(
 
 async def _reflect_and_expand(
     ctx: Context,
-    module_name: str,
-    approach: str,
     judge_result,
     current_node: AttackNode,
     log: LogFn,
@@ -283,15 +305,44 @@ async def _reflect_and_expand(
     if not available_modules:
         return
 
+    # TAPER: hand the registry-sourced tier map to propose_frontier so the
+    # tier gate can enforce "simple before complex". Legacy callers (no
+    # registry) get the tier-agnostic path by omitting the kwarg.
+    tiers = ctx.registry.tiers_for(available_modules) if ctx.registry else None
+
+    # The gate decision is the "why did I get offered these candidates?"
+    # signal — populated as an out-param dict so the trace carries the
+    # selected tier + per-tier census + escape-hatch flag for every
+    # frontier expansion.
+    gate_decision: dict = {}
     try:
         candidates = graph.propose_frontier(
             available_modules,
             parent_id=current_node.id,
             top_k=3,
+            tiers=tiers,
+            gate_decision_out=gate_decision,
         )
     except Exception as e:
         log(LogEvent.REFLECT_ERROR.value, f"Frontier proposal failed: {e}")
         return
+
+    # Surface the gate decision as a structured event. The detail is JSON
+    # so downstream tooling (grep, jq) can read it without a bespoke
+    # parser. We emit this BEFORE the "no candidates" / "refine" paths
+    # below so the trace always records the decision, even when the
+    # subsequent refinement fails.
+    if gate_decision:
+        import json as _json
+        log(
+            LogEvent.TIER_GATE.value,
+            _json.dumps({
+                "parent": current_node.id,
+                "available": available_modules,
+                "tiers": tiers or {},
+                **gate_decision,
+            }, sort_keys=True, default=str),
+        )
 
     if not candidates:
         log(LogEvent.FRONTIER.value, "No candidates — every module is dead or excluded")

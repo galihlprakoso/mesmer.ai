@@ -1,0 +1,77 @@
+---
+title: Why mesmer
+description: How mesmer differs from Garak, Promptfoo, and other red-team tools.
+---
+
+The LLM red-teaming tooling landscape is crowded. Here's what mesmer
+does that the others don't.
+
+## One sentence
+
+> **Garak and Promptfoo fire static prompts at a target. Mesmer runs an
+> adaptive ReAct agent that learns.**
+
+## The differences that matter
+
+| | **mesmer** | garak | promptfoo |
+|---|:---:|:---:|:---:|
+| Multi-turn attacks | ✓ | partial | — |
+| Cognitive-science techniques | ✓ | — | — |
+| ReAct agent driver | ✓ | — | — |
+| Persistent attack graph | ✓ | — | — |
+| Cross-run memory | ✓ | — | — |
+| Human-in-the-loop hints | ✓ | — | — |
+| Static prompt bank | partial | ✓ | ✓ |
+| CI-style regression assertions | partial | partial | ✓ |
+
+Use mesmer when you want to **discover** attack surface against a specific
+target. Use Promptfoo when you want to **regress-test** a known prompt list in
+CI. They complement, not compete.
+
+## When static banks break
+
+Modern aligned models pattern-match on prompts. A static "DAN" jailbreak
+collected in 2023 hits 2025 filters like a wall. Effective red-teaming today
+requires **adaptation in-loop**:
+
+- recognise when a technique stops working,
+- switch frames (authority → narrative → overload),
+- escalate gradually when compliance is building,
+- remember which approaches died on this target.
+
+None of that is expressible as a static list. It is expressible as an agent
+with a judge and a graph.
+
+## Why cognitive science, not just prompt tricks
+
+Cognitive attacks have **theory behind them** — Milgram on authority, Freedman
+& Fraser on foot-in-door, Tversky & Kahneman on anchoring. This matters
+because:
+
+1. **Transferable.** A cognitive technique that works on GPT-4o often
+   generalises to Claude and Gemini, because they all trained on humans
+   writing about humans.
+2. **Combinatorial.** Anchor + authority + narrative transport is a distinct
+   attack from any single technique. Composition is where the interesting
+   attack surface lives, and mesmer's leader modules compose automatically.
+3. **Provenanced.** You can cite Milgram 1963 in a report. "I tried some
+   stuff" is not a report.
+
+## What mesmer is not
+
+- **Not a static eval harness.** If you want to run the same 500 prompts
+  against every model nightly, use Promptfoo or Inspect-AI.
+- **Not a benchmark.** Benchmarks need deterministic scoring; mesmer uses an
+  in-loop LLM judge for exploration, and a separate deterministic canary
+  matcher (`bench/canary.py`) for the benchmark harness.
+- **Not a production defense.** This is a probing tool. The defense side is
+  [`dvllm`](https://github.com/galihlprakoso/dvllm) — our DVWA-style
+  vulnerable target.
+
+## Credibility
+
+Every technique carries an attribution. The attack graph is persisted as JSON
+you can audit. The whole loop is `~2000 LOC` of Python + seven YAML modules —
+read it in an afternoon.
+
+Ready? [Install mesmer](/docs/getting-started/install) · [Quickstart](/docs/getting-started/quickstart)

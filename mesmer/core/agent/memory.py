@@ -4,8 +4,12 @@ Storage layout:
     ~/.mesmer/
     └── targets/
     │   └── {target-hash}/
-    │       ├── graph.json      # the full attack graph
-    │       ├── profile.md      # target personality + defenses
+    │       ├── graph.json      # the full attack graph (attempt history
+    │       │                   # AND canonical source of module outputs —
+    │       │                   # every AttackNode carries module_output)
+    │       ├── profile.md      # optional free-form human notes
+    │       ├── plan.md         # optional human-authored plan
+    │       ├── conversation.json  # CONTINUOUS-mode rolling transcript
     │       └── runs/
     │           └── {run-id}.jsonl
     └── global/
@@ -15,6 +19,8 @@ Storage layout:
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +34,35 @@ if TYPE_CHECKING:
 
 
 MESMER_HOME = Path.home() / ".mesmer"
+
+
+def _atomic_write(path: Path, data: str) -> None:
+    """Atomic text write: tmpfile in the target's directory, then rename.
+
+    Guarantees readers never see a half-written file even if the writer
+    crashes mid-flush (a run that dies during profile synthesis must not
+    corrupt the previous profile). Used by :meth:`TargetMemory.save_profile`
+    + :meth:`save_target_profile` — anywhere the cost of a torn write is
+    the next run mistaking garbage for valid state.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    tmp = Path(tmp_path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
 
 
 class TargetMemory:
@@ -78,13 +113,21 @@ class TargetMemory:
         self.graph_path.write_text(graph.to_json())
 
     def load_profile(self) -> str | None:
+        """Return the human-readable profile.md, if present.
+
+        The canonical source of module-output truth is ``graph.json``
+        (each ``AttackNode.module_output`` carries the running module's
+        conclude text). profile.md is an optional free-form note the
+        web UI and ``mesmer graph show`` display.
+        """
         if self.profile_path.exists():
             return self.profile_path.read_text()
         return None
 
     def save_profile(self, profile: str) -> None:
+        """Atomically write profile.md."""
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.profile_path.write_text(profile)
+        _atomic_write(self.profile_path, profile)
 
     def load_plan(self) -> str | None:
         """Load the plan.md for this target, if any."""

@@ -35,6 +35,11 @@ def _make_ctx(
     target.send = AsyncMock(return_value="ok")
     target.reset = AsyncMock(return_value=None)
     registry = MagicMock()
+    # Real dict return for tier lookup — `_reflect_and_expand` JSON-serialises
+    # the output into the TIER_GATE event detail, which fails on MagicMock
+    # values. Default tier 2 matches the bare-registry production behaviour.
+    registry.tiers_for = MagicMock(side_effect=lambda names: {n: 2 for n in names})
+    registry.tier_of = MagicMock(return_value=2)
     agent_config = AgentConfig(
         model="test/attacker",
         judge_model="test/judge",
@@ -451,7 +456,7 @@ class TestCompressionHookedIntoReflect:
                    new=_AsyncMock(return_value=False)) as mock_compress, \
              patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
-                ctx, "foo", "a", judge, current_node,
+                ctx, judge, current_node,
                 log=lambda *a, **kw: None,
                 available_modules=["foo", "bar"],
             )
@@ -481,7 +486,7 @@ class TestCompressionHookedIntoReflect:
                    new=_AsyncMock(return_value=False)) as mock_compress, \
              patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
-                ctx, "foo", "a", judge, current_node,
+                ctx, judge, current_node,
                 log=lambda *a, **kw: None,
                 available_modules=["foo", "bar"],
             )

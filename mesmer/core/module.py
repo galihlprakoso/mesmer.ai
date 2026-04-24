@@ -7,6 +7,18 @@ from pathlib import Path
 
 import yaml
 
+from mesmer.core.errors import InvalidModuleConfig
+
+
+# Allowed tier values. Semantics (see ``ModuleConfig.tier``):
+#   0 — naive / direct one-shot probe
+#   1 — structural / payload-shaping
+#   2 — cognitive / social manipulation (default)
+#   3 — composed (lever × carrier)
+_TIER_MIN = 0
+_TIER_MAX = 3
+DEFAULT_TIER = 2
+
 
 @dataclass
 class ModuleConfig:
@@ -20,9 +32,26 @@ class ModuleConfig:
     - system_prompt: the agent's strategy/personality
     - sub_modules: other modules it can delegate to
     - judge_rubric: technique-specific scoring guidance the judge uses when
-      evaluating attempts of THIS module (e.g. safety-profiler is judged on
+      evaluating attempts of THIS module (e.g. target-profiler is judged on
       profile quality, not extraction). Composed with the stock rubric and
       any scenario-level additions.
+    - tier: attack cost / complexity bucket. Drives the "simple first"
+      frontier ladder enforced by :meth:`AttackGraph.propose_frontier` via
+      :meth:`Registry.tiers_for`. Semantics:
+
+      * **0** — naive / direct: one-shot request, no delegation, no multi-turn.
+        Cheapest. A real-world red-teamer's first probe.
+      * **1** — structural / payload-shaping: a single or a few messages whose
+        leverage is the payload structure (delimiters, fake role tokens,
+        prefix commitment).
+      * **2** — cognitive / social manipulation: multi-turn, emotional /
+        contextual framing. All legacy modules default here so no edits are
+        needed for backward compatibility.
+      * **3** — composed: a leader that stacks a tier-2 cognitive lever with
+        a tier-0/1 carrier. Reserved — no authored module yet.
+
+      Values outside 0..3 raise :class:`InvalidModuleConfig` at load time so
+      a typoed YAML fails loud instead of silently collapsing to the default.
     """
 
     name: str
@@ -37,6 +66,8 @@ class ModuleConfig:
     # sibling modules. Leave False for chained attacks that need continuity
     # (e.g. foot-in-door).
     reset_target: bool = False
+    # Attack cost bucket — see class docstring for semantics.
+    tier: int = DEFAULT_TIER
 
     def tool_description(self) -> str:
         """Full description for use as an OpenAI function-calling tool."""
@@ -44,6 +75,29 @@ class ModuleConfig:
         if self.theory:
             parts.append(f"\nTheory: {self.theory}")
         return "\n".join(parts)
+
+
+def _coerce_tier(raw: object, module_name: str) -> int:
+    """Parse + validate the ``tier`` value from a ``module.yaml``.
+
+    Missing field → :data:`DEFAULT_TIER` (legacy modules stay tier-2).
+    Non-int / out-of-range → :class:`InvalidModuleConfig`.
+    """
+    if raw is None:
+        return DEFAULT_TIER
+    try:
+        tier = int(raw)
+    except (TypeError, ValueError) as e:
+        raise InvalidModuleConfig(
+            module_name, "tier", raw,
+            reason=f"must be an integer ({_TIER_MIN}..{_TIER_MAX})",
+        ) from e
+    if tier < _TIER_MIN or tier > _TIER_MAX:
+        raise InvalidModuleConfig(
+            module_name, "tier", tier,
+            reason=f"must be in {_TIER_MIN}..{_TIER_MAX}",
+        )
+    return tier
 
 
 def load_module_config(path: Path) -> ModuleConfig | None:
@@ -54,8 +108,9 @@ def load_module_config(path: Path) -> ModuleConfig | None:
     with open(yaml_path) as f:
         data = yaml.safe_load(f)
 
+    name = data["name"]
     return ModuleConfig(
-        name=data["name"],
+        name=name,
         description=data.get("description", ""),
         theory=data.get("theory", ""),
         system_prompt=data.get("system_prompt", ""),
@@ -63,4 +118,5 @@ def load_module_config(path: Path) -> ModuleConfig | None:
         parameters=data.get("parameters", {}),
         judge_rubric=data.get("judge_rubric", ""),
         reset_target=bool(data.get("reset_target", False)),
+        tier=_coerce_tier(data.get("tier"), name),
     )

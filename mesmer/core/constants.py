@@ -139,10 +139,16 @@ class LogEvent(str, Enum):
 
     # LLM interaction
     LLM_CALL = "llm_call"
+    # LLM_COMPLETION fires AFTER every completion returns (any role — attacker,
+    # judge, compressor). Detail carries role+model+elapsed+token usage so the
+    # trace separates attacker-loop iterations from judge / refine / compressor
+    # calls that never surface through the engine's iteration counter.
+    LLM_COMPLETION = "llm_completion"
     LLM_RETRY = "llm_retry"
     LLM_ERROR = "llm_error"
     RATE_LIMIT_WALL = "rate_limit_wall"
     KEY_COOLED = "key_cooled"
+    THROTTLE_WAIT = "throttle_wait"
 
     # Target interaction
     SEND = "send"
@@ -172,9 +178,19 @@ class LogEvent(str, Enum):
     # Judge + reflection
     JUDGE = "judge"
     JUDGE_SCORE = "judge_score"
+    # JUDGE_VERDICT carries the FULL ``JudgeResult`` as a JSON fragment —
+    # score + leaked_info + promising_angle + dead_end + suggested_next. The
+    # short JUDGE_SCORE stays so terminal renderers can print a one-line
+    # summary; the verdict is the forensic artifact.
+    JUDGE_VERDICT = "judge_verdict"
     JUDGE_ERROR = "judge_error"
     GRAPH_UPDATE = "graph_update"
     FRONTIER = "frontier"
+    # TIER_GATE fires on every frontier expansion — carries the selected
+    # tier, the full tier census of live modules, and whether the escape
+    # hatch kicked in. Answers "why did the leader only see T0 items?"
+    # without having to reconstruct the graph state at decision time.
+    TIER_GATE = "tier_gate"
     REFLECT_ERROR = "reflect_error"
 
 

@@ -87,7 +87,7 @@ Finding a vulnerability is a **search problem.** Mesmer applies Monte Carlo Tree
 
 ```
 [root] ─── no info yet
- ├── [safety-profiler] score:5 ─── casual personality, emoji, knows user by name
+ ├── [target-profiler] score:5 ─── casual personality, emoji, knows user by name
  │    ├── [authority-bias → "Stanford researcher"] score:1 ── DEAD: instant detection ✗
  │    ├── [cognitive-overload → batch request] score:3 ── filters prompt asks
  │    ├── [anchoring → "everybody does it"] score:1 ── DEAD: called stat fake ✗
@@ -131,7 +131,7 @@ Human hints become **high-priority frontier nodes** in the graph — explored fi
 
 | Module | Description |
 |--------|-------------|
-| **safety-profiler** | Maps the target's safety boundaries, defense patterns, and behavioral profile before attacking |
+| **target-profiler** | Blackbox reconnaissance: three-layer dossier (identity → defence shape → policy surface) with verbatim refusal templates + observed delimiters. Runs first on a fresh target; feeds every downstream module. |
 
 ### Techniques
 
@@ -305,7 +305,7 @@ modules/
 ├── attacks/
 │   └── system-prompt-extraction/  # Leader orchestrator
 ├── profilers/
-│   └── safety-profiler/           # Defense mapper
+│   └── target-profiler/           # Defense mapper
 └── techniques/
     ├── cognitive-bias/
     │   ├── anchoring/

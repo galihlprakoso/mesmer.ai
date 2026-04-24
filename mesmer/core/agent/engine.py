@@ -133,7 +133,48 @@ async def run_react_loop(
             "## Attack Plan (from human operator — follow this guidance)\n" + ctx.plan.strip()
         )
 
-    # Inject graph context
+    # Scratchpad — CURRENT STATE (KV snapshot). Populated at run start
+    # from the graph's latest per-module outputs; auto-updated after
+    # every sub-module delegation. Answers "what does each module's
+    # LATEST conclusion say?". Keyed by module name; any module author
+    # reads e.g. the target-profiler slot for the latest dossier.
+    scratchpad_block = ctx.scratchpad.render_for_prompt()
+    if scratchpad_block:
+        user_content_parts.append(
+            "## Scratchpad — current state (latest output per module, "
+            "this run + carried forward from prior runs)\n" + scratchpad_block
+        )
+
+    # Module conversation history — TIMELINE. Ordered record of every
+    # module execution (across all runs), oldest first, last N shown.
+    # Answers "what HAPPENED, in what order?" and makes the chain of
+    # reasoning visible. Complements the scratchpad: scratchpad is the
+    # snapshot, history is the sequence.
+    if ctx.graph is not None:
+        history_block = ctx.graph.render_conversation_history()
+        if history_block:
+            user_content_parts.append(
+                "## Module Conversation History — timeline of module turns "
+                "(oldest→newest, most recent at bottom)\n" + history_block
+            )
+
+    # Learned experience — distilled behavioural signal from the graph.
+    # Complements the verbatim outputs above with aggregates (modules
+    # that worked / failed against this target, verbatim leaks the judge
+    # scored). Useful for pattern matching ("what technique family has
+    # paid off?") vs. the raw outputs ("what did the profiler say?").
+    if ctx.graph is not None:
+        experience = ctx.graph.render_learned_experience()
+        if experience:
+            user_content_parts.append(
+                "## Learned Experience (from prior attempts against this target)\n"
+                + experience
+            )
+
+    # Inject graph context (frontier + dead ends + tier ladder) — this is
+    # the leader-specific planning signal. Sub-modules see it too but
+    # typically act on their own system_prompt; the experience block above
+    # is the part that changes their behaviour.
     graph_context = _build_graph_context(ctx)
     if graph_context:
         user_content_parts.append(f"## Attack Intelligence\n{graph_context}")
@@ -275,6 +316,21 @@ async def run_react_loop(
             messages.append(
                 await dispatch_tool_call(fn_name, ctx, module, call, args, instruction, log)
             )
+
+            # Early-terminate: the in-loop LLM judge flagged objective_met
+            # during ``_judge_module_result`` inside the dispatched tool.
+            # Short-circuit to conclude() here — no more attacker
+            # iterations, no more sub-module delegations, no more token
+            # burn past a clean win. The fragment lets downstream readers
+            # see which leaked text satisfied the objective.
+            if ctx.objective_met:
+                result_text = (
+                    f"Objective met. Leaked: {ctx.objective_met_fragment}"
+                    if ctx.objective_met_fragment
+                    else "Objective met."
+                )
+                log(LogEvent.CONCLUDE.value, f"[auto] {result_text}")
+                return result_text
 
     return f"Max iterations ({max_iterations}) reached without conclude()."
 

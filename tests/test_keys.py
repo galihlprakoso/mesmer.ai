@@ -1,13 +1,17 @@
 """Tests for KeyPool rotation + cooldown, and compute_cooldown heuristics."""
 
+import asyncio
 import time
 
 import pytest
 
+from mesmer.core.errors import ThrottleTimeout
 from mesmer.core.keys import (
     KeyPool,
-    KeyStatus,
+    ThrottleConfig,
+    clear_pool_cache,
     compute_cooldown,
+    get_or_create_pool,
     next_utc_midnight,
 )
 
@@ -145,3 +149,192 @@ class TestNextUtcMidnight:
         assert m > now
         # And no more than 24h + 1h ahead (handles edge cases near midnight)
         assert m - now <= 25 * 3600
+
+
+# ---------------------------------------------------------------------------
+# ThrottleConfig — input clamping
+# ---------------------------------------------------------------------------
+
+
+class TestThrottleConfig:
+    def test_default_is_inactive_no_op(self):
+        """A default-constructed throttle imposes no gates — legacy behaviour."""
+        cfg = ThrottleConfig()
+        assert cfg.max_rpm is None
+        assert cfg.max_concurrent is None
+        assert cfg.max_wait_seconds == 0.0
+        assert cfg.is_active is False
+
+    def test_clamps_non_positive_caps_to_none(self):
+        """Zero or negative caps degrade to None — a typoed YAML shouldn't crash."""
+        cfg = ThrottleConfig(max_rpm=0, max_concurrent=-5, max_wait_seconds=-1)
+        assert cfg.max_rpm is None
+        assert cfg.max_concurrent is None
+        assert cfg.max_wait_seconds == 0.0
+        assert cfg.is_active is False
+
+    def test_any_positive_cap_is_active(self):
+        """is_active flips on for any single non-trivial field."""
+        assert ThrottleConfig(max_rpm=60).is_active
+        assert ThrottleConfig(max_concurrent=2).is_active
+        assert ThrottleConfig(max_wait_seconds=10).is_active
+
+
+# ---------------------------------------------------------------------------
+# KeyPool.acquire — throttle gates
+# ---------------------------------------------------------------------------
+
+
+class TestKeyPoolAcquire:
+    @pytest.mark.asyncio
+    async def test_no_throttle_acquire_is_passthrough(self):
+        """Pool without throttle: acquire/release are cheap and never block."""
+        p = KeyPool(["A"])
+        await p.acquire()
+        p.release()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cap_blocks_over_budget(self):
+        """max_concurrent=1 with max_wait=0 raises on the second acquire."""
+        p = KeyPool(["A"], throttle=ThrottleConfig(max_concurrent=1))
+        await p.acquire()
+        with pytest.raises(ThrottleTimeout, match="max_concurrent"):
+            await p.acquire()
+        p.release()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cap_waits_when_budget_allows(self):
+        """max_wait_seconds > 0: second acquire blocks until the first releases."""
+        p = KeyPool(["A"], throttle=ThrottleConfig(
+            max_concurrent=1, max_wait_seconds=1.0,
+        ))
+        await p.acquire()
+
+        async def second_acquire():
+            await p.acquire()
+            p.release()
+
+        task = asyncio.create_task(second_acquire())
+        await asyncio.sleep(0.05)  # let the task hit the semaphore
+        assert not task.done()
+        p.release()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_rpm_cap_fail_fast(self):
+        """max_rpm with max_wait=0: second call in the same window raises."""
+        p = KeyPool(["A"], throttle=ThrottleConfig(max_rpm=1))
+        await p.acquire()
+        p.release()
+        with pytest.raises(ThrottleTimeout, match="max_rpm"):
+            await p.acquire()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_wall_fail_fast_when_no_wait_budget(self):
+        """All keys cooled + max_wait=0 raises immediately with gate label."""
+        p = KeyPool(["A"], throttle=ThrottleConfig(max_concurrent=2))
+        p.cool_down("A", time.time() + 3600, reason="test")
+        with pytest.raises(ThrottleTimeout, match="all_keys_cooled"):
+            await p.acquire()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_wall_waits_until_expiry(self):
+        """All cooled but cooldown expires soon: acquire sleeps and returns."""
+        p = KeyPool(["A"], throttle=ThrottleConfig(
+            max_concurrent=2, max_wait_seconds=1.0,
+        ))
+        # Cool A for ~0.2s — within the 1s budget, should recover.
+        p.cool_down("A", time.time() + 0.2, reason="brief")
+        start = time.monotonic()
+        await p.acquire()
+        elapsed = time.monotonic() - start
+        assert 0.15 < elapsed < 0.8, f"expected short wait, got {elapsed}"
+        p.release()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_wall_raises_when_budget_exceeded(self):
+        """All cooled for longer than max_wait_seconds: raises after waiting."""
+        p = KeyPool(["A"], throttle=ThrottleConfig(
+            max_concurrent=2, max_wait_seconds=0.15,
+        ))
+        p.cool_down("A", time.time() + 10, reason="long")
+        start = time.monotonic()
+        with pytest.raises(ThrottleTimeout, match="all_keys_cooled"):
+            await p.acquire()
+        elapsed = time.monotonic() - start
+        # Waited at least the budget before raising.
+        assert elapsed >= 0.1
+
+    @pytest.mark.asyncio
+    async def test_gate_raise_releases_concurrency_slot(self):
+        """If a later gate raises, the concurrency slot taken earlier is freed.
+
+        Regression guard — if acquire() leaked slots on partial failure,
+        the pool would deadlock after one 429 burst.
+        """
+        p = KeyPool(["A"], throttle=ThrottleConfig(
+            max_concurrent=1, max_rpm=1,
+        ))
+        # Burn the rpm window with one successful acquire.
+        await p.acquire()
+        p.release()
+        # Second call should fail at rpm gate, but NOT hold the concurrency slot.
+        with pytest.raises(ThrottleTimeout, match="max_rpm"):
+            await p.acquire()
+        # If the slot leaked, this would hang/raise max_concurrent instead.
+        # Wait out the rpm window by fast-forwarding the deque.
+        p._request_times.clear()
+        await p.acquire()
+        p.release()
+
+
+# ---------------------------------------------------------------------------
+# Process-level pool cache
+# ---------------------------------------------------------------------------
+
+
+class TestPoolCache:
+    def setup_method(self):
+        clear_pool_cache()
+
+    def teardown_method(self):
+        clear_pool_cache()
+
+    def test_same_keys_share_one_pool(self):
+        """Sibling AgentConfigs with the same key bag share state."""
+        a = get_or_create_pool(["sk-123", "sk-456"])
+        b = get_or_create_pool(["sk-456", "sk-123"])  # order-insensitive
+        assert a is b
+
+    def test_different_keys_produce_different_pools(self):
+        a = get_or_create_pool(["sk-aaa"])
+        b = get_or_create_pool(["sk-bbb"])
+        assert a is not b
+
+    def test_empty_keys_bypass_cache(self):
+        """Empty pools aren't cached — no point conflating process-wide no-ops."""
+        a = get_or_create_pool([])
+        b = get_or_create_pool([])
+        assert a is not b
+
+    def test_first_caller_wins_on_throttle(self):
+        """Cache is pool identity, not config — later throttles are ignored.
+
+        The process-wide rate cap represents provider quota; once declared
+        it shouldn't silently change when a sibling scenario inherits it.
+        Callers that need a different throttle call :func:`clear_pool_cache`.
+        """
+        a = get_or_create_pool(
+            ["sk-x"], throttle=ThrottleConfig(max_rpm=10),
+        )
+        b = get_or_create_pool(
+            ["sk-x"], throttle=ThrottleConfig(max_rpm=999),
+        )
+        assert a is b
+        assert b.throttle.max_rpm == 10  # first-wins
+
+    def test_clear_pool_cache_restores_fresh_state(self):
+        a = get_or_create_pool(["sk-y"])
+        clear_pool_cache()
+        b = get_or_create_pool(["sk-y"])
+        assert a is not b

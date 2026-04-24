@@ -44,6 +44,68 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+def _apply_tier_gate(
+    live: dict[str, dict],
+) -> tuple[dict[str, dict], dict]:
+    """Implement the "simple before complex" ladder over tiered module stats.
+
+    Input shape — one entry per live module (all_dead modules already dropped):
+    ``{"tier": int, "tried": int, "best": int, "all_dead": False}``.
+
+    Picks the lowest tier that still has a **live** candidate and returns only
+    that tier's entries. "Live" = untried, OR tried with ``best >=
+    PROMISING_SCORE_THRESHOLD`` (worth deepening).
+
+    If no tier is live (every tier is tried-and-unpromising), returns the full
+    ``live`` dict — the escape hatch so a stale tier-0 pool doesn't strand a
+    promising tier-2 lead. Callers then fall back to cross-tier ranking.
+
+    Returns a tuple ``(filtered_live, decision)``. ``decision`` is a small
+    dict that callers can surface through logs:
+
+        {
+            "selected_tier": int | None,  # None when escape hatch fired
+            "escape_hatch": bool,
+            "by_tier": {0: {"live": 2, "dead_or_stale": 1}, 1: ...},
+        }
+
+    The decision dict doesn't depend on the final ranking; it only reflects
+    the gate's filter logic, which is the piece the trace cares about.
+    """
+    decision: dict = {
+        "selected_tier": None,
+        "escape_hatch": False,
+        "by_tier": {},
+    }
+    if not live:
+        return live, decision
+
+    # Group module names by tier.
+    by_tier: dict[int, list[str]] = {}
+    for mod, stats in live.items():
+        by_tier.setdefault(stats["tier"], []).append(mod)
+
+    # Census per tier — how many are live (untried or promising) vs stale.
+    census: dict[int, dict[str, int]] = {}
+    for tier, members in by_tier.items():
+        n_live = sum(
+            1 for m in members
+            if live[m]["tried"] == 0 or live[m]["best"] >= PROMISING_SCORE_THRESHOLD
+        )
+        census[tier] = {"live": n_live, "dead_or_stale": len(members) - n_live}
+    decision["by_tier"] = census
+
+    # Find the lowest tier with a live candidate.
+    for tier in sorted(by_tier.keys()):
+        if census[tier]["live"] > 0:
+            decision["selected_tier"] = tier
+            return {m: live[m] for m in by_tier[tier]}, decision
+
+    # Escape hatch: no tier is live → let cross-tier ranking decide.
+    decision["escape_hatch"] = True
+    return live, decision
+
+
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
@@ -59,7 +121,14 @@ class AttackNode:
     messages_sent: list[str] = field(default_factory=list)
     target_responses: list[str] = field(default_factory=list)
     score: int = 0                          # judge score 1-10
-    leaked_info: str = ""                   # what was extracted
+    leaked_info: str = ""                   # judge's extract of what was revealed
+    # Raw conclude() text from the module that ran for this node. The
+    # canonical persisted form of a module's output — subsequent modules
+    # (and future runs) read it via AttackGraph.latest_outputs_by_module
+    # to see what prior profilers / planners / attacks actually said.
+    # Distinct from ``leaked_info`` (the judge's interpretation) —
+    # ``module_output`` is verbatim.
+    module_output: str = ""
     reflection: str = ""                    # why it worked/failed
     status: str = NodeStatus.FRONTIER.value
     children: list[str] = field(default_factory=list)
@@ -92,6 +161,7 @@ class AttackNode:
             "target_responses": self.target_responses,
             "score": self.score,
             "leaked_info": self.leaked_info,
+            "module_output": self.module_output,
             "reflection": self.reflection,
             "status": self.status,
             "children": self.children,
@@ -154,6 +224,7 @@ class AttackGraph:
         target_responses: list[str] | None = None,
         score: int = 0,
         leaked_info: str = "",
+        module_output: str = "",
         reflection: str = "",
         status: str = NodeStatus.ALIVE.value,
         run_id: str = "",
@@ -172,6 +243,7 @@ class AttackGraph:
             target_responses=target_responses or [],
             score=score,
             leaked_info=leaked_info,
+            module_output=module_output,
             reflection=reflection,
             status=status,
             depth=depth,
@@ -319,6 +391,7 @@ class AttackGraph:
         target_responses: list[str],
         score: int,
         leaked_info: str = "",
+        module_output: str = "",
         reflection: str = "",
         run_id: str = "",
         module: str | None = None,
@@ -347,6 +420,7 @@ class AttackGraph:
         node.target_responses = target_responses
         node.score = score
         node.leaked_info = leaked_info
+        node.module_output = module_output
         node.reflection = reflection
         node.run_id = run_id or node.run_id
         node.timestamp = time.time()
@@ -367,17 +441,31 @@ class AttackGraph:
         *,
         parent_id: str | None = None,
         top_k: int = 3,
+        tiers: dict[str, int] | None = None,
+        gate_decision_out: dict | None = None,
     ) -> list[dict]:
         """Rank available modules for the next frontier expansion.
 
         This is the MCTS Selection step made deterministic: the LLM no longer
         picks which technique to try, the graph does. Rules, in priority order:
 
-          1. Untried modules first — unexplored arms have infinite UCB; run
-             them before re-walking anything.
-          2. Modules with at least one non-dead attempt, ranked by best score
+          1. **Tier gate** — "simple before complex". Find the lowest tier
+             that still has a live candidate (untried module, or a tried
+             module that's either promising or not yet fully dead). Filter
+             candidates to that tier. Callers pass ``tiers`` — a mapping
+             ``module_name → tier`` sourced from :meth:`Registry.tiers_for`.
+             When ``tiers`` is ``None``, every module is treated as tier-2 and
+             the gate collapses to a no-op — legacy callers see unchanged
+             behaviour.
+          2. **Escape hatch** — if no tier is live (every tier is saturated
+             with dead-or-unpromising tried modules), fall back to cross-tier
+             ranking so a dead tier-0 pool doesn't strand a promising tier-2
+             lead.
+          3. Untried modules first within the gated tier — unexplored arms
+             have infinite UCB; run them before re-walking anything.
+          4. Modules with at least one non-dead attempt, ranked by best score
              (exploit what worked).
-          3. Exclude: modules whose every prior attempt is dead in the graph
+          5. Exclude: modules whose every prior attempt is dead in the graph
              (anywhere, not just under this parent). No point retrying a
              technique the target has decisively rebuffed.
 
@@ -386,6 +474,8 @@ class AttackGraph:
           - ``parent_id``: str — node this frontier will attach under
           - ``rationale``: str — short human-readable reason for telemetry
           - ``best_score``: int — 0 if untried, otherwise the prior best
+          - ``tier``: int — the module's attack-cost tier (default 2 when
+            the caller didn't supply the mapping).
 
         The LLM then refines each proposal into a concrete approach one-liner
         (see :func:`mesmer.core.agent.judge.refine_approach`). It cannot re-pick
@@ -396,25 +486,49 @@ class AttackGraph:
 
         attach_to = parent_id or self.root_id
         explored = self.get_explored_nodes()
+        tiers = tiers or {}
 
         per_module: dict[str, dict] = {}
         for mod in available_modules:
+            tier = tiers.get(mod, 2)
             nodes = [n for n in explored if n.module == mod]
             if not nodes:
-                per_module[mod] = {"tried": 0, "best": 0, "all_dead": False}
+                per_module[mod] = {
+                    "tried": 0, "best": 0, "all_dead": False, "tier": tier,
+                }
                 continue
             per_module[mod] = {
                 "tried": len(nodes),
                 "best": max(n.score for n in nodes),
                 "all_dead": all(n.is_dead for n in nodes),
+                "tier": tier,
             }
 
-        # Filter dead-out modules and rank the rest.
+        # Drop modules whose every prior attempt is dead — that's a hard
+        # exclude regardless of tier.
+        live = {mod: s for mod, s in per_module.items() if not s["all_dead"]}
+
+        # Tier gate. A tier is "live" if it contains at least one candidate
+        # that's either untried OR promising (best >= PROMISING_SCORE_THRESHOLD).
+        # A tier whose only live members are tried-and-unpromising is stale —
+        # we've probed it and learned nothing worth deepening; the gate should
+        # skip to the next tier rather than keep re-walking.
+        gated_modules, decision = _apply_tier_gate(live)
+
+        # When the caller supplied an out-param dict, copy the decision into
+        # it so the caller can emit a structured trace event. Keeps the
+        # return type stable (still ``list[dict]``) for every existing
+        # caller that doesn't care about the gate metadata.
+        if gate_decision_out is not None:
+            gate_decision_out.clear()
+            gate_decision_out.update(decision)
+
         ranked = sorted(
-            ((mod, s) for mod, s in per_module.items() if not s["all_dead"]),
-            # Priority key: untried first (tried > 0 is False), then best score
-            # descending, then module name for stable ordering.
-            key=lambda x: (x[1]["tried"] > 0, -x[1]["best"], x[0]),
+            gated_modules.items(),
+            # Priority key: tier ascending, then untried first (tried > 0 is
+            # False), then best score descending, then module name for stable
+            # ordering.
+            key=lambda x: (x[1]["tier"], x[1]["tried"] > 0, -x[1]["best"], x[0]),
         )
 
         results: list[dict] = []
@@ -428,6 +542,7 @@ class AttackGraph:
                 "parent_id": attach_to,
                 "rationale": rationale,
                 "best_score": stats["best"],
+                "tier": stats["tier"],
             })
         return results
 
@@ -529,8 +644,18 @@ class AttackGraph:
 
     # --- formatting for LLM context ---
 
-    def format_summary(self, max_lines: int = 30) -> str:
-        """Format graph state for LLM consumption."""
+    def format_summary(
+        self,
+        max_lines: int = 30,
+        *,
+        tiers: dict[str, int] | None = None,
+    ) -> str:
+        """Format graph state for LLM consumption.
+
+        When ``tiers`` is supplied, the "Explored Paths" section is grouped
+        by tier so the leader can see at a glance which tiers have been
+        probed. Legacy callers (no ``tiers``) get the flat module list.
+        """
         lines: list[str] = []
 
         # Stats
@@ -552,14 +677,31 @@ class AttackGraph:
 
         if by_module:
             lines.append("## Explored Paths")
-            for mod, nodes in sorted(by_module.items()):
-                best = max(n.score for n in nodes)
-                dead_count = sum(1 for n in nodes if n.is_dead)
-                lines.append(
-                    f"- {mod}: {len(nodes)} attempts, "
-                    f"best score {best}, "
-                    f"{dead_count} dead ends"
+            if tiers:
+                # Sort by (tier, module name) so the output reads top-down
+                # from cheapest to most expensive.
+                ordered = sorted(
+                    by_module.items(),
+                    key=lambda kv: (tiers.get(kv[0], 2), kv[0]),
                 )
+                for mod, nodes in ordered:
+                    best = max(n.score for n in nodes)
+                    dead_count = sum(1 for n in nodes if n.is_dead)
+                    tier = tiers.get(mod, 2)
+                    lines.append(
+                        f"- [T{tier}] {mod}: {len(nodes)} attempts, "
+                        f"best score {best}, "
+                        f"{dead_count} dead ends"
+                    )
+            else:
+                for mod, nodes in sorted(by_module.items()):
+                    best = max(n.score for n in nodes)
+                    dead_count = sum(1 for n in nodes if n.is_dead)
+                    lines.append(
+                        f"- {mod}: {len(nodes)} attempts, "
+                        f"best score {best}, "
+                        f"{dead_count} dead ends"
+                    )
             lines.append("")
 
         # Best leads
@@ -594,6 +736,194 @@ class AttackGraph:
             lines.append("")
 
         return "\n".join(lines[:max_lines])
+
+    # --- Experience queries (graph IS the experience store; no sidecar) ---
+
+    def conversation_history(self) -> list[AttackNode]:
+        """Return all explored module executions as an ordered timeline
+        (oldest first).
+
+        The "conversation history" view over the graph: the same nodes
+        ``get_explored_nodes()`` returns, but sorted by timestamp so
+        downstream code can reason about WHEN things happened. The
+        graph tree preserves parent→child refinement relationships;
+        this method preserves temporal order. Same data, different
+        read axis.
+
+        Frontier nodes are excluded (they're proposed, not executed).
+        Root is excluded (it's a placeholder, not a real module turn).
+        Both ``run_id``s are included — cross-run history is the point:
+        a second run seeing the target-profiler turn from the first
+        run is how mesmer gets smarter over time.
+        """
+        return sorted(self.get_explored_nodes(), key=lambda n: n.timestamp)
+
+    def render_conversation_history(
+        self,
+        *,
+        last_n: int = 8,
+        max_chars_per_turn: int = 1600,
+    ) -> str:
+        """Compact markdown rendering of the last N module turns.
+
+        Each turn is an entry in the inter-module conversation: which
+        module ran, what it was asked to do, what it concluded.
+        Ordered oldest-first so the reader sees the chain of reasoning
+        in sequence.
+
+        Entries exceeding ``max_chars_per_turn`` are truncated with an
+        explicit suffix pointing at graph.json — never silently.
+        Turns whose ``module_output`` is empty still render (with the
+        approach string as context) so readers see that the module
+        ran even if it authored no conclude text.
+        """
+        turns = self.conversation_history()
+        if not turns:
+            return ""
+        recent = turns[-last_n:] if last_n > 0 else turns
+        parts: list[str] = []
+        base_index = len(turns) - len(recent)
+        for i, n in enumerate(recent, start=base_index + 1):
+            output = (n.module_output or "").rstrip()
+            if len(output) > max_chars_per_turn:
+                head = output[:max_chars_per_turn].rstrip()
+                remaining = len(output) - max_chars_per_turn
+                output = (
+                    f"{head}\n\n[+{remaining} chars — "
+                    "see graph.json for the full text]"
+                )
+            header = f"**{i}. `{n.module}`** (score {n.score}) — {n.approach}"
+            if output:
+                parts.append(header + "\n" + output)
+            else:
+                parts.append(header + "\n_(module produced no conclude text)_")
+        return "\n\n".join(parts)
+
+    def winning_modules(self, min_score: int = 7) -> list[tuple[str, int]]:
+        """Modules that have scored at least ``min_score`` somewhere in the
+        graph, sorted by best score descending then module name.
+
+        Returns ``[(module_name, best_score), ...]``. Drives the Planner's
+        "these techniques previously worked against THIS target" signal —
+        a second run against a familiar target goes straight to what won
+        last time instead of re-probing the tier ladder from scratch.
+        """
+        best: dict[str, int] = {}
+        for n in self.iter_nodes():
+            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+                continue
+            if n.score < min_score:
+                continue
+            if n.score > best.get(n.module, -1):
+                best[n.module] = n.score
+        return sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def failed_modules(self, max_score: int = 2) -> list[str]:
+        """Modules where every observed attempt scored at or below
+        ``max_score`` AND at least one attempt ran.
+
+        Signals "don't re-try this against THIS target" to the Planner.
+        Distinct from ``get_dead_nodes()`` which tracks individual-node
+        failures; this is a per-module aggregate.
+        """
+        by_mod: dict[str, list[int]] = {}
+        for n in self.iter_nodes():
+            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+                continue
+            by_mod.setdefault(n.module, []).append(n.score)
+        return sorted(
+            mod for mod, scores in by_mod.items()
+            if scores and max(scores) <= max_score
+        )
+
+    def verbatim_leaks(self, min_score: int = 5) -> list[str]:
+        """Distinct ``leaked_info`` strings from nodes scoring at least
+        ``min_score``. Deduplicated by exact string (case-preserving).
+
+        Attack modules read this to reference fragments the target has
+        already disclosed — e.g. ``prefix-commitment`` can open with a
+        previously-leaked phrase, or ``authority-bias`` can cite
+        owner-declared rules the target has admitted.
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for n in self.iter_nodes():
+            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+                continue
+            leaked = (n.leaked_info or "").strip()
+            if not leaked or n.score < min_score:
+                continue
+            if leaked in seen:
+                continue
+            seen.add(leaked)
+            out.append(leaked)
+        return out
+
+    def refusal_templates_from_turns(self, min_length: int = 3) -> list[str]:
+        """Short target responses that look like refusal templates.
+
+        Heuristic only: strips to stripped-response text, keeps entries of
+        length >= ``min_length`` words, dedupes verbatim. Used as input
+        when profile.json's ``refusal_templates`` is empty (e.g. the
+        target-profiler hasn't run yet) so injection-family modules can
+        still mirror observed refusals.
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for n in self.iter_nodes():
+            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+                continue
+            for resp in n.target_responses:
+                s = (resp or "").strip()
+                if not s:
+                    continue
+                # Refusals tend to be short. Filter out long responses —
+                # they're usually substantive leaks, not template refusals.
+                if len(s.split()) < min_length or len(s.split()) > 40:
+                    continue
+                if s in seen:
+                    continue
+                seen.add(s)
+                out.append(s)
+        return out
+
+    def render_learned_experience(self, *, max_entries: int = 8) -> str:
+        """Compact markdown summary of everything the graph has taught us.
+
+        Rendered into the leader's user message when non-empty, and
+        passed to attack modules via their first user message so they
+        can see what's already been tried / what's worked / what
+        fragments are available for re-use.
+
+        Intentionally short: this is a PROMPT-LEVEL artifact, not a
+        data dump. Long lists are truncated by `max_entries` but NEVER
+        silently — the "+N more" suffix tells the reader how much was
+        left off so they can pull graph.json for the full history.
+        """
+        parts: list[str] = []
+
+        wins = self.winning_modules()
+        if wins:
+            bits = ", ".join(f"`{mod}` (best {s})" for mod, s in wins[:max_entries])
+            more = f" (+{len(wins) - max_entries} more)" if len(wins) > max_entries else ""
+            parts.append(f"**Modules that worked here before:** {bits}{more}")
+
+        fails = self.failed_modules()
+        if fails:
+            bits = ", ".join(f"`{m}`" for m in fails[:max_entries])
+            more = f" (+{len(fails) - max_entries} more)" if len(fails) > max_entries else ""
+            parts.append(f"**Modules that failed here (skip):** {bits}{more}")
+
+        leaks = self.verbatim_leaks()
+        if leaks:
+            sample = "\n".join(f"  - \"{leak[:120]}\"" for leak in leaks[:max_entries])
+            more = (
+                f"\n  (+{len(leaks) - max_entries} more in graph.json)"
+                if len(leaks) > max_entries else ""
+            )
+            parts.append("**Verbatim leaks to reference / build on:**\n" + sample + more)
+
+        return "\n\n".join(parts)
 
     def format_dead_ends(self) -> str:
         """Compact list of dead ends for anti-repetition injection."""

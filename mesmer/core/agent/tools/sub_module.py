@@ -53,10 +53,23 @@ async def handle(
     # nudge the leader in the tool_result. Sample up to one.
     missed_frontier = _find_missed_frontier(ctx.graph, fn_name, frontier_id)
 
+    # DELEGATE detail is the forensic record of what the leader told the
+    # sub-module to do. JSON payload so structured tooling can extract the
+    # instruction/frontier without regex-parsing a prose line. Text tools
+    # ``jq '.event=="delegate"'`` still see a readable blob.
+    tier = None
+    if ctx.registry is not None:
+        tier = ctx.registry.tier_of(fn_name)
+    import json as _json
     log(
         LogEvent.DELEGATE.value,
-        f"→ {fn_name} (max_turns={sub_max_turns})"
-        + (f" [frontier={frontier_id}]" if frontier_id else "")
+        _json.dumps({
+            "module": fn_name,
+            "tier": tier,
+            "max_turns": sub_max_turns,
+            "frontier_id": frontier_id,
+            "instruction": sub_instruction,
+        }, sort_keys=True, default=str),
     )
 
     # Snapshot turn count before delegation so we can extract
@@ -65,6 +78,16 @@ async def handle(
 
     result = await ctx.run_module(fn_name, sub_instruction, sub_max_turns, log=log)
     log(LogEvent.DELEGATE_DONE.value, f"← {fn_name}: {result}")
+
+    # Auto-write the sub-module's conclude() text onto the run's
+    # scratchpad under its own name. Every subsequent module reading
+    # ``## Scratchpad`` sees what just happened. No framework-level
+    # typed abstraction — whatever the module author wrote in their
+    # conclude() text lands verbatim. Overwrites any prior value for
+    # the same module (latest-wins; the graph carries the full history
+    # if anyone needs it).
+    if result and result.strip():
+        ctx.scratchpad.set(fn_name, result)
 
     # Collect messages from turns added during this delegation
     # (turns list is shared between parent and child). Track
@@ -86,6 +109,11 @@ async def handle(
         ctx, fn_name, approach, judge_result, log,
         messages_sent=[t.sent for t in sub_turns],
         target_responses=[t.received for t in sub_turns],
+        # ``result`` is the sub-module's raw conclude() text. Persist it
+        # on the graph node so the next module (and future runs) can read
+        # verbatim what prior modules authored — the clean "everything is
+        # a module" story: a profiler's output is just its conclude().
+        module_output=result,
         frontier_id=frontier_id,
     )
 
@@ -93,21 +121,45 @@ async def handle(
     # Scope the frontier arm-space to this leader's declared
     # sub-modules so propose_frontier can't suggest techniques
     # the leader isn't allowed to call.
-    if current_node and judge_result:
+    #
+    # Short-circuit when the judge already flagged ``objective_met``: the
+    # engine will auto-conclude on the next iteration, so generating 2-3
+    # refine_approach LLM calls here is pure waste (~2k tokens + ~14s per
+    # winning trial on gemini-2.5-flash). The absence of TIER_GATE /
+    # FRONTIER events in the trace is itself the "we won, skipped
+    # expansion" signal — no new LogEvent needed.
+    if (
+        current_node
+        and judge_result
+        and not judge_result.objective_met
+    ):
         await _reflect_and_expand(
-            ctx, fn_name, approach, judge_result, current_node, log,
+            ctx, judge_result, current_node, log,
             available_modules=list(module.sub_modules) if module.sub_modules else None,
         )
 
     # Build enhanced result for the leader
     judge_info = ""
     if judge_result:
+        objective_line = ""
+        if judge_result.objective_met:
+            # Leader sees an unmissable terminate-now directive. The engine
+            # ALSO auto-concludes on ctx.objective_met, but the tool_result
+            # signal keeps the prompt-level story honest: if a human reads
+            # this transcript they see exactly when the win was attributed.
+            objective_line = (
+                "\n\n🎯 OBJECTIVE MET per judge. Call conclude() on your "
+                "next iteration — the run will terminate automatically. "
+                "Do NOT delegate another module."
+            )
         judge_info = (
             f"\n\n📊 Judge score: {judge_result.score}/10"
+            f" (echo_ratio {judge_result.echo_ratio:.2f})"
             f"\n  Leaked: {judge_result.leaked_info}"
             f"\n  Promising: {judge_result.promising_angle}"
             f"\n  Dead end: {judge_result.dead_end}"
             f"\n  Suggested next: {judge_result.suggested_next}"
+            + objective_line
         )
 
     # Nudge: leader made a fresh attempt when a matching frontier

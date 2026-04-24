@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mesmer.core.module import ModuleConfig, load_module_config
+from mesmer.core.module import DEFAULT_TIER, ModuleConfig, load_module_config
 
 
 class Registry:
@@ -52,6 +52,21 @@ class Registry:
             for child in sorted(base.iterdir()):
                 if child.is_dir() and not child.name.startswith("_"):
                     self.auto_discover(child)
+
+    def tier_of(self, name: str) -> int:
+        """Return the attack-cost tier for a module, or the default.
+
+        Unknown modules fall back to :data:`DEFAULT_TIER` (2, cognitive) so the
+        frontier ranker never KeyErrors on a typoed ``sub_modules`` entry.
+        The registry is the single source of truth for tier lookup;
+        :meth:`propose_frontier` calls this through :meth:`tiers_for`.
+        """
+        mod = self.modules.get(name)
+        return mod.tier if mod else DEFAULT_TIER
+
+    def tiers_for(self, names: list[str]) -> dict[str, int]:
+        """Bulk tier lookup — one dict keyed by module name."""
+        return {n: self.tier_of(n) for n in names}
 
     def as_tools(self, names: list[str] | None = None) -> list[dict]:
         """

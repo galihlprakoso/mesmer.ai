@@ -332,6 +332,38 @@ class Context:
         # create a fresh one.
         self.telemetry: RunTelemetry = RunTelemetry()
 
+        # Bound log callback — populated by :func:`execute_run` before the
+        # ReAct loop starts so :meth:`completion` can emit per-call
+        # :data:`LogEvent.LLM_COMPLETION` events (attacker + judge +
+        # compressor calls alike). ``None`` during tests / direct use;
+        # completion falls back to emitting nothing.
+        self.log: "Callable[[str, str], None] | None" = None
+
+        # Early-terminate signal. Set by ``_judge_module_result`` when the
+        # in-loop judge flags ``objective_met=True`` on the current judge
+        # verdict. The engine loop checks this after every tool dispatch
+        # and short-circuits to ``conclude`` instead of firing another
+        # attacker iteration — no more post-win exploration burn.
+        # Carries the leaked fragment so the synthesised conclude text
+        # actually contains the win, not a generic "objective met" string.
+        self.objective_met: bool = False
+        self.objective_met_fragment: str = ""
+
+        # Short-term per-run memory. Populated at run start by
+        # ``execute_run`` from ``graph.latest_outputs_by_module()`` so
+        # cross-run knowledge (prior profiler dossier, prior plans,
+        # prior attack write-ups) is on the blackboard before the first
+        # iteration. Auto-updated after every sub-module delegation —
+        # ``sub_module.handle`` writes ``scratchpad[module.name] =
+        # conclude_text``. Rendered into every module's user message by
+        # :mod:`mesmer.core.agent.engine`. See
+        # :mod:`mesmer.core.scratchpad` for the full contract.
+        #
+        # Late-imported to keep core/context-layer import order legible:
+        # scratchpad.py lives at core/ top level, context.py sits mid-way.
+        from mesmer.core.scratchpad import Scratchpad as _Scratchpad
+        self.scratchpad: _Scratchpad = _Scratchpad()
+
     @property
     def agent_model(self) -> str:
         """Currently-bound attacker model (rotation override wins)."""
@@ -416,6 +448,44 @@ class Context:
             # Telemetry is observability, not correctness — never let a
             # metrics bug fail the actual run.
             pass
+
+        # Per-completion trace event. Fires for EVERY role (attacker, judge,
+        # compressor) — the engine's LLM_CALL only covers attacker-loop
+        # iterations. Detail is JSON so trace tooling can separate judge
+        # calls from attacker calls without a bespoke parser.
+        if self.log is not None:
+            import json as _json
+            usage_obj = getattr(response, "usage", None)
+
+            def _usage_val(attr: str) -> int:
+                if usage_obj is None:
+                    return 0
+                if isinstance(usage_obj, dict):
+                    return int(usage_obj.get(attr, 0) or 0)
+                raw = getattr(usage_obj, attr, 0) or 0
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    return 0
+
+            try:
+                self.log(
+                    LogEvent.LLM_COMPLETION.value,
+                    _json.dumps({
+                        "role": role.value,
+                        "model": kwargs["model"],
+                        "elapsed_s": round(elapsed, 3),
+                        "prompt_tokens": _usage_val("prompt_tokens"),
+                        "completion_tokens": _usage_val("completion_tokens"),
+                        "total_tokens": _usage_val("total_tokens"),
+                        "n_messages": len(messages),
+                        "tools": len(tools) if tools else 0,
+                    }, sort_keys=True, default=str),
+                )
+            except Exception:
+                # Logging is observability. Never let a broken sink
+                # take down the actual run.
+                pass
 
         return response
 
@@ -567,6 +637,15 @@ class Context:
         # Telemetry rolls up to the run — every sub-module's LLM usage
         # must land in the same accumulator the caller reads post-run.
         child.telemetry = self.telemetry
+        # Log sink is run-scoped — child sub-modules share it so their
+        # completion/delegate/judge events land in the same stream as the
+        # leader's. Otherwise only the leader's iteration would be traced.
+        child.log = self.log
+        # Scratchpad is run-scoped — SAME reference so a child's write
+        # (its own conclude() being auto-pushed to scratchpad[module.name]
+        # by sub_module.handle) is immediately visible when control
+        # returns to the parent for its next iteration.
+        child.scratchpad = self.scratchpad
         return child
 
     async def ask_human(

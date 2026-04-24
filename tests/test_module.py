@@ -1,6 +1,9 @@
 """Tests for mesmer.core.module — YAML loader + ModuleConfig defaults."""
 
-from mesmer.core.module import ModuleConfig, load_module_config
+import pytest
+
+from mesmer.core.errors import InvalidModuleConfig
+from mesmer.core.module import DEFAULT_TIER, ModuleConfig, load_module_config
 
 
 class TestJudgeRubricField:
@@ -72,3 +75,59 @@ class TestResetTargetField:
         module_dir = tmp_path / "empty"
         module_dir.mkdir()
         assert load_module_config(module_dir) is None
+
+
+class TestTierField:
+    """`tier` drives the 'simple before complex' frontier ladder.
+
+    Legacy modules omit the field → default to 2 (cognitive). Six new
+    field-technique modules declare tier 0 or 1 so `propose_frontier`
+    picks them before any multi-turn cognitive attack.
+    """
+
+    def test_default_is_2_on_dataclass(self):
+        """Dataclass default keeps every cognitive module at tier 2."""
+        m = ModuleConfig(name="x")
+        assert m.tier == DEFAULT_TIER == 2
+
+    def test_yaml_without_tier_defaults_to_2(self, tmp_path):
+        """Existing module.yaml files need zero edits."""
+        module_dir = tmp_path / "legacy"
+        module_dir.mkdir()
+        (module_dir / "module.yaml").write_text(
+            "name: legacy\n"
+            "description: test\n"
+            "system_prompt: do stuff\n"
+        )
+        cfg = load_module_config(module_dir)
+        assert cfg is not None
+        assert cfg.tier == 2
+
+    def test_yaml_parses_tier_values(self, tmp_path):
+        """All four legal tiers (0..3) round-trip through the loader."""
+        for tier in (0, 1, 2, 3):
+            module_dir = tmp_path / f"t{tier}"
+            module_dir.mkdir()
+            (module_dir / "module.yaml").write_text(
+                f"name: t{tier}\n"
+                f"description: test\n"
+                f"tier: {tier}\n"
+            )
+            cfg = load_module_config(module_dir)
+            assert cfg is not None
+            assert cfg.tier == tier
+
+    def test_out_of_range_tier_raises(self, tmp_path):
+        """Tier outside 0..3 fails loud — a typo shouldn't silently collapse to 2."""
+        module_dir = tmp_path / "bogus"
+        module_dir.mkdir()
+        (module_dir / "module.yaml").write_text(
+            "name: bogus\n"
+            "description: test\n"
+            "tier: 9\n"
+        )
+        with pytest.raises(InvalidModuleConfig) as exc:
+            load_module_config(module_dir)
+        assert exc.value.module_name == "bogus"
+        assert exc.value.field == "tier"
+        assert exc.value.value == 9

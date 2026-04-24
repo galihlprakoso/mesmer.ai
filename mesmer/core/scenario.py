@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from mesmer.core.constants import ScenarioMode
+from mesmer.core.keys import ThrottleConfig
 
 
 @dataclass
@@ -42,6 +43,17 @@ class TargetConfig:
     # post_prompt` sandwich — matches Tensor Trust's canonical defense shape
     # and generalises to any per-turn defence suffix. Default "" = no-op.
     user_turn_suffix: str = ""
+
+    # Declarative rate-limit policy for TARGET-side calls — symmetric with
+    # ``AgentConfig.throttle``. ``None`` = no throttling (legacy behaviour).
+    # Today only the ``openai`` adapter honours this; other adapters accept
+    # the field but ignore it. The pool is pulled from the same process-level
+    # cache as the agent's, keyed on the sorted tuple of API keys — so two
+    # bench targets pointing at the same provider key automatically share
+    # one throttle budget. First caller wins on configuration; subsequent
+    # targets declaring a different throttle see theirs ignored (matches
+    # agent-side semantics).
+    throttle: ThrottleConfig | None = None
 
     # WebSocket declarative config
     send_template: str = '{"message": "{{message}}"}'
@@ -109,6 +121,12 @@ class AgentConfig:
     compression_target_ratio: float = 0.6
     compression_model: str = ""
 
+    # Declarative rate-limit policy for the attacker's API keys. None = no
+    # throttling (legacy behaviour). See :class:`mesmer.core.keys.ThrottleConfig`.
+    # The pool lives in a process-level cache keyed by the sorted key
+    # tuple so sibling bench trials that share keys share a throttle.
+    throttle: ThrottleConfig | None = None
+
     # Optional PRNG seed for reproducibility. When set (non-None), the bench
     # orchestrator uses this to seed Python's ``random`` module before each
     # trial so technique selection, tie-breaks, and any other ``random.*``
@@ -146,9 +164,13 @@ class AgentConfig:
         elif self.api_key:
             self._keys = [self.api_key]
 
-        # Build a KeyPool that supports per-key cooldowns (rate-limit exclusion)
-        from mesmer.core.keys import KeyPool
-        self._pool = KeyPool(list(self._keys))
+        # Build a KeyPool that supports per-key cooldowns + throttle. The
+        # pool is pulled from a process-level cache keyed by the sorted
+        # API-key tuple — so when the bench harness constructs N
+        # AgentConfigs per trial, they all share one throttle (otherwise
+        # concurrency=8 would yield 8× the operator-declared rpm cap).
+        from mesmer.core.keys import get_or_create_pool
+        self._pool = get_or_create_pool(list(self._keys), throttle=self.throttle)
 
         # C7 — validate / clamp context-budget fields. Defensive defaults so
         # a typoed YAML value degrades instead of tripping the compressor.
@@ -310,6 +332,23 @@ def _resolve_env_vars(value):
     return value
 
 
+def _parse_throttle(raw: dict | None) -> ThrottleConfig | None:
+    """Parse the optional ``agent.throttle`` YAML block.
+
+    Absent / empty block → ``None`` (no throttling, legacy behaviour).
+    Present → :class:`ThrottleConfig`. Its ``__post_init__`` clamps
+    nonsense values so a typoed YAML field degrades to a safe default
+    instead of crashing the scenario at run time.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return ThrottleConfig(
+        max_rpm=raw.get("max_rpm"),
+        max_concurrent=raw.get("max_concurrent"),
+        max_wait_seconds=raw.get("max_wait_seconds", 0.0) or 0.0,
+    )
+
+
 def load_scenario(path: str | Path) -> Scenario:
     """Load a scenario from a YAML file."""
     with open(path) as f:
@@ -333,6 +372,7 @@ def load_scenario(path: str | Path) -> Scenario:
         api_keys=target_data.get("api_keys", []),
         system_prompt=target_data.get("system_prompt", ""),
         user_turn_suffix=target_data.get("user_turn_suffix", ""),
+        throttle=_parse_throttle(target_data.get("throttle")),
         # WebSocket declarative
         send_template=target_data.get("send_template", '{"message": "{{message}}"}'),
         receive=target_data.get("receive"),
@@ -355,6 +395,8 @@ def load_scenario(path: str | Path) -> Scenario:
     except (TypeError, ValueError):
         seed_val = None
 
+    throttle = _parse_throttle(agent_data.get("throttle"))
+
     agent = AgentConfig(
         model=agent_data.get("model", "openrouter/anthropic/claude-sonnet-4-20250514"),
         models=list(agent_data.get("models", []) or []),
@@ -371,6 +413,7 @@ def load_scenario(path: str | Path) -> Scenario:
         compression_keep_recent=agent_data.get("compression_keep_recent", 10),
         compression_target_ratio=agent_data.get("compression_target_ratio", 0.6),
         compression_model=str(agent_data.get("compression_model", "") or ""),
+        throttle=throttle,
         seed=seed_val,
     )
 

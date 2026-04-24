@@ -29,6 +29,15 @@ class Target(ABC):
     # ``{pre_prompt}{attacker}{post_prompt}`` sandwich on every turn.
     user_turn_suffix: str = ""
 
+    # Provider-side checkpoint identifier from the most recent call. OpenAI and
+    # Groq return this as ``system_fingerprint`` on chat-completions responses;
+    # it changes when the provider swaps the underlying model weights under the
+    # same model string. Captured per call so per-trial JSONL can record exactly
+    # which checkpoint served each trial — load-bearing for reproducibility
+    # when model strings (``llama-3.1-8b-instant``) don't carry a date. None
+    # when the provider omits the field.
+    last_fingerprint: str | None = None
+
     def _apply_suffix(self, text: str) -> str:
         """Append :attr:`user_turn_suffix` to an outgoing user message.
 

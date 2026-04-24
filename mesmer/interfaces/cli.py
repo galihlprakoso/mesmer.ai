@@ -64,6 +64,9 @@ def _make_verbose_log():
         styles = {
             "module_start":  ("bold magenta", "\u25b6"),
             "llm_call":      ("dim",          "\u23f3"),
+            # LLM_COMPLETION is per-call (any role) — dim so it doesn't drown
+            # the higher-signal events, but still visible.
+            "llm_completion": ("dim cyan",    "\u2728"),
             "llm_error":     ("bold red",     "\u2717"),
             "reasoning":     ("dim italic",   "\U0001f4ad"),
             "tool_calls":    ("bold blue",    "\U0001f527"),
@@ -77,11 +80,16 @@ def _make_verbose_log():
             "hard_stop":     ("bold red",     "\U0001f6d1"),
             "judge":         ("bold blue",    "\u2696"),
             "judge_score":   ("bold blue",    "\U0001f4ca"),
+            # JUDGE_VERDICT is the full JSON payload — dim so it doesn't
+            # scroll past the score line that already summarises it.
+            "judge_verdict": ("dim blue",     "\u2696"),
             "judge_error":   ("red",          "\u2696\u2717"),
             "graph_update":  ("cyan",         "\U0001f4ca"),
             "frontier":      ("green",        "\U0001f33f"),
+            "tier_gate":     ("bold green",   "\U0001f6aa"),  # door
             "reflect_error": ("red",          "\U0001f4ad\u2717"),
             "send_error":    ("bold red",     "\u2192\u2717"),
+            "throttle_wait": ("yellow",       "\u23f8"),
         }
         style, icon = styles.get(event, ("dim", "\u00b7"))
         console.print(f"[{style}]{icon} {detail}[/{style}]")
@@ -594,13 +602,21 @@ def serve(port, host, no_browser, scenario_dir):
     is_flag=True,
     help="Stream per-trial progress to stderr.",
 )
-def bench(spec_path, targets, sample, trials, output, concurrency, download, no_baseline, verbose):
+@click.option(
+    "--no-viz",
+    is_flag=True,
+    help="Skip post-run {stem}-viz.html generation. Default is on — the "
+         "HTML is a derived artefact you can always rebuild with "
+         "`mesmer bench-viz {stem}-summary.json`.",
+)
+def bench(spec_path, targets, sample, trials, output, concurrency, download,
+          no_baseline, verbose, no_viz):
     """Run a benchmark spec and emit reproducible results.
 
     A spec is a YAML file that binds one mesmer module to one dataset and
     a list of target models. Example::
 
-        mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml \\
+        mesmer bench benchmarks/specs/tensor-trust-extraction.yaml \\
             --sample 50 --trials 3
 
     Writes a per-trial JSONL, a summary.json, and a Markdown table under
@@ -616,6 +632,7 @@ def bench(spec_path, targets, sample, trials, output, concurrency, download, no_
         download=download,
         no_baseline=no_baseline,
         verbose=verbose,
+        no_viz=no_viz,
     ))
 
 
@@ -630,6 +647,7 @@ async def _bench(
     download: bool,
     no_baseline: bool,
     verbose: bool,
+    no_viz: bool,
 ):
     from mesmer.bench import load_spec, run_benchmark
 
@@ -680,6 +698,10 @@ async def _bench(
         trials_override=trials,
         force_download=download,
         progress=_progress,
+        # --verbose streams every ReAct event. With concurrency > 1 trials
+        # interleave; orchestrator prefixes each line with the trial handle.
+        log_fn=_make_verbose_log() if verbose else None,
+        generate_viz=not no_viz,
     )
 
     # Summary table
@@ -708,6 +730,54 @@ async def _bench(
         )
     console.print(table)
     console.print(f"[green]Artifacts written to[/green] {output_dir}")
+
+
+# ---------------------------------------------------------------------------
+# bench-viz — backfill the HTML viewer against an existing run
+# ---------------------------------------------------------------------------
+
+@cli.command("bench-viz")
+@click.argument(
+    "summary_path",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+)
+@click.option(
+    "--offline",
+    is_flag=True,
+    help="Inline the vendored D3 bundle instead of loading it from the "
+         "CDN. Produces a larger HTML (+~280KB) that works with no network.",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Override the output HTML path. By default writes "
+         "<stem>-viz.html next to the summary, or <stem>-viz-index.html "
+         "when the payload is split per-target.",
+)
+def bench_viz_cmd(summary_path: str, offline: bool, output: str | None):
+    """Generate an interactive per-trial mind-map HTML for a bench run.
+
+    Reads the run's ``{stem}-summary.json`` and every
+    ``events/*.graph.json`` trial snapshot, then writes a self-contained
+    HTML file that renders the attack trees with pan/zoom and a per-node
+    detail panel. Open the HTML in any browser — no server required.
+
+    Example::
+
+        mesmer bench-viz benchmarks/results/20260424T145633Z-v1-summary.json
+    """
+    from mesmer.bench.viz import build_viz_html
+
+    result = build_viz_html(
+        Path(summary_path),
+        offline=offline,
+        output_path=Path(output) if output else None,
+    )
+    console.print(f"[green]Wrote[/green] {result.primary}")
+    for extra in result.extras:
+        console.print(f"[dim]  + {extra}[/dim]")
 
 
 if __name__ == "__main__":

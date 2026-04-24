@@ -1,0 +1,50 @@
+---
+title: Introduction
+description: What mesmer is, and why it exists.
+---
+
+Mesmer is a **cognitive hacking toolkit for LLMs**. It red-teams an LLM target
+by running ReAct agents that pick cognitive-science-based techniques —
+foot-in-door, authority bias, narrative transport, cognitive overload — judges
+each attempt on a 1-10 rubric, and persists a per-target attack graph so every
+successive run gets smarter.
+
+## The premise
+
+LLMs are minds, not filesystems. Static prompt banks — the shape most
+red-teaming tools take — fail against modern targets because a frozen attack
+can't adapt to a defense it hasn't seen. Mesmer treats attack generation as a
+**search problem over cognitive space**: explore, exploit, prune, remember.
+
+<AsciiDiagram caption="The top-level loop.">
+{`   ┌──────────┐     ┌──────────┐     ┌──────────┐
+   │   PLAN   │ ──▶ │ EXECUTE  │ ──▶ │  JUDGE   │
+   └──────────┘     └──────────┘     └────┬─────┘
+        ▲                                  │
+        │           ┌──────────┐     ┌────▼─────┐
+        └────────── │ REFLECT  │ ◀── │  UPDATE  │
+                    └──────────┘     └──────────┘
+                                          │
+                                  ┌───────▼────────┐
+                                  │  ATTACK GRAPH  │  ~/.mesmer/
+                                  └────────────────┘`}
+</AsciiDiagram>
+
+## What you can do today
+
+<ModuleGrid />
+
+## Where to start
+
+<Cards>
+  <Card title="Install" href="/docs/getting-started/install" />
+  <Card title="Quickstart" href="/docs/getting-started/quickstart" />
+  <Card title="Why mesmer" href="/docs/getting-started/why-mesmer" />
+  <Card title="The attack graph" href="/docs/concepts/attack-graph" />
+</Cards>
+
+---
+
+Mesmer is open source, Python-first, uses LiteLLM for provider dispatch, and
+ships as a CLI + FastAPI backend + Svelte web UI. State lives outside the repo
+at `~/.mesmer/` so runs survive across sessions.

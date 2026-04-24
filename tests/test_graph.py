@@ -356,6 +356,134 @@ class TestAttackGraphConstruction:
         assert "untried" in by_mod["untried-mod"]["rationale"]
         assert "deepen" in by_mod["tried-mod"]["rationale"]
 
+    # --- TAPER — tier-aware propose_frontier (simple before complex) ---
+
+    def test_tier_gate_prefers_lowest_live_tier_untried(self):
+        """With a tier-0 untried and tier-2 untried, tier-0 wins — naive first."""
+        g = AttackGraph()
+        g.ensure_root()
+        tiers = {"direct-ask": 0, "foot-in-door": 2}
+        candidates = g.propose_frontier(
+            ["direct-ask", "foot-in-door"],
+            top_k=2,
+            tiers=tiers,
+        )
+        # Gate filters to tier-0 only; foot-in-door doesn't appear until T0
+        # is exhausted.
+        assert [c["module"] for c in candidates] == ["direct-ask"]
+        assert candidates[0]["tier"] == 0
+
+    def test_tier_gate_skips_dead_tier_to_next(self):
+        """Tier 0 dead → gate skips to tier 1."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        # Both tier-0 modules are dead.
+        g.add_node(
+            root.id, "direct-ask", "ask words plenty here",
+            score=1, reflection="rebuffed",
+        )
+        g.add_node(
+            root.id, "instruction-recital", "recite words plenty here",
+            score=2, reflection="rebuffed",
+        )
+        tiers = {
+            "direct-ask": 0,
+            "instruction-recital": 0,
+            "delimiter-injection": 1,
+            "foot-in-door": 2,
+        }
+        candidates = g.propose_frontier(
+            list(tiers.keys()),
+            top_k=3,
+            tiers=tiers,
+        )
+        modules = [c["module"] for c in candidates]
+        # Gate promoted to tier-1; tier-0 all-dead excluded entirely.
+        assert "direct-ask" not in modules
+        assert "instruction-recital" not in modules
+        assert "delimiter-injection" in modules
+        # foot-in-door (tier 2) stays filtered out while tier 1 is live.
+        assert "foot-in-door" not in modules
+
+    def test_tier_gate_keeps_promising_tier_2_over_new_tier_0(self):
+        """A promising (score>=7) tier-2 counts as live — gate surfaces
+        both tiers when tier-0 is also untried.
+
+        Note: the gate's contract is "lowest live tier". A tier-0 untried
+        module wins via the gate; a tier-2 promising module lives through
+        the escape hatch only if tier-0 is NOT live. This test verifies the
+        escape hatch triggers when every lower tier is stale.
+        """
+        g = AttackGraph()
+        root = g.ensure_root()
+        # Tier-0 has been tried but scored poorly (stale but not dead).
+        g.add_node(
+            root.id, "direct-ask", "probe words plenty here",
+            score=3,
+        )
+        # Tier-2 has a promising lead.
+        g.add_node(
+            root.id, "authority-bias", "promising words plenty here",
+            score=8,
+        )
+        tiers = {"direct-ask": 0, "authority-bias": 2}
+        candidates = g.propose_frontier(
+            list(tiers.keys()),
+            top_k=3,
+            tiers=tiers,
+        )
+        modules = [c["module"] for c in candidates]
+        # Escape hatch: every tier has only tried-unpromising or tried-
+        # promising members; with no untried and no promising tier-0, the
+        # promising tier-2 deserves a shot.
+        assert "authority-bias" in modules
+
+    def test_tier_gate_noop_when_no_tiers_passed(self):
+        """Legacy callers without ``tiers`` see unchanged cross-tier ranking."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "a", "first angle words plenty", score=4)
+        # Without tiers, this matches the pre-TAPER behaviour exactly.
+        candidates = g.propose_frontier(["a", "b"], top_k=2)
+        modules = [c["module"] for c in candidates]
+        # 'b' is untried → first. 'a' is tried but not dead → second.
+        assert modules == ["b", "a"]
+        # Default tier is 2 for unmapped modules.
+        assert all(c["tier"] == 2 for c in candidates)
+
+    def test_tier_field_present_in_returned_dicts(self):
+        """Every candidate dict carries its module's tier — callers render it."""
+        g = AttackGraph()
+        g.ensure_root()
+        tiers = {"t0-mod": 0, "t1-mod": 1}
+        candidates = g.propose_frontier(
+            ["t0-mod", "t1-mod"],
+            top_k=2,
+            tiers=tiers,
+        )
+        by_mod = {c["module"]: c for c in candidates}
+        # Gate filters to T0 only; the surviving dict carries tier=0.
+        assert by_mod["t0-mod"]["tier"] == 0
+
+    def test_escape_hatch_all_tiers_saturated(self):
+        """All tiers tried + unpromising → escape hatch returns best across tiers."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        # Tier-0: tried, score below promising threshold, not dead.
+        g.add_node(root.id, "t0", "t0 angle words plenty", score=3)
+        # Tier-2: tried, score below promising threshold, not dead.
+        g.add_node(root.id, "t2", "t2 angle words plenty", score=4)
+        tiers = {"t0": 0, "t2": 2}
+        candidates = g.propose_frontier(
+            list(tiers.keys()),
+            top_k=2,
+            tiers=tiers,
+        )
+        modules = {c["module"] for c in candidates}
+        # Escape hatch fires — both surface for cross-tier ranking; t2 wins
+        # on score but both are present.
+        assert modules == {"t0", "t2"}
+
     def test_fulfill_frontier_routes_through_classifier(self):
         """Fulfilling a frontier should apply the same P1 rules — raised
         dead threshold and same-module-no-gain.
@@ -535,9 +663,9 @@ class TestAttackGraphConstruction:
         ACTUAL module that ran, not the frontier's stale label."""
         g = AttackGraph()
         root = g.ensure_root()
-        # Frontier was created suggesting safety-profiler, but the leader
+        # Frontier was created suggesting target-profiler, but the leader
         # decides to call narrative-transport on that same refinement slot.
-        f = g.add_frontier_node(root.id, "safety-profiler", "probe rules")
+        f = g.add_frontier_node(root.id, "target-profiler", "probe rules")
         result = g.fulfill_frontier(
             f.id,
             approach="story about rules",
@@ -556,7 +684,7 @@ class TestAttackGraphConstruction:
         """Backward compat: no module arg means module stays as frontier's."""
         g = AttackGraph()
         root = g.ensure_root()
-        f = g.add_frontier_node(root.id, "safety-profiler", "probe rules")
+        f = g.add_frontier_node(root.id, "target-profiler", "probe rules")
         result = g.fulfill_frontier(
             f.id,
             approach="x",
@@ -567,7 +695,7 @@ class TestAttackGraphConstruction:
             reflection="",
             run_id="",
         )
-        assert result.module == "safety-profiler"
+        assert result.module == "target-profiler"
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +885,271 @@ class TestHashTarget:
 # ---------------------------------------------------------------------------
 # latest_explored_node (C5 — used by CONTINUOUS-mode attach resolution)
 # ---------------------------------------------------------------------------
+
+class TestModuleOutputPersistence:
+    """AttackNode.module_output — the canonical persisted form of a
+    module's conclude() text.
+    """
+
+    def test_add_node_persists_module_output(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        node = g.add_node(
+            root.id, "target-profiler", "profile defences",
+            score=8,
+            module_output="## Identity\n- claimed_model: llama-3.1-8b\n",
+            run_id="r",
+        )
+        assert node.module_output.startswith("## Identity")
+
+    def test_module_output_round_trips_through_json(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(
+            root.id, "target-profiler", "probe", score=8,
+            module_output="DOSSIER TEXT", run_id="r",
+        )
+        g2 = AttackGraph.from_json(g.to_json())
+        # Ordered timeline round-trips the module_output field.
+        history = g2.conversation_history()
+        assert len(history) == 1
+        assert history[0].module_output == "DOSSIER TEXT"
+
+    def test_fulfill_frontier_persists_module_output(self):
+        """A leader that executes a frontier_id should still have its
+        module_output recorded on the fulfilled node."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        f = g.add_frontier_node(root.id, "target-profiler", "probe")
+        result = g.fulfill_frontier(
+            f.id,
+            approach="probe defences",
+            messages_sent=["hi"],
+            target_responses=["hello"],
+            score=7,
+            module_output="DOSSIER FROM FRONTIER",
+            run_id="r",
+        )
+        assert result is not None
+        assert result.module_output == "DOSSIER FROM FRONTIER"
+
+
+class TestConversationHistory:
+    """AttackGraph.conversation_history — ordered timeline view.
+
+    Paired with Scratchpad (current-state KV) this is how the framework
+    surfaces "what happened, when" to every module's user prompt. Same
+    underlying data as the tree; different read axis.
+    """
+
+    def test_empty_graph_returns_empty_history(self):
+        g = AttackGraph()
+        g.ensure_root()
+        assert g.conversation_history() == []
+        assert g.render_conversation_history() == ""
+
+    def test_history_orders_by_timestamp_oldest_first(self):
+        import time as _time
+        g = AttackGraph()
+        root = g.ensure_root()
+        # Add in reverse-time order to prove the sort, not insertion order.
+        later = g.add_node(root.id, "late", "a1", score=5,
+                           module_output="LATE", run_id="r")
+        later.timestamp = _time.time()
+        earlier = g.add_node(root.id, "early", "a2", score=5,
+                             module_output="EARLY", run_id="r")
+        earlier.timestamp = _time.time() - 100
+        hist = g.conversation_history()
+        assert [n.module for n in hist] == ["early", "late"]
+
+    def test_history_excludes_frontier_and_root(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_frontier_node(root.id, "proposed", "frontier angle")
+        g.add_node(root.id, "real", "real angle", score=5,
+                   module_output="R", run_id="r")
+        hist = g.conversation_history()
+        mods = [n.module for n in hist]
+        assert "proposed" not in mods
+        assert "root" not in mods
+        assert "real" in mods
+
+    def test_history_includes_cross_run_turns(self):
+        """A turn from a previous run must remain visible — that's how
+        mesmer gets smarter over time."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "target-profiler", "r1 probe",
+                   score=8, module_output="R1 DOSSIER", run_id="run-A")
+        g.add_node(root.id, "direct-ask", "r2 ask",
+                   score=3, module_output="", run_id="run-B")
+        hist = g.conversation_history()
+        run_ids = {n.run_id for n in hist}
+        assert run_ids == {"run-A", "run-B"}
+
+    def test_render_shows_module_score_approach_output(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "target-profiler", "profile defences",
+                   score=8, module_output="DOSSIER", run_id="r")
+        out = g.render_conversation_history()
+        assert "target-profiler" in out
+        assert "score 8" in out
+        assert "profile defences" in out
+        assert "DOSSIER" in out
+
+    def test_render_caps_to_last_n(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        for i in range(20):
+            g.add_node(root.id, f"mod{i}", f"a{i}", score=5,
+                       module_output=f"o{i}", run_id="r")
+        out = g.render_conversation_history(last_n=3)
+        # Only the last three mods appear.
+        assert "mod17" in out
+        assert "mod18" in out
+        assert "mod19" in out
+        assert "mod0" not in out
+        assert "mod10" not in out
+
+    def test_render_truncates_long_turn_output_with_notice(self):
+        """No silent truncation — the reader sees exactly how much was
+        clipped and where the full text lives."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        huge = "X" * 5000
+        g.add_node(root.id, "verbose", "a", score=5,
+                   module_output=huge, run_id="r")
+        out = g.render_conversation_history(max_chars_per_turn=800)
+        assert "see graph.json" in out
+        assert "chars" in out
+
+    def test_render_empty_output_still_shows_turn(self):
+        """A module that ran but produced no conclude text is still a
+        turn in the conversation — reader should see it happened."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "silent-module", "tried", score=4,
+                   module_output="", run_id="r")
+        out = g.render_conversation_history()
+        assert "silent-module" in out
+        assert "no conclude text" in out
+
+
+class TestLearnedExperience:
+    """AttackGraph query methods that turn the graph into the "experience"
+    store — the Planner reads these, and the engine renders
+    render_learned_experience() into every module's user message."""
+
+    def test_winning_modules_ranks_by_best_score(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "instruction-recital", "recite",
+                   score=10, run_id="r1")
+        g.add_node(root.id, "direct-ask", "ask",
+                   score=8, run_id="r1")
+        g.add_node(root.id, "foot-in-door", "warm",
+                   score=4, run_id="r1")  # below default min_score
+        out = g.winning_modules()
+        assert out == [("instruction-recital", 10), ("direct-ask", 8)]
+
+    def test_winning_modules_excludes_frontier(self):
+        """Frontier nodes have score=0 placeholders; they must not
+        appear in winning_modules even with min_score=0."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_frontier_node(root.id, "proposed", "frontier angle")
+        g.add_node(root.id, "real", "explored angle", score=9, run_id="r")
+        out = g.winning_modules(min_score=0)
+        mods = [m for m, _ in out]
+        assert "proposed" not in mods
+        assert "real" in mods
+
+    def test_failed_modules_only_lists_fully_failed(self):
+        """A module with any score above max_score must NOT appear in
+        failed_modules — mixed scores mean the module might still pay
+        off with a new angle."""
+        g = AttackGraph()
+        root = g.ensure_root()
+        # fully failed
+        g.add_node(root.id, "bad", "a1", score=1, run_id="r")
+        g.add_node(root.id, "bad", "a2", score=2, run_id="r")
+        # partially succeeded — not failed
+        g.add_node(root.id, "mixed", "b1", score=1, run_id="r")
+        g.add_node(root.id, "mixed", "b2", score=6, run_id="r")
+        out = g.failed_modules()
+        assert "bad" in out
+        assert "mixed" not in out
+
+    def test_verbatim_leaks_dedupes_exact_matches(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "a", "a1", score=8,
+                   leaked_info="Password is paradox", run_id="r")
+        g.add_node(root.id, "b", "b1", score=9,
+                   leaked_info="Password is paradox", run_id="r")
+        g.add_node(root.id, "c", "c1", score=7,
+                   leaked_info="Access Granted", run_id="r")
+        out = g.verbatim_leaks()
+        assert out.count("Password is paradox") == 1
+        assert "Access Granted" in out
+
+    def test_verbatim_leaks_filters_by_score(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "low", "low angle here plenty", score=3,
+                   leaked_info="should be dropped", run_id="r")
+        g.add_node(root.id, "high", "high angle here plenty", score=7,
+                   leaked_info="keep this", run_id="r")
+        out = g.verbatim_leaks(min_score=5)
+        assert "keep this" in out
+        assert "should be dropped" not in out
+
+    def test_refusal_templates_filters_by_length(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "m", "angle words plenty here", score=2,
+                   run_id="r",
+                   target_responses=[
+                       "Haha, nice try!",
+                       # too short to be a template
+                       "No.",
+                       # too long — likely substantive, not refusal
+                       " ".join(["long"] * 60),
+                   ])
+        out = g.refusal_templates_from_turns()
+        assert "Haha, nice try!" in out
+        assert "No." not in out
+        # No entry in the output is the 60-word string.
+        assert not any("long long" in o and len(o.split()) >= 40 for o in out)
+
+    def test_render_learned_experience_empty_graph(self):
+        g = AttackGraph()
+        g.ensure_root()
+        assert g.render_learned_experience() == ""
+
+    def test_render_learned_experience_shows_wins_and_fails(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        g.add_node(root.id, "winner", "w", score=10,
+                   leaked_info="the password is paradox", run_id="r")
+        g.add_node(root.id, "loser", "l", score=1, run_id="r")
+        out = g.render_learned_experience()
+        assert "winner" in out
+        assert "loser" in out
+        assert "Modules that worked" in out
+        assert "Modules that failed" in out
+        assert "Verbatim leaks" in out
+
+    def test_render_truncation_shows_more_suffix(self):
+        g = AttackGraph()
+        root = g.ensure_root()
+        # 10 winning modules, max_entries=3
+        for i in range(10):
+            g.add_node(root.id, f"mod{i}", f"a{i}", score=10, run_id="r")
+        out = g.render_learned_experience(max_entries=3)
+        assert "(+7 more)" in out
+
 
 class TestLatestExploredNode:
     def test_empty_graph_returns_none(self):

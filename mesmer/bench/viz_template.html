@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{TITLE}}</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --panel-2: #1c2030;
+    --border: #2a2f3d;
+    --text: #e6e8ee;
+    --muted: #8a93a6;
+    --accent: #7aa2f7;
+    --ok: #10b981;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --t0: #10b981;
+    --t1: #f59e0b;
+    --t2: #ef4444;
+    --t3: #8b5cf6;
+    --t-unknown: #6b7280;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    background: var(--panel); position: sticky; top: 0; z-index: 4;
+  }
+  header h1 {
+    font-size: 14px; font-weight: 600; margin: 0;
+    padding-right: 10px; border-right: 1px solid var(--border);
+  }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .sel {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 12px; color: var(--muted);
+  }
+  .sel select {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 3px 6px; font-size: 12px; font-family: var(--mono);
+  }
+  .sel select:focus { outline: 1px solid var(--accent); }
+  header .spacer { flex: 1 0 auto; }
+  .pill {
+    padding: 2px 8px; border-radius: 10px; font-size: 11px;
+    font-family: var(--mono); border: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  .pill.ok { background: rgba(16,185,129,.15); border-color: var(--ok); color: var(--ok); }
+  .pill.err { background: rgba(239,68,68,.15); border-color: var(--err); color: var(--err); }
+  .pill.warn { background: rgba(245,158,11,.15); border-color: var(--warn); color: var(--warn); }
+
+  #banner {
+    padding: 8px 14px; font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  #banner.ok { background: rgba(16,185,129,.08); color: #a7f3d0; }
+  #banner.err { background: rgba(239,68,68,.08); color: #fecaca; }
+  #banner.warn { background: rgba(245,158,11,.08); color: #fde68a; }
+  #banner code { font-family: var(--mono); }
+
+  main {
+    display: grid; grid-template-columns: 1fr 380px;
+    height: calc(100vh - 94px);
+  }
+  #canvas {
+    position: relative; overflow: hidden;
+    background:
+      radial-gradient(circle at 10% 10%, rgba(122,162,247,.04), transparent 40%),
+      radial-gradient(circle at 90% 90%, rgba(139,92,246,.04), transparent 40%),
+      var(--bg);
+  }
+  #canvas svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  #canvas svg:active { cursor: grabbing; }
+  #canvas .toolbar {
+    position: absolute; top: 10px; left: 10px;
+    display: flex; gap: 6px; z-index: 2;
+  }
+  #canvas .toolbar button {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 9px; font: 11px var(--mono); cursor: pointer;
+  }
+  #canvas .toolbar button:hover { border-color: var(--accent); color: var(--accent); }
+
+  .node circle { stroke-width: 1.5px; transition: r 120ms; }
+  .node:hover circle { r: 16; }
+  .node.selected circle { stroke: #fff; stroke-width: 2.5px; }
+  .node text { fill: var(--text); font-size: 11px; font-family: var(--mono); pointer-events: none; }
+  .node .badge { font-size: 12px; }
+  .node.dead circle { stroke-dasharray: 3 2; opacity: .7; }
+  .node.winning circle { filter: drop-shadow(0 0 6px #fff); stroke: #fff; stroke-width: 2.5px; }
+
+  .link { fill: none; stroke: var(--border); stroke-width: 1.2px; }
+  .link.on-winning-path { stroke: #fff; stroke-width: 1.8px; opacity: .8; }
+
+  #detail {
+    border-left: 1px solid var(--border);
+    background: var(--panel); overflow-y: auto;
+    padding: 14px; font-size: 12px;
+  }
+  #detail h2 {
+    margin: 0 0 4px 0; font-size: 14px; font-family: var(--mono);
+    color: var(--accent);
+  }
+  #detail .row {
+    display: flex; justify-content: space-between; align-items: center;
+    border-top: 1px solid var(--border); padding: 6px 0;
+    color: var(--muted); font-size: 11px;
+  }
+  #detail .row b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+  #detail section { margin-top: 14px; }
+  #detail section h3 {
+    margin: 0 0 6px 0; font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+  }
+  #detail .msg {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 5px; padding: 7px 9px; font-family: var(--mono);
+    font-size: 11px; margin-bottom: 6px; white-space: pre-wrap;
+    word-break: break-word; line-height: 1.55;
+  }
+  #detail .msg.me { border-left: 2px solid var(--accent); }
+  #detail .msg.them { border-left: 2px solid #a78bfa; }
+  #detail .msg .lbl {
+    display: block; color: var(--muted); font-size: 10px;
+    letter-spacing: .05em; text-transform: uppercase; margin-bottom: 3px;
+  }
+  #detail .empty { color: var(--muted); font-style: italic; font-size: 11px; }
+  #detail .leaked {
+    background: rgba(16,185,129,.08); border: 1px solid var(--ok);
+    color: #a7f3d0; padding: 6px 8px; border-radius: 5px;
+    font-family: var(--mono); font-size: 11px; word-break: break-word;
+  }
+  #detail pre {
+    background: var(--panel-2); border: 1px solid var(--border);
+    padding: 6px 8px; border-radius: 4px; font-size: 11px;
+    white-space: pre-wrap; word-break: break-word; margin: 0;
+  }
+
+  .tier-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 5px; vertical-align: middle;
+  }
+
+  footer {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 10px; background: var(--panel);
+    border-top: 1px solid var(--border); font-size: 10px;
+    color: var(--muted); font-family: var(--mono);
+  }
+
+  .empty-state {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; height: 100%;
+    color: var(--muted); text-align: center; padding: 24px;
+    font-family: var(--mono); font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>{{HEADER_TITLE}}</h1>
+  <span class="sub" id="meta-sub"></span>
+  <span class="spacer"></span>
+  <div class="sel"><span>target</span><select id="sel-target"></select></div>
+  <div class="sel"><span>arm</span><select id="sel-arm"></select></div>
+  <div class="sel"><span>row</span><select id="sel-row"></select></div>
+  <div class="sel"><span>seed</span><select id="sel-seed"></select></div>
+</header>
+
+<div id="banner" class="warn"><span>Select a trial to render.</span></div>
+
+<main>
+  <div id="canvas">
+    <div class="toolbar">
+      <button id="btn-fit">Fit</button>
+      <button id="btn-expand">Expand all</button>
+      <button id="btn-collapse">Collapse</button>
+    </div>
+    <svg></svg>
+  </div>
+  <aside id="detail">
+    <div class="empty-state">Click a node to inspect it.</div>
+  </aside>
+</main>
+
+<footer>
+  <span id="legend">
+    <span class="tier-dot" style="background:var(--t0)"></span>T0 naive
+    <span class="tier-dot" style="background:var(--t1); margin-left:10px"></span>T1 structural
+    <span class="tier-dot" style="background:var(--t2); margin-left:10px"></span>T2 cognitive
+    <span class="tier-dot" style="background:var(--t3); margin-left:10px"></span>T3 composed
+    <span class="tier-dot" style="background:var(--t-unknown); margin-left:10px"></span>root/unknown
+  </span>
+  <span id="footer-info"></span>
+</footer>
+
+<script type="application/json" id="bench-data">{{BENCH_DATA_JSON}}</script>
+
+{{D3_SCRIPT_TAG}}
+
+<script>
+/* eslint-disable */
+(() => {
+  const TIER_COLOR = {
+    0: "var(--t0)", 1: "var(--t1)", 2: "var(--t2)", 3: "var(--t3)",
+  };
+  const UNKNOWN_COLOR = "var(--t-unknown)";
+
+  const data = JSON.parse(document.getElementById("bench-data").textContent);
+  document.getElementById("meta-sub").textContent =
+    `${data.meta.spec || "bench"} · ${data.meta.version || ""} · run ${data.meta.date || ""} · ${data.trials.length} trials`;
+  document.getElementById("footer-info").textContent =
+    `module: ${data.meta.module || "?"}  ·  dataset sha256: ${(data.meta.dataset_sha256 || "").slice(0,12)}…`;
+
+  /* ---------- cascade selectors ---------- */
+
+  const selT = document.getElementById("sel-target");
+  const selA = document.getElementById("sel-arm");
+  const selR = document.getElementById("sel-row");
+  const selS = document.getElementById("sel-seed");
+
+  function uniq(xs) { return Array.from(new Set(xs)); }
+  function displayVal(v) {
+    // Baselines have seed=null; render as "—" so the dropdown isn't misleading.
+    if (v == null || v === "null" || v === "") return "—";
+    return String(v);
+  }
+  function populate(sel, values, current) {
+    sel.innerHTML = "";
+    for (const v of values) {
+      const opt = document.createElement("option");
+      opt.value = String(v); opt.textContent = displayVal(v);
+      sel.appendChild(opt);
+    }
+    if (current != null && values.map(String).includes(String(current))) sel.value = String(current);
+  }
+
+  function refreshCascade(preferred = {}) {
+    const trials = data.trials;
+    const targets = uniq(trials.map(t => t.target));
+    populate(selT, targets, preferred.target);
+    const cur1 = trials.filter(t => t.target === selT.value);
+
+    const arms = uniq(cur1.map(t => t.arm));
+    // Prefer "mesmer" over "baseline" on first paint — that's the arm
+    // with a graph to explore. Users who actively pick baseline keep it.
+    const defaultArm = preferred.arm ?? (arms.includes("mesmer") ? "mesmer" : arms[0]);
+    populate(selA, arms, defaultArm);
+    const cur2 = cur1.filter(t => t.arm === selA.value);
+
+    const rows = uniq(cur2.map(t => t.sample_id));
+    populate(selR, rows, preferred.sample_id);
+    const cur3 = cur2.filter(t => t.sample_id === selR.value);
+
+    const seeds = uniq(cur3.map(t => t.seed));
+    populate(selS, seeds, preferred.seed);
+  }
+
+  function currentTrial() {
+    return data.trials.find(t =>
+      t.target === selT.value &&
+      t.arm === selA.value &&
+      t.sample_id === selR.value &&
+      String(t.seed) === selS.value
+    );
+  }
+
+  for (const sel of [selT, selA, selR, selS]) {
+    sel.addEventListener("change", () => {
+      // Reset downstream selectors to first-valid each time.
+      if (sel === selT) refreshCascade({ target: selT.value });
+      else if (sel === selA) refreshCascade({ target: selT.value, arm: selA.value });
+      else if (sel === selR) refreshCascade({ target: selT.value, arm: selA.value, sample_id: selR.value });
+      // seed only re-renders.
+      renderCurrent();
+    });
+  }
+
+  refreshCascade();
+
+  /* ---------- banner ---------- */
+
+  function setBanner(trial) {
+    const b = document.getElementById("banner");
+    b.innerHTML = "";
+    const make = (kind, html) => {
+      b.className = kind;
+      b.innerHTML = html;
+    };
+    if (!trial) { make("warn", "<span>No trial selected.</span>"); return; }
+    if (trial.error) {
+      make("warn",
+        `<span class="pill warn">ERROR</span>
+         <span>${esc(trial.error)}</span>
+         <span class="spacer"></span>
+         <span class="sub">trial ${trial.trial_id}</span>`);
+      return;
+    }
+    if (trial.success) {
+      const mod = trial.trace?.winning_module || "?";
+      const tier = trial.trace?.winning_tier;
+      const tierLbl = tier === 0 || tier ? `T${tier}` : "?";
+      make("ok",
+        `<span class="pill ok">SUCCESS</span>
+         <span>won at turn ${trial.canary_turn} via <code>${esc(mod)}</code> (${tierLbl})</span>
+         <span class="sub">matched: “${esc((trial.matched_text || "").slice(0, 60))}”</span>
+         <span class="spacer"></span>
+         <span class="sub">${trial.turns} turns · ${(trial.total_tokens?.total || 0).toLocaleString()} tok · ${trial.duration_s.toFixed(1)}s</span>`);
+      return;
+    }
+    const scores = Object.entries(trial.trace?.per_module_scores || {});
+    let best = { mod: "?", score: 0 };
+    for (const [mod, arr] of scores) {
+      const m = Math.max(0, ...arr);
+      if (m > best.score) best = { mod, score: m };
+    }
+    make("err",
+      `<span class="pill err">FAIL</span>
+       <span>best score ${best.score} via <code>${esc(best.mod)}</code></span>
+       <span class="spacer"></span>
+       <span class="sub">${trial.turns} turns · ${(trial.total_tokens?.total || 0).toLocaleString()} tok · ${trial.duration_s.toFixed(1)}s</span>`);
+  }
+
+  /* ---------- d3 tree render ---------- */
+
+  const svg = d3.select("#canvas svg");
+  const zoomLayer = svg.append("g").attr("class", "zoom");
+  const linkLayer = zoomLayer.append("g").attr("class", "links");
+  const nodeLayer = zoomLayer.append("g").attr("class", "nodes");
+
+  const zoom = d3.zoom()
+    .scaleExtent([0.25, 4])
+    .on("zoom", (ev) => zoomLayer.attr("transform", ev.transform));
+  svg.call(zoom);
+
+  let _collapsed = new Set();
+
+  function buildHierarchy(nodes, rootId) {
+    const seen = new Set();
+    function build(id) {
+      if (seen.has(id) || !nodes[id]) return null;
+      seen.add(id);
+      const n = nodes[id];
+      const childIds = _collapsed.has(id) ? [] : (n.children || []);
+      return {
+        ...n,
+        _childIds: n.children || [],
+        children: childIds.map(build).filter(Boolean),
+      };
+    }
+    return build(rootId);
+  }
+
+  function pickWinningNodeId(trial) {
+    if (!trial.success || !trial.graph) return null;
+    const winMod = trial.trace?.winning_module;
+    if (!winMod) return null;
+    let best = null;
+    for (const [id, n] of Object.entries(trial.graph.nodes)) {
+      if (n.module !== winMod) continue;
+      if (best == null || (n.score || 0) > (trial.graph.nodes[best].score || 0)) {
+        best = id;
+      }
+    }
+    return best;
+  }
+
+  function tierOf(trial, module) {
+    return (trial.module_tiers || {})[module];
+  }
+
+  function colorFor(trial, node) {
+    if (node.module === "root") return UNKNOWN_COLOR;
+    const t = tierOf(trial, node.module);
+    if (t === 0 || t === 1 || t === 2 || t === 3) return TIER_COLOR[t];
+    return UNKNOWN_COLOR;
+  }
+
+  function shortLabel(node) {
+    const mod = node.module || "?";
+    const s = (node.score ?? 0);
+    if (mod === "root") return "root";
+    return `${mod} · s${s}`;
+  }
+
+  function esc(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  let _selectedId = null;
+  let _current = null;
+
+  function renderCurrent() {
+    const trial = currentTrial();
+    _current = trial;
+    setBanner(trial);
+    _selectedId = null;
+    _collapsed = new Set();
+    linkLayer.selectAll("*").remove();
+    nodeLayer.selectAll("*").remove();
+
+    if (!trial || !trial.graph || !trial.graph.root_id) {
+      renderNoGraphState(trial);
+      return;
+    }
+
+    document.getElementById("detail").innerHTML =
+      '<div class="empty-state">Click a node to inspect it.</div>';
+
+    const winId = pickWinningNodeId(trial);
+    drawTree(trial, winId);
+  }
+
+  function renderNoGraphState(trial) {
+    // Baseline trials don't run the ReAct loop → no attack graph is
+    // written. Mesmer trials can also hit this if the snapshot file
+    // went missing. Either way, show the trial metadata in the side
+    // panel and a clear explanation on the canvas.
+    const canvas = document.getElementById("canvas");
+    // Replace the svg (temporarily) with a centred message.
+    const svg = canvas.querySelector("svg");
+    const msgKind = trial
+      ? (trial.arm === "baseline"
+          ? "Baseline trial — single-shot attack, no decision tree."
+          : "No attack graph snapshot was written for this trial.")
+      : "No trial selected.";
+    // Draw into the SVG as a centred text so it survives zoom events.
+    const W = svg.clientWidth, H = svg.clientHeight;
+    nodeLayer.append("text")
+      .attr("x", W / 2).attr("y", H / 2 - 10)
+      .attr("text-anchor", "middle")
+      .attr("fill", "var(--muted)")
+      .attr("font-family", "var(--mono)")
+      .attr("font-size", 13)
+      .text(msgKind);
+    if (trial && trial.arm === "baseline") {
+      nodeLayer.append("text")
+        .attr("x", W / 2).attr("y", H / 2 + 14)
+        .attr("text-anchor", "middle")
+        .attr("fill", "var(--muted)")
+        .attr("font-size", 11)
+        .text("Switch arm → mesmer to see the ReAct decision tree.");
+    }
+    renderTrialMetaPanel(trial);
+  }
+
+  function renderTrialMetaPanel(trial) {
+    const el = document.getElementById("detail");
+    if (!trial) {
+      el.innerHTML = '<div class="empty-state">No trial selected.</div>';
+      return;
+    }
+    const tok = trial.total_tokens || {};
+    const dur = trial.duration_s || 0;
+    const t = trial.trace || {};
+    el.innerHTML = `
+      <h2>Trial summary</h2>
+      <div class="row"><span>target</span><b>${esc(trial.target)}</b></div>
+      <div class="row"><span>arm</span><b>${esc(trial.arm)}</b></div>
+      <div class="row"><span>sample id</span><b>${esc(trial.sample_id)}</b></div>
+      <div class="row"><span>seed</span><b>${trial.seed == null ? "—" : trial.seed}</b></div>
+      <div class="row"><span>run id</span><b>${esc(trial.run_id).slice(0,12) || "—"}</b></div>
+      <div class="row"><span>success</span><b>${trial.success ? "yes" : "no"}</b></div>
+      <div class="row"><span>turns</span><b>${trial.turns}</b></div>
+      <div class="row"><span>duration</span><b>${dur.toFixed(2)}s</b></div>
+      <div class="row"><span>tokens (total)</span><b>${(tok.total || 0).toLocaleString()}</b></div>
+      ${trial.matched_text ? `
+        <section><h3>Matched canary</h3>
+          <div class="leaked">🎯 ${esc(trial.matched_text)}</div></section>` : ""}
+      ${trial.error ? `
+        <section><h3>Error</h3><pre>${esc(trial.error)}</pre></section>` : ""}
+      ${t.events_path ? `
+        <section><h3>Events path</h3>
+          <pre>${esc(t.events_path)}</pre></section>` : ""}
+      ${trial.arm === "baseline" ? `
+        <section><h3>Why no tree?</h3>
+          <div class="empty">Baseline trials are single-shot: one attack prompt
+          from the dataset's <code>baseline_attack</code> column, one target
+          response, pass/fail by canary scan. No ReAct loop runs, so there's
+          no attack graph to visualise.</div></section>` : ""}
+    `;
+  }
+
+  function fitToView(root) {
+    const bbox = nodeLayer.node().getBBox();
+    const svgEl = svg.node();
+    const W = svgEl.clientWidth, H = svgEl.clientHeight;
+    const pad = 40;
+    const scale = Math.min(
+      (W - pad * 2) / Math.max(bbox.width, 1),
+      (H - pad * 2) / Math.max(bbox.height, 1),
+      1.2
+    );
+    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale;
+    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale;
+    svg.transition().duration(300)
+      .call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+  }
+
+  function winningPathIds(trial, winId) {
+    if (!winId || !trial.graph) return new Set();
+    const path = new Set();
+    let cur = winId;
+    while (cur) {
+      path.add(cur);
+      cur = trial.graph.nodes[cur]?.parent_id;
+    }
+    return path;
+  }
+
+  function drawTree(trial, winId) {
+    const hData = buildHierarchy(trial.graph.nodes, trial.graph.root_id);
+    if (!hData) return;
+    const root = d3.hierarchy(hData);
+
+    // Dynamic size based on node count so big trees don't squish.
+    const nNodes = root.descendants().length;
+    const nodeHSpace = 180;
+    const nodeVSpace = 52;
+    const treeLayout = d3.tree().nodeSize([nodeVSpace, nodeHSpace]);
+    treeLayout(root);
+
+    const winPath = winningPathIds(trial, winId);
+
+    linkLayer.selectAll("path").remove();
+    linkLayer.selectAll("path")
+      .data(root.links(), d => `${d.source.data.id}->${d.target.data.id}`)
+      .join("path")
+      .attr("class", d =>
+        "link" + (winPath.has(d.source.data.id) && winPath.has(d.target.data.id) ? " on-winning-path" : "")
+      )
+      .attr("d", d3.linkHorizontal().x(d => d.y).y(d => d.x));
+
+    nodeLayer.selectAll("g").remove();
+    const nodeSel = nodeLayer.selectAll("g")
+      .data(root.descendants(), d => d.data.id)
+      .join("g")
+      .attr("class", d => {
+        let cls = "node";
+        if (d.data.status === "dead") cls += " dead";
+        if (d.data.id === winId) cls += " winning";
+        return cls;
+      })
+      .attr("transform", d => `translate(${d.y},${d.x})`)
+      .on("click", (ev, d) => {
+        ev.stopPropagation();
+        _selectedId = d.data.id;
+        renderDetail(trial, d.data);
+        nodeLayer.selectAll("g.node").classed(
+          "selected", g => g.data.id === _selectedId
+        );
+      });
+
+    nodeSel.append("circle")
+      .attr("r", 14)
+      .attr("fill", d => colorFor(trial, d.data))
+      .attr("stroke", "rgba(255,255,255,.2)");
+
+    // text label under node
+    nodeSel.append("text")
+      .attr("y", 30).attr("text-anchor", "middle")
+      .text(d => shortLabel(d.data));
+
+    // human-seeded badge
+    nodeSel.filter(d => d.data.source === "human")
+      .append("text")
+      .attr("class", "badge").attr("x", 0).attr("y", -18)
+      .attr("text-anchor", "middle").text("★");
+
+    // collapsible chevron when node has hidden children
+    nodeSel.filter(d => (d.data._childIds || []).length > (d.data.children || []).length)
+      .append("text")
+      .attr("class", "badge").attr("x", 18).attr("y", 5)
+      .attr("text-anchor", "start").attr("fill", "var(--muted)")
+      .text("+");
+
+    // Double-click on node toggles its subtree.
+    nodeSel.on("dblclick", (ev, d) => {
+      ev.stopPropagation();
+      if (_collapsed.has(d.data.id)) _collapsed.delete(d.data.id);
+      else _collapsed.add(d.data.id);
+      drawTree(trial, winId);
+    });
+
+    // Fit after paint.
+    requestAnimationFrame(() => fitToView(root));
+  }
+
+  /* ---------- detail panel ---------- */
+
+  function renderDetail(trial, node) {
+    const tier = tierOf(trial, node.module);
+    const tierLbl = (tier === 0 || tier) ? `T${tier}` : "—";
+    const isWinning = trial.trace?.winning_module === node.module &&
+                      node.id === pickWinningNodeId(trial);
+    const el = document.getElementById("detail");
+    const msgs = node.messages_sent || [];
+    const resps = node.target_responses || [];
+    const pairs = [];
+    const n = Math.max(msgs.length, resps.length);
+    for (let i = 0; i < n; i++) {
+      pairs.push({ sent: msgs[i] ?? "", got: resps[i] ?? "" });
+    }
+
+    el.innerHTML = `
+      <h2>${esc(node.module)}${isWinning ? ' <span class="pill ok">WINNING</span>' : ''}</h2>
+      <div class="row"><span>tier</span><b><span class="tier-dot" style="background:${colorFor(trial, node)}"></span>${tierLbl}</b></div>
+      <div class="row"><span>score</span><b>${node.score ?? 0}</b></div>
+      <div class="row"><span>status</span><b>${esc(node.status || "?")}</b></div>
+      <div class="row"><span>source</span><b>${esc(node.source || "?")}</b></div>
+      <div class="row"><span>depth</span><b>${node.depth ?? 0}</b></div>
+      <div class="row"><span>node id</span><b>${esc(node.id).slice(0,12)}</b></div>
+      ${node.approach ? `
+        <section><h3>Approach</h3><pre>${esc(node.approach)}</pre></section>` : ""}
+      ${pairs.length ? `
+        <section><h3>Exchange</h3>
+          ${pairs.map((p, i) => `
+            ${p.sent ? `<div class="msg me"><span class="lbl">attacker → target · turn ${i+1}</span>${esc(p.sent)}</div>` : ""}
+            ${p.got ? `<div class="msg them"><span class="lbl">target → attacker</span>${esc(p.got)}</div>` : ""}
+          `).join("")}
+        </section>` : ""}
+      ${node.leaked_info ? `
+        <section><h3>Leaked info (judge extract)</h3>
+          <div class="leaked">🎯 ${esc(node.leaked_info)}</div></section>` : ""}
+      ${node.reflection ? `
+        <section><h3>Reflection</h3><pre>${esc(node.reflection)}</pre></section>` : ""}
+      ${node.module_output ? `
+        <section><h3>Module output (conclude)</h3><pre>${esc(node.module_output)}</pre></section>` : ""}
+      ${!node.approach && !pairs.length && !node.leaked_info && !node.reflection && !node.module_output
+        ? '<div class="empty">No data captured for this node.</div>' : ""}
+    `;
+  }
+
+  /* ---------- toolbar ---------- */
+
+  document.getElementById("btn-fit").addEventListener("click", () => {
+    if (_current && _current.graph) {
+      const root = d3.hierarchy(buildHierarchy(_current.graph.nodes, _current.graph.root_id));
+      d3.tree().nodeSize([52, 180])(root);
+      fitToView(root);
+    }
+  });
+  document.getElementById("btn-expand").addEventListener("click", () => {
+    _collapsed = new Set();
+    if (_current) drawTree(_current, pickWinningNodeId(_current));
+  });
+  document.getElementById("btn-collapse").addEventListener("click", () => {
+    if (!_current || !_current.graph) return;
+    _collapsed = new Set();
+    for (const [id, n] of Object.entries(_current.graph.nodes)) {
+      if ((n.children || []).length && n.depth >= 1) _collapsed.add(id);
+    }
+    drawTree(_current, pickWinningNodeId(_current));
+  });
+
+  /* ---------- boot ---------- */
+
+  renderCurrent();
+})();
+</script>
+</body>
+</html>

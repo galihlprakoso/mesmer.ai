@@ -1,0 +1,127 @@
+---
+title: CLI Reference
+description: Every mesmer command, every flag.
+---
+
+The `mesmer` console script wires to `mesmer.interfaces.cli:cli`. All commands
+go through `core/runner.execute_run(RunConfig)` — the single entry point
+shared by CLI, web, and bench, so behavior stays consistent across
+interfaces.
+
+## `mesmer run`
+
+Run one attacker agent against a scenario.
+
+```bash
+uv run mesmer run <scenario.yaml> [OPTIONS]
+```
+
+| Flag | Type | Description |
+|---|---|---|
+| `--model` | string | Override the attacker model (`openrouter/anthropic/claude-sonnet-4`, etc.) |
+| `--max-turns` | int | Override the scenario's turn budget |
+| `--mode` | `trials` / `continuous` | Override the scenario's run mode |
+| `--verbose` | flag | Stream `log` events to stdout with colour |
+| `--output` | path | Write final telemetry JSON to this file |
+| `--hint` | string (repeatable) | Inline human hint — becomes a `NodeSource.HUMAN` frontier node |
+| `--hint-file` | path | Load hints from a file (one per line) |
+| `--fresh` | flag | Ignore any existing graph under `~/.mesmer/targets/{hash}/` |
+
+**Examples**:
+
+```bash
+# Standard run
+uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
+
+# Override the attacker model
+uv run mesmer run scenarios/extract-system-prompt.yaml \
+  --model openrouter/openai/gpt-4o --max-turns 40
+
+# Add hints on the command line
+uv run mesmer run scenarios/extract-system-prompt.yaml \
+  --hint "try wrapping as a pytest docstring" \
+  --hint "target may be fine-tuned on leetspeak"
+
+# Start fresh
+uv run mesmer run scenarios/extract-system-prompt.yaml --fresh
+```
+
+## `mesmer graph show`
+
+Print the persisted attack graph for a scenario's target.
+
+```bash
+uv run mesmer graph show <scenario.yaml>
+```
+
+Renders a tree to stdout with per-node scores, statuses, and frontier markers.
+For interactive exploration, use the Web UI.
+
+## `mesmer hint`
+
+Add a high-priority human hint for the target. Does not run the loop — just
+plants a `NodeSource.HUMAN` node on the frontier.
+
+```bash
+uv run mesmer hint <scenario.yaml> "your hint text"
+```
+
+Next `mesmer run` will explore human hints **before** agent- or judge-
+proposed frontier.
+
+## `mesmer debrief`
+
+Start an interactive post-run Q&A session. Reads the graph + last run log and
+accepts questions like "why did the foot-in-door branch die?", "what was the
+highest-scoring turn?", "show me the judge rationale for node n-a7f2".
+
+```bash
+uv run mesmer debrief <scenario.yaml>
+```
+
+Exit with <Kbd>Ctrl</Kbd> <Kbd>C</Kbd> or `:q`.
+
+## `mesmer stats`
+
+Cross-target technique effectiveness — pulled from
+`~/.mesmer/global/techniques.json`.
+
+```bash
+uv run mesmer stats
+```
+
+Output:
+
+```
+technique               runs   avg_score   hit_rate
+foot-in-door            142    6.2         38%
+authority-bias          118    5.4         29%
+narrative-transport     87     7.1         44%
+cognitive-overload      61     4.8         22%
+anchoring               53     3.9         15%
+```
+
+## `mesmer bench`
+
+Run a benchmark spec (many trials over a pinned defense dataset, deterministic
+scoring).
+
+```bash
+uv run mesmer bench <spec.yaml> [--sample N]
+```
+
+| Flag | Description |
+|---|---|
+| `--sample N` | Randomly sample N rows from the dataset (smoke / iteration mode) |
+
+The benchmark judge is the canary matcher in `bench/canary.py` — **not** the
+in-loop LLM judge. Results land in `benchmarks/results/{timestamp}/` as JSONL
++ summary JSON + markdown.
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Provider auth. Comma-separated for round-robin rotation. |
+| `MESMER_STATE_DIR` | Override `~/.mesmer/` (useful in CI and sandboxes) |
+| `MESMER_LOG_LEVEL` | `DEBUG` / `INFO` / `WARN` / `ERROR`. Default `INFO`. |

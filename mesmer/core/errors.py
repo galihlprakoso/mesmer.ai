@@ -60,3 +60,43 @@ class CompressionLLMError(CompressionError):
         self.reason = reason
         self.cause = cause
         super().__init__(reason)
+
+
+# --- Module configuration ---
+
+class InvalidModuleConfig(MesmerError):
+    """Raised when a ``module.yaml`` declares a field outside its allowed range.
+
+    Carries ``module_name``, ``field``, and ``value`` so the loader can point
+    the operator at the exact misconfigured file. Currently emitted for
+    ``tier`` values outside 0..3 — the tier contract documented in
+    :class:`ModuleConfig`.
+    """
+
+    def __init__(self, module_name: str, field: str, value: object, *, reason: str = ""):
+        self.module_name = module_name
+        self.field = field
+        self.value = value
+        self.reason = reason
+        msg = f"invalid {field}={value!r} on module {module_name!r}"
+        if reason:
+            msg = f"{msg}: {reason}"
+        super().__init__(msg)
+
+
+# --- Throttle (keys.py) ---
+
+class ThrottleTimeout(MesmerError):
+    """Raised when ``KeyPool.acquire`` cannot obtain a slot within the
+    throttle's ``max_wait_seconds`` budget.
+
+    Carries ``gate`` — which constraint blocked us (``"max_concurrent"``,
+    ``"max_rpm"``, or ``"all_keys_cooled"``) — so ``execute_run``'s error
+    surfacing gives operators an actionable message instead of a silent
+    0-turn trial.
+    """
+
+    def __init__(self, gate: str, *, waited_s: float = 0.0):
+        self.gate = gate
+        self.waited_s = waited_s
+        super().__init__(f"throttle timeout at gate={gate} after {waited_s:.1f}s")

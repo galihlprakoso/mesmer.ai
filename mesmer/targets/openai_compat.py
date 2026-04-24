@@ -6,6 +6,7 @@ import os
 
 import openai
 
+from mesmer.core.keys import KeyPool, ThrottleConfig, get_or_create_pool
 from mesmer.targets.base import Target, Turn
 
 
@@ -24,6 +25,7 @@ class OpenAITarget(Target):
         system_prompt: str = "",
         temperature: float = 0.7,
         user_turn_suffix: str = "",
+        throttle: ThrottleConfig | None = None,
     ):
         self.model = model
         self.system_prompt = system_prompt
@@ -42,6 +44,18 @@ class OpenAITarget(Target):
             base_url=base_url,
             api_key=resolved_key or "missing-key",
         )
+
+        # Target-side throttle — symmetric with ``AgentConfig.throttle``.
+        # When ``throttle`` is set, ``send()`` acquires a slot on a shared
+        # :class:`KeyPool` before dispatching the request and releases
+        # afterwards. The pool is pulled from the process-level cache keyed
+        # on the API-key tuple so sibling bench trials against the same
+        # provider key share one budget — essential for Groq-style free
+        # tiers where the quota is global to the key, not per-request.
+        # ``None`` disables throttling (legacy behaviour).
+        self._pool: KeyPool | None = None
+        if throttle is not None:
+            self._pool = get_or_create_pool([resolved_key], throttle=throttle)
 
         # Messages sent to the target API (includes system prompt)
         self._messages: list[dict] = []
@@ -63,16 +77,33 @@ class OpenAITarget(Target):
         wrapped = self._apply_suffix(message)
         self._messages.append({"role": "user", "content": wrapped})
 
-        response = await self._client.chat.completions.create(
-            model=self.model,
-            messages=self._messages,
-            temperature=self.temperature,
-        )
+        # Throttle gate — blocks on rpm / concurrency / cooldown-wall caps
+        # when one is configured. ``ThrottleTimeout`` propagates naturally:
+        # ``execute_run`` catches it into a ``"Error: ..."`` result so the
+        # bench orchestrator surfaces the wait-budget failure as the
+        # trial's ``error`` field instead of a silent 0-turn stall.
+        pool_active = self._pool is not None and self._pool.throttle.is_active
+        if pool_active:
+            await self._pool.acquire()
+        try:
+            response = await self._client.chat.completions.create(
+                model=self.model,
+                messages=self._messages,
+                temperature=self.temperature,
+            )
+        finally:
+            if pool_active:
+                self._pool.release()
 
         reply = response.choices[0].message.content or ""
         self._messages.append({"role": "assistant", "content": reply})
         self._history.append(Turn(sent=wrapped, received=reply))
         self.last_usage = getattr(response, "usage", None)
+        # Capture the provider-side checkpoint identifier so reproducibility
+        # holds even when model strings (``llama-3.1-8b-instant``) don't date
+        # themselves. OpenAI, Groq and most OpenAI-compat providers return it.
+        fingerprint = getattr(response, "system_fingerprint", None)
+        self.last_fingerprint = fingerprint if fingerprint else None
 
         return reply
 

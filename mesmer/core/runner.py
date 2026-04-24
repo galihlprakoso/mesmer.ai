@@ -206,6 +206,22 @@ async def execute_run(
         _turns=seeded_turns,
     )
 
+    # Seed the scratchpad from the graph's conversation history. Walk
+    # oldest → newest so the latest-wins semantic falls out naturally:
+    # if ``target-profiler`` ran twice, the newer dossier overwrites
+    # the older slot. Empty outputs are skipped so a module that only
+    # produced target messages (no authored conclude text) doesn't
+    # clutter the pad.
+    #
+    # This is how the scratchpad carries cross-run knowledge forward:
+    # a second run against a known target starts with the latest
+    # profiler dossier + latest plan already on the pad, so the first
+    # sub-module delegation already sees it.
+    for node in graph.conversation_history():
+        output = (node.module_output or "").strip()
+        if output:
+            ctx.scratchpad.set(node.module, output)
+
     # Wrap log_fn to also emit graph snapshots
     # on_graph_update fires BEFORE log so the graph ref is set before broadcast
     actual_log = log
@@ -220,6 +236,12 @@ async def execute_run(
             if event == "graph_update":
                 on_graph_update(graph)
         actual_log = _graph_only_log
+
+    # Bind the log onto the Context so every :meth:`Context.completion`
+    # call (attacker, judge, compressor) can emit a structured
+    # LLM_COMPLETION event without needing the caller to thread ``log``
+    # through every signature. child() propagates this onto sub-contexts.
+    ctx.log = actual_log
 
     # Run
     try:

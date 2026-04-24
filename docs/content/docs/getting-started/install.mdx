@@ -1,0 +1,55 @@
+---
+title: Install
+description: Get mesmer running on your machine in under two minutes.
+---
+
+Mesmer requires **Python 3.10+** and uses [`uv`](https://docs.astral.sh/uv/)
+for dependency management. All provider calls go through **LiteLLM**, so any
+model string LiteLLM understands (`openrouter/...`, `anthropic/...`,
+`ollama/...`, `gemini/...`) works as-is.
+
+## From source (recommended for v0.1)
+
+```bash
+git clone https://github.com/galihlprakoso/mesmer.git
+cd mesmer
+uv sync
+```
+
+Optional: pull in the web UI extras.
+
+```bash
+uv sync --extra web
+```
+
+## API keys
+
+Mesmer uses whatever provider your scenario references. At minimum you'll need
+one of:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+# or
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+**Pro tip.** Mesmer supports **round-robin key rotation**: pass a
+comma-separated list and rate-limits cool down individual keys instead of
+sleeping the whole run.
+
+```bash
+export OPENROUTER_API_KEY="sk-or-aaa,sk-or-bbb,sk-or-ccc"
+```
+
+See [CLI Reference](/docs/cli) for all flags, or jump to the
+[Quickstart](/docs/getting-started/quickstart) to run your first attack.
+
+## Verify the install
+
+```bash
+uv run mesmer --help
+uv run pytest
+```
+
+The test suite runs in ~3 seconds against echo targets — no external calls.

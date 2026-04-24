@@ -1,0 +1,181 @@
+@import "tailwindcss";
+@import "fumadocs-ui/css/preset.css";
+
+/* ---------------------------------------------------------------------------
+   Mesmer Phosphor Theme — dark-mode only
+   Palette: bg #0A0E0C · surface #141A17 · fg #E6EDE8 · muted #6B7A70 · accent #00D67A
+   Accent is ~5% of pixels. Body, borders, UI chrome stay neutral.
+   --------------------------------------------------------------------------- */
+
+@font-face {
+  font-family: "Departure Mono";
+  src: url("/fonts/departure-mono.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  /* Typography wiring — next/font exposes the vars, we consume them here */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-geist), var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SFMono-Regular", monospace;
+  --font-pixel: "Departure Mono", var(--font-jetbrains-mono), monospace;
+
+  /* Fumadocs palette — phosphor on near-black */
+  --color-fd-background: hsl(144 17% 5%);         /* #0A0E0C */
+  --color-fd-foreground: hsl(140 12% 91%);        /* #E6EDE8 */
+  --color-fd-muted: hsl(144 12% 10%);             /* #141A17 */
+  --color-fd-muted-foreground: hsl(140 7% 45%);   /* #6B7A70 */
+  --color-fd-popover: hsl(144 14% 8%);
+  --color-fd-popover-foreground: hsl(140 12% 91%);
+  --color-fd-card: hsl(144 12% 10%);              /* #141A17 */
+  --color-fd-card-foreground: hsl(140 12% 91%);
+  --color-fd-border: hsla(140, 10%, 30%, 0.3);
+  --color-fd-primary: hsl(155 100% 42%);          /* #00D67A */
+  --color-fd-primary-foreground: hsl(144 17% 5%);
+  --color-fd-secondary: hsl(144 12% 12%);
+  --color-fd-secondary-foreground: hsl(140 12% 91%);
+  --color-fd-accent: hsla(155, 100%, 42%, 0.12);
+  --color-fd-accent-foreground: hsl(155 100% 72%);
+  --color-fd-ring: hsl(155 100% 42%);
+
+  /* shadcn-compatible tokens — kept in lockstep with fumadocs */
+  --color-background: hsl(144 17% 5%);
+  --color-foreground: hsl(140 12% 91%);
+  --color-muted: hsl(144 12% 10%);
+  --color-muted-foreground: hsl(140 7% 45%);
+  --color-popover: hsl(144 14% 8%);
+  --color-popover-foreground: hsl(140 12% 91%);
+  --color-card: hsl(144 12% 10%);
+  --color-card-foreground: hsl(140 12% 91%);
+  --color-border: hsla(140, 10%, 30%, 0.3);
+  --color-input: hsla(140, 10%, 30%, 0.3);
+  --color-primary: hsl(155 100% 42%);
+  --color-primary-foreground: hsl(144 17% 5%);
+  --color-secondary: hsl(144 12% 12%);
+  --color-secondary-foreground: hsl(140 12% 91%);
+  --color-accent: hsl(144 12% 12%);
+  --color-accent-foreground: hsl(140 12% 91%);
+  --color-destructive: hsl(0 84% 60%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+  --color-ring: hsl(155 100% 42%);
+
+  --radius: 0.375rem;
+}
+
+/* Force dark mode regardless of class (we're dark-only) */
+html {
+  color-scheme: dark;
+}
+
+.dark {
+  /* No-op: our @theme values are already dark. Defined so Fumadocs' dark
+     class detection doesn't error. */
+  --color-fd-background: hsl(144 17% 5%);
+  --color-fd-foreground: hsl(140 12% 91%);
+  --color-fd-muted: hsl(144 12% 10%);
+  --color-fd-muted-foreground: hsl(140 7% 45%);
+  --color-fd-popover: hsl(144 14% 8%);
+  --color-fd-popover-foreground: hsl(140 12% 91%);
+  --color-fd-card: hsl(144 12% 10%);
+  --color-fd-card-foreground: hsl(140 12% 91%);
+  --color-fd-border: hsla(140, 10%, 30%, 0.3);
+  --color-fd-primary: hsl(155 100% 42%);
+  --color-fd-primary-foreground: hsl(144 17% 5%);
+  --color-fd-secondary: hsl(144 12% 12%);
+  --color-fd-secondary-foreground: hsl(140 12% 91%);
+  --color-fd-accent: hsla(155, 100%, 42%, 0.12);
+  --color-fd-accent-foreground: hsl(155 100% 72%);
+  --color-fd-ring: hsl(155 100% 42%);
+}
+
+body {
+  background: var(--color-fd-background);
+  color: var(--color-fd-foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  position: relative;
+}
+
+/* Fixed phosphor grid behind everything — site-wide subtle accent.
+   Very faint by default; slight glow near the top so hero feels warmer. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(hsla(155, 100%, 42%, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, hsla(155, 100%, 42%, 0.06) 1px, transparent 1px);
+  background-size: 56px 56px;
+  background-position: -1px -1px;
+  mask-image: radial-gradient(
+    ellipse 120% 80% at 50% 0%,
+    black 0%,
+    black 40%,
+    hsla(0, 0%, 0%, 0.4) 70%,
+    transparent 100%
+  );
+}
+
+/* Lift actual content above the grid pseudo-element */
+body > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Opt-in denser grid utility — used for the hero if we want more zing */
+.bg-grid {
+  background-image:
+    linear-gradient(hsla(155, 100%, 42%, 0.10) 1px, transparent 1px),
+    linear-gradient(90deg, hsla(155, 100%, 42%, 0.10) 1px, transparent 1px);
+  background-size: 48px 48px;
+  background-position: -1px -1px;
+  mask-image: radial-gradient(ellipse 80% 50% at 50% 0%, black 40%, transparent 100%);
+}
+
+/* Phosphor glow — use sparingly on accent text only */
+.text-phosphor {
+  color: var(--color-fd-primary);
+  text-shadow: 0 0 12px hsla(155, 100%, 42%, 0.35);
+}
+
+/* Utility: pixel-label (Departure Mono, tracked, uppercase small) */
+.pixel-label {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.6875rem;
+}
+
+/* Scrollbar — thin, restrained */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-fd-background);
+}
+::-webkit-scrollbar-thumb {
+  background: hsla(140, 10%, 30%, 0.4);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsla(140, 10%, 40%, 0.6);
+}
+
+/* Selection — phosphor on phosphor */
+::selection {
+  background: hsla(155, 100%, 42%, 0.35);
+  color: var(--color-fd-foreground);
+}
+
+/* Shiki code block tweaks — align with phosphor palette */
+[data-rehype-pretty-code-fragment] pre {
+  background: var(--color-fd-card) !important;
+  border: 1px solid var(--color-fd-border);
+}

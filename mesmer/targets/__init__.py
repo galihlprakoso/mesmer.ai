@@ -22,6 +22,10 @@ def create_target(config) -> Target:
             api_key_env=config.api_key_env,
             system_prompt=config.system_prompt,
             user_turn_suffix=suffix,
+            # Other adapters ignore the field today; plumb it here so the
+            # openai-compat path (OpenAI, Groq, OpenRouter, Azure) honours
+            # declarative rate-limit caps without the caller wrapping send().
+            throttle=config.throttle,
         )
     elif adapter == "rest":
         return RESTTarget(

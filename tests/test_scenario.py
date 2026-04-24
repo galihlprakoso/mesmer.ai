@@ -53,11 +53,11 @@ class TestScenarioJudgeConfig:
             + "judge:\n"
             + "  rubric_additions: |\n"
             + "    Credit refusal lists as 5+.\n"
-            + "    Score safety-profiler on profile quality.\n",
+            + "    Score target-profiler on profile quality.\n",
         )
         s = load_scenario(p)
         assert "Credit refusal lists" in s.judge_rubric_additions
-        assert "safety-profiler" in s.judge_rubric_additions
+        assert "target-profiler" in s.judge_rubric_additions
 
     def test_whitespace_only_rubric_is_trimmed_to_empty(self, tmp_path):
         p = _write(
@@ -334,3 +334,39 @@ class TestAgentConfigYamlParsing:
         assert s.agent.max_context_tokens == 0
         assert s.agent.compression_keep_recent == 1
         assert s.agent.compression_target_ratio == 0.6
+
+
+class TestTargetThrottleYamlParsing:
+    """Scenario YAMLs can declare a per-target throttle block for provider-side
+    rate-limit gating. Parsed onto :class:`TargetConfig.throttle` so
+    ``create_target`` can build the backing :class:`KeyPool`."""
+
+    def test_target_throttle_block_parses(self, tmp_path):
+        p = _write(
+            tmp_path,
+            "name: t\ndescription: d\n"
+            "target:\n"
+            "  adapter: openai\n"
+            "  base_url: http://127.0.0.1\n"
+            "  model: m\n"
+            "  api_key: k\n"
+            "  throttle:\n"
+            "    max_rpm: 12\n"
+            "    max_concurrent: 3\n"
+            "    max_wait_seconds: 120\n"
+            "objective:\n  goal: g\n"
+            "module: m\n"
+            "agent:\n  model: a/b\n  api_key: dummy\n",
+        )
+        s = load_scenario(p)
+        assert s.target.throttle is not None
+        assert s.target.throttle.max_rpm == 12
+        assert s.target.throttle.max_concurrent == 3
+        assert s.target.throttle.max_wait_seconds == 120.0
+
+    def test_target_without_throttle_leaves_field_none(self, tmp_path):
+        """Legacy scenarios without a ``throttle:`` block keep the field
+        ``None`` — ``OpenAITarget`` then takes the unthrottled path."""
+        p = _write(tmp_path, MINIMAL_SCENARIO)
+        s = load_scenario(p)
+        assert s.target.throttle is None

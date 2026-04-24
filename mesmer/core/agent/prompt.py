@@ -84,9 +84,21 @@ def _build_graph_context(ctx: "Context") -> str:
     items FIRST (frontier-to-execute, human hints), then dead-ends to avoid,
     then the summary, then budget mode last. This makes frontier suggestions
     unmissable instead of buried mid-text.
+
+    TAPER: every frontier line is prefixed with its module's tier ([T0]/[T1]
+    /[T2]/[T3]). When tier-0/1 items coexist with higher-tier items, a
+    trailing directive teaches the leader to climb the ladder bottom-up.
+    Human ★ beats tier — a hint still renders first regardless.
     """
     parts: list[str] = []
     graph = ctx.graph
+
+    # Build a tier map once for this render — cheap dict comprehension keyed by
+    # every module that's currently referenced in the graph.
+    tiers: dict[str, int] = {}
+    if ctx.registry and graph and len(graph) > 1:
+        mods = {n.module for n in graph.iter_nodes() if n.module and n.module != "root"}
+        tiers = ctx.registry.tiers_for(list(mods))
 
     if graph and len(graph) > 1:  # more than just root
         # --- TOP PRIORITY: frontier nodes to execute NEXT ---
@@ -94,15 +106,28 @@ def _build_graph_context(ctx: "Context") -> str:
         if frontier:
             parts.append(
                 "## FRONTIER — START HERE (pass frontier_id to execute)\n"
-                "These are refinements proposed by prior reflections. "
-                "PREFER these over fresh attempts. Human-marked ★ first."
+                "Tier ladder: [T0] naive/direct → [T1] structural → "
+                "[T2] cognitive → [T3] composed. Human ★ beats tier.\n"
+                "PREFER these over fresh attempts."
             )
+            frontier_tiers: list[int] = []
             for n in frontier:
                 parent = graph.nodes.get(n.parent_id) if n.parent_id else None
                 parent_info = f"parent score:{parent.score}" if parent else "root"
                 source_tag = " ★ HUMAN" if n.source == NodeSource.HUMAN else ""
+                tier = tiers.get(n.module, 2)
+                frontier_tiers.append(tier)
                 parts.append(
-                    f"- [{n.id}] {n.module}: {n.approach} ({parent_info}){source_tag}"
+                    f"- [T{tier}] [{n.id}] {n.module}: {n.approach} "
+                    f"({parent_info}){source_tag}"
+                )
+            # Emit the ladder directive only when a ladder exists —
+            # no nudge when everything is the same tier.
+            if frontier_tiers and min(frontier_tiers) < max(frontier_tiers):
+                lowest = min(frontier_tiers)
+                parts.append(
+                    f"\n→ Tier-{lowest} frontier items available — attempt "
+                    f"these BEFORE higher-tier items."
                 )
             parts.append("")  # blank line
 
@@ -115,7 +140,7 @@ def _build_graph_context(ctx: "Context") -> str:
             )
 
         # --- Full graph summary (now below frontier) ---
-        parts.append(graph.format_summary())
+        parts.append(graph.format_summary(tiers=tiers or None))
 
     # Budget mode — keep last so it's the final reminder
     mode = ctx.budget_mode

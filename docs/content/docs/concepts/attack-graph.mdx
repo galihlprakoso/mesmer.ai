@@ -1,0 +1,125 @@
+---
+title: The attack graph
+description: Mesmer's per-target memory — an MCTS-inspired tree of attack attempts.
+---
+
+Every time mesmer attacks a target, it writes the result into a graph. Every
+subsequent run reads that graph back before planning the next move. This is
+what makes mesmer **adaptive** — the attacker gets smarter with exposure.
+
+## Shape
+
+Nodes are attack attempts. Edges are parent-child refinements.
+
+<AsciiDiagram caption="A mid-run graph against a single target.">
+{`
+                         ┌──────────────┐
+                         │ ROOT         │
+                         │ target-hash  │
+                         └──────┬───────┘
+                                │
+                ┌───────────────┼──────────────────┐
+                ▼               ▼                  ▼
+       ┌──────────────┐  ┌──────────────┐   ┌──────────────┐
+       │ safety-probe │  │ foot-in-door │   │  anchoring   │
+       │ score: 3.2   │  │ score: 6.8   │   │ score: 2.1   │
+       │ status: DEAD │  │ status:ALIVE │   │ status: DEAD │
+       └──────────────┘  └──────┬───────┘   └──────────────┘
+                                │
+                ┌───────────────┼──────────────┐
+                ▼               ▼              ▼
+       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+       │ escalate +1  │  │ escalate +2  │  │ human hint   │
+       │ score: 7.2   │  │ score: 8.4   │  │ score: —     │
+       │ :PROMISING   │  │ :PROMISING   │  │ :FRONTIER    │
+       └──────────────┘  └──────────────┘  └──────────────┘
+`}
+</AsciiDiagram>
+
+## Node anatomy
+
+```json
+{
+  "id": "n-a7f2",
+  "parent": "n-a7f0",
+  "module": "foot-in-door",
+  "score": 6.8,
+  "status": "ALIVE",
+  "source": "AGENT",
+  "rationale": "target complied with trivial request; next step should escalate",
+  "turn_range": [5, 7]
+}
+```
+
+Four **lifecycle statuses** — all live in the `NodeStatus` enum in
+`core/constants.py`:
+
+| Status | Meaning |
+|---|---|
+| `FRONTIER` | Proposed but not yet tried. The planner picks from this set. |
+| `ALIVE` | Tried with promising results. May be revisited to refine. |
+| `PROMISING` | High-scoring descendent candidates. Priority on next run. |
+| `DEAD` | Score below `DEAD_SCORE_THRESHOLD` or explicitly killed by the judge. Never re-walked. |
+
+## Three kinds of proposer
+
+Every node has a `source` field recording who proposed it:
+
+- **`AGENT`** — the ReAct loop proposed it during `_reflect_and_expand`.
+- **`JUDGE`** — the in-loop LLM judge surfaced it while scoring an attempt
+  ("the target leaked auth context, try that angle").
+- **`HUMAN`** — came in via `mesmer hint` or the web UI. These are explored
+  **first** on the next run — human pattern-matching beats the judge for
+  creative leaps.
+
+## Persistence
+
+```
+~/.mesmer/targets/{hash}/
+├── graph.json          # the full node tree — see above
+├── profile.md          # defense profile from safety-profiler
+├── plan.md             # optional human-authored plan
+├── conversation.json   # CONTINUOUS-mode rolling context
+└── runs/
+    ├── 2026-04-24-...jsonl  # append-only Turn log
+    └── 2026-04-25-...jsonl
+```
+
+The `{hash}` is `sha256(adapter | url | model)` truncated to 16 hex chars.
+Different model versions hash differently, so upgrading your target doesn't
+corrupt old state — it branches into a fresh graph.
+
+Pass `--fresh` to any `mesmer run` invocation to bypass loading the existing
+graph. Useful when your target fundamentally changed and the old attack
+history is misleading.
+
+## Budget modes
+
+The planner's prompt framing shifts based on where you are in the turn budget
+(`Context.budget`). Three modes, all in the `BudgetMode` enum:
+
+1. **`EXPLORE`** — early turns. Frontier nodes get a score bonus so new
+   techniques get tried before well-worn ones.
+2. **`EXPLOIT`** — mid-run. The current best node's descendants get the
+   bonus. Refinement over discovery.
+3. **`CONCLUDE`** — final ~10% of turns. Planner is instructed to stop
+   branching and drive the strongest lead to completion.
+
+The thresholds are constants in `core/constants.py`
+(`BUDGET_EXPLORE_UPPER_RATIO`, `BUDGET_EXPLOIT_UPPER_RATIO`) — tunable, not
+hardcoded in prompts.
+
+## The judge vs the graph
+
+Two scoring systems coexist, and it is important they stay distinct:
+
+- **In-loop LLM judge** (`core/agent/judge.py`) — 1-10 rubric per attempt,
+  extracts insights, proposes frontier. Drives graph updates and next-move
+  selection. **Not authoritative for benchmarks.**
+- **Deterministic canary matcher** (`bench/canary.py`) — substring match
+  against known canaries in the target's defense. Zero LLM, zero randomness.
+  This is what decides benchmark success.
+
+If you're running `mesmer run`, the judge's score is what matters. If you're
+running `mesmer bench`, the canary matcher decides — see
+[Benchmarks](/docs/modules) (coming soon).

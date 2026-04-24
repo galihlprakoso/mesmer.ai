@@ -78,6 +78,26 @@ class TestTargetMemory:
     def test_load_profile_no_file(self, memory):
         assert memory.load_profile() is None
 
+    def test_save_profile_is_atomic(self, memory):
+        """Atomic write means readers never see a half-written file even
+        if the writer crashes mid-flush. Simulate a forced failure and
+        verify the prior profile.md content stays intact."""
+        from unittest.mock import patch
+        # Seed with valid content.
+        memory.save_profile("# First\n\nOriginal notes.")
+        first_text = memory.profile_path.read_text()
+
+        with patch("mesmer.core.agent.memory.os.replace",
+                   side_effect=OSError("simulated crash")):
+            with pytest.raises(OSError):
+                memory.save_profile("# Second\n\nWould-be overwrite.")
+
+        # Prior state preserved; no leftover tmpfile pollution.
+        assert memory.profile_path.read_text() == first_text
+        leftovers = [p for p in memory.base_dir.iterdir()
+                     if p.name.startswith("profile.md.")]
+        assert leftovers == []
+
     def test_save_and_load_plan(self, memory):
         plan = "# Attack Plan\n\nFocus on behavioral rules. Avoid identity claims."
         memory.save_plan(plan)

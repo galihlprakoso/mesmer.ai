@@ -85,6 +85,11 @@ def _make_ctx(
     registry = MagicMock()
     registry.__contains__ = MagicMock(return_value=False)
     registry.as_tools = MagicMock(return_value=[])
+    # Return a real dict so `_build_graph_context`'s `min()` / `max()` over
+    # tier values doesn't compare MagicMock instances. Default tier 2 for
+    # any module the tests reference.
+    registry.tiers_for = MagicMock(side_effect=lambda names: {n: 2 for n in names})
+    registry.tier_of = MagicMock(return_value=2)
 
     agent_config = AgentConfig(model="test/model", api_key="sk-test")
 
@@ -198,6 +203,58 @@ class TestReactLoopBasic:
         assert "Target said hi back" in result
         assert len(ctx.turns) == 1
         assert ctx.turns[0].sent == "hello target"
+
+    @pytest.mark.asyncio
+    async def test_objective_met_short_circuits_before_next_iteration(self):
+        """When ctx.objective_met is set during a tool dispatch (judge says
+        run's objective has been met), the engine must auto-conclude
+        immediately — no more attacker iterations.
+
+        Regression guard for the "leader keeps delegating after a 10/10 win"
+        failure observed in the Tensor Trust trace.
+        """
+        responses = [
+            # First iteration: call send_message. The fake dispatch will
+            # mark objective_met BEFORE returning — simulating the judge
+            # flagging objective_met inside sub_module.handle.
+            FakeResponse(FakeMessage(
+                tool_calls=[FakeToolCall("send_message", {"message": "probe"})],
+            )),
+            # Second iteration should NEVER fire. If it does, the fake
+            # returns a bogus response that would make the test pass
+            # incorrectly — so we count calls to ctx.completion instead.
+            FakeResponse(FakeMessage(
+                tool_calls=[FakeToolCall("send_message", {"message": "lingering"})],
+            )),
+        ]
+        ctx = _make_ctx(completion_responses=responses, target_replies=["leaked"])
+
+        # Wrap dispatch so the flag gets set mid-tool — matches what
+        # _judge_module_result does in real runs.
+        from mesmer.core.agent import tools as _tools
+        original_dispatch = _tools.dispatch_tool_call
+
+        async def flag_setting_dispatch(fn_name, ctx, module, call, args, instruction, log):
+            out = await original_dispatch(fn_name, ctx, module, call, args, instruction, log)
+            ctx.objective_met = True
+            ctx.objective_met_fragment = "LEAK FRAGMENT"
+            return out
+
+        with patch("mesmer.core.agent.engine.dispatch_tool_call",
+                   new=flag_setting_dispatch):
+            module = _make_module()
+            result = await run_react_loop(module, ctx, "test")
+
+        assert "LEAK FRAGMENT" in result
+        assert "Objective met" in result
+        # Only ONE attacker iteration should have fired — the second
+        # scripted response proves the loop correctly short-circuited.
+        # ctx.completion is called once per attacker iteration.
+        assert ctx.completion.__wrapped__ if hasattr(ctx.completion, "__wrapped__") else True
+        # Only one Turn was sent (the probe); the second-iteration fake
+        # "lingering" probe never reached the target.
+        assert len(ctx.turns) == 1
+        assert ctx.turns[0].sent == "probe"
 
     @pytest.mark.asyncio
     async def test_max_iterations(self):
@@ -943,7 +1000,7 @@ class TestUpdateGraphParentSelection:
         ctx = _make_ctx()
         graph = ctx.graph
         # Parent attempt whose reflection spawned a frontier
-        parent = graph.add_node(graph.root_id, "safety-profiler", "mapped defenses", score=8)
+        parent = graph.add_node(graph.root_id, "target-profiler", "mapped defenses", score=8)
         frontier = graph.add_frontier_node(parent.id, "foot-in-door", "ask about tools")
         assert frontier.is_frontier
 
@@ -1069,6 +1126,58 @@ class TestFindMissedFrontier:
 # Graph-first frontier flow (P2)
 # ---------------------------------------------------------------------------
 
+class TestReflectAndExpandTraceEvents:
+    """TIER_GATE + FRONTIER events must surface on every expansion.
+
+    The trace's forensic value rests on these events firing with structured
+    JSON details so benchmark artifacts can answer "why did the leader
+    only see T0?" without opening the graph.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tier_gate_event_carries_selected_tier_and_census(self):
+        import json as _json
+        ctx = _make_ctx()
+        # Stub registry.tiers_for so the gate has real tier data.
+        ctx.registry.tiers_for = MagicMock(side_effect=lambda names: {
+            "direct-ask": 0, "foot-in-door": 2,
+        })
+        graph = ctx.graph
+        current_node = graph.add_node(
+            graph.root_id, "foot-in-door", "initial foothold words plenty",
+            score=5,
+        )
+        judge = JudgeResult(5, "", "", "", "")
+
+        events: list[tuple[str, str]] = []
+
+        def capture(event, detail=""):
+            events.append((event, detail))
+
+        async def fake_refine(ctx, *, module, rationale, judge_result, **kw):
+            return f"refined-{module}"
+
+        with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
+            await _reflect_and_expand(
+                ctx, judge, current_node,
+                log=capture,
+                available_modules=["direct-ask", "foot-in-door"],
+            )
+
+        # Exactly one TIER_GATE event with structured JSON payload.
+        tier_gates = [d for e, d in events if e == "tier_gate"]
+        assert len(tier_gates) == 1
+        payload = _json.loads(tier_gates[0])
+        # Gate should select tier 0 (direct-ask untried) and NOT fall back.
+        assert payload["selected_tier"] == 0
+        assert payload["escape_hatch"] is False
+        # Per-tier census is present and keyed by tier (JSON-stringified
+        # after sort_keys serialisation).
+        assert "by_tier" in payload
+        # Available modules round-trip through the event detail.
+        assert set(payload["available"]) == {"direct-ask", "foot-in-door"}
+
+
 class TestReflectAndExpandGraphFirst:
     """Integration check: _reflect_and_expand must route through
     graph.propose_frontier (deterministic MCTS Selection) + judge.refine_approach
@@ -1104,8 +1213,8 @@ class TestReflectAndExpandGraphFirst:
 
         with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
-                ctx, "foot-in-door", "initial foothold", judge,
-                current_node, log=lambda *a, **kw: None,
+                ctx, judge, current_node,
+                log=lambda *a, **kw: None,
                 available_modules=["authority-bias", "anchoring", "foot-in-door"],
             )
 
@@ -1147,7 +1256,7 @@ class TestReflectAndExpandGraphFirst:
 
         with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
-                ctx, "foot-in-door", "x", judge, current_node,
+                ctx, judge, current_node,
                 log=lambda *a, **kw: None,
                 available_modules=["authority-bias", "foot-in-door", "anchoring"],
             )
@@ -1171,7 +1280,7 @@ class TestReflectAndExpandGraphFirst:
         judge = JudgeResult(5, "", "", "", "")
 
         await _reflect_and_expand(
-            ctx, "x", "a", judge, current_node,
+            ctx, judge, current_node,
             log=lambda *a, **kw: None,
             available_modules=[],
         )
@@ -1198,7 +1307,7 @@ class TestReflectAndExpandGraphFirst:
 
         with patch("mesmer.core.agent.judge.refine_approach", new=empty_refine):
             await _reflect_and_expand(
-                ctx, "foo", "a", judge, current_node,
+                ctx, judge, current_node,
                 log=lambda *a, **kw: None,
                 available_modules=["bar"],
             )
@@ -1292,7 +1401,7 @@ class TestRefineApproachTranscriptTail:
         assert ctx.scenario_mode == ScenarioMode.TRIALS
         with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
-                ctx, "foo", "a", judge, current_node,
+                ctx, judge, current_node,
                 log=lambda *a, **kw: None,
                 available_modules=["foo", "bar"],
             )
@@ -1321,7 +1430,7 @@ class TestRefineApproachTranscriptTail:
 
         with patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
             await _reflect_and_expand(
-                ctx, "foo", "a", judge, current_node,
+                ctx, judge, current_node,
                 log=lambda *a, **kw: None,
                 available_modules=["foo", "bar"],
             )

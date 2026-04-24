@@ -99,6 +99,7 @@ class TestOpenAITargetSuffix:
         fake_response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="reply"))],
             usage=None,
+            system_fingerprint="fp_abc123",
         )
         create_mock = AsyncMock(return_value=fake_response)
         target._client.chat.completions.create = create_mock  # type: ignore[attr-defined]
@@ -114,6 +115,41 @@ class TestOpenAITargetSuffix:
         # System prompt stays as-is — it's pre_prompt, not pre+post.
         sys_msgs = [m for m in call_kwargs["messages"] if m["role"] == "system"]
         assert sys_msgs == [{"role": "system", "content": "SYS"}]
+
+
+@pytest.mark.asyncio
+class TestOpenAITargetFingerprint:
+    """Provider-side checkpoint capture — load-bearing for reproducibility
+    when model strings (e.g. ``llama-3.1-8b-instant``) don't carry dates."""
+
+    async def test_captures_system_fingerprint_from_response(self):
+        target = OpenAITarget(base_url="http://unused", model="m", api_key="k")
+        fake_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+            usage=None,
+            system_fingerprint="fp_deadbeef",
+        )
+        target._client.chat.completions.create = AsyncMock(  # type: ignore[attr-defined]
+            return_value=fake_response
+        )
+
+        await target.send("hi")
+        assert target.last_fingerprint == "fp_deadbeef"
+
+    async def test_leaves_none_when_provider_omits_fingerprint(self):
+        """Providers that omit ``system_fingerprint`` leave the field None."""
+        target = OpenAITarget(base_url="http://unused", model="m", api_key="k")
+        # SimpleNamespace without the attr → getattr returns None → stored as None.
+        fake_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+            usage=None,
+        )
+        target._client.chat.completions.create = AsyncMock(  # type: ignore[attr-defined]
+            return_value=fake_response
+        )
+
+        await target.send("hi")
+        assert target.last_fingerprint is None
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +247,118 @@ class TestWebSocketTargetSuffix:
 
 
 # ---------------------------------------------------------------------------
+# Target-side throttle — every ``openai_compat`` call goes through a pool
+# when a ThrottleConfig is attached. Mirrors the attacker-side retry.py
+# contract so provider-side rate limits surface as ThrottleTimeout instead
+# of silent send() failures.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestOpenAITargetThrottle:
+    async def test_no_pool_when_throttle_is_none(self):
+        """Legacy path — no throttle config, no pool, send() unchanged."""
+        target = OpenAITarget(base_url="http://unused", model="m", api_key="k")
+        assert target._pool is None
+
+    async def test_pool_created_when_throttle_configured(self):
+        """Throttle config → pool built via get_or_create_pool → cache-shared."""
+        from mesmer.core.keys import ThrottleConfig, clear_pool_cache
+
+        clear_pool_cache()
+        throttle = ThrottleConfig(max_rpm=5, max_concurrent=1)
+        target = OpenAITarget(
+            base_url="http://unused", model="m", api_key="secret-k",
+            throttle=throttle,
+        )
+        assert target._pool is not None
+        assert target._pool.throttle.max_rpm == 5
+        assert target._pool.throttle.max_concurrent == 1
+
+    async def test_send_acquires_and_releases_on_success(self):
+        """Every send() pairs one acquire with one release — no slot leaks."""
+        from mesmer.core.keys import ThrottleConfig, clear_pool_cache
+
+        clear_pool_cache()
+        target = OpenAITarget(
+            base_url="http://unused", model="m", api_key="k",
+            throttle=ThrottleConfig(max_concurrent=1),
+        )
+
+        # Spy on the pool's acquire / release.
+        acquire_spy = AsyncMock()
+        release_spy = pytest.MonkeyPatch()
+        calls: list[str] = []
+
+        async def fake_acquire(log=None):
+            calls.append("acquire")
+
+        def fake_release():
+            calls.append("release")
+
+        target._pool.acquire = fake_acquire  # type: ignore[method-assign]
+        target._pool.release = fake_release  # type: ignore[method-assign]
+
+        fake_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="r"))],
+            usage=None,
+        )
+        target._client.chat.completions.create = AsyncMock(  # type: ignore[attr-defined]
+            return_value=fake_response
+        )
+
+        await target.send("hi")
+        assert calls == ["acquire", "release"]
+        _ = acquire_spy, release_spy  # silence lints
+
+    async def test_send_releases_on_provider_error(self):
+        """If the provider call raises, release still fires — no slot leak."""
+        from mesmer.core.keys import ThrottleConfig, clear_pool_cache
+
+        clear_pool_cache()
+        target = OpenAITarget(
+            base_url="http://unused", model="m", api_key="k",
+            throttle=ThrottleConfig(max_concurrent=1),
+        )
+
+        calls: list[str] = []
+
+        async def fake_acquire(log=None):
+            calls.append("acquire")
+
+        def fake_release():
+            calls.append("release")
+
+        target._pool.acquire = fake_acquire  # type: ignore[method-assign]
+        target._pool.release = fake_release  # type: ignore[method-assign]
+        target._client.chat.completions.create = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=RuntimeError("boom"),
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await target.send("hi")
+        assert calls == ["acquire", "release"]
+
+    async def test_shared_pool_across_targets_with_same_key(self):
+        """Two OpenAITargets with the same key share one pool — essential
+        for bench trials against the same provider quota (e.g. Groq's
+        per-key rate limit)."""
+        from mesmer.core.keys import ThrottleConfig, clear_pool_cache
+
+        clear_pool_cache()
+        throttle = ThrottleConfig(max_rpm=10, max_concurrent=2)
+        t1 = OpenAITarget(
+            base_url="http://u", model="m1", api_key="shared-k",
+            throttle=throttle,
+        )
+        t2 = OpenAITarget(
+            base_url="http://u", model="m2", api_key="shared-k",
+            throttle=throttle,
+        )
+        assert t1._pool is t2._pool
+
+
+# ---------------------------------------------------------------------------
 # Factory — make sure create_target threads the suffix through for every kind.
 # ---------------------------------------------------------------------------
 
@@ -226,6 +374,7 @@ class TestCreateTargetThreadsSuffix:
             api_key_env="",
             system_prompt="sys",
             user_turn_suffix="POST",
+            throttle=None,
         )
         t = create_target(cfg)
         assert isinstance(t, OpenAITarget)

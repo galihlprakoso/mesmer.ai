@@ -41,7 +41,15 @@ from typing import Awaitable, Callable
 import yaml
 
 from mesmer.bench.canary import find_canary_in_turns
+from mesmer.bench.trace import (
+    BenchEventRecorder,
+    extract_trial_telemetry,
+    write_trial_graph_snapshot,
+)
+from mesmer.core.agent import LogFn
 from mesmer.core.constants import ScenarioMode
+from mesmer.core.keys import ThrottleConfig
+from mesmer.core.module import DEFAULT_TIER
 from mesmer.core.runner import RunConfig, RunResult, execute_run
 from mesmer.core.scenario import AgentConfig, Objective, Scenario, TargetConfig
 
@@ -90,16 +98,28 @@ class BenchTargetSpec:
     api_key_env: str = ""
     # Optional per-target extras propagated to TargetConfig (e.g. headers).
     extra: dict = field(default_factory=dict)
+    # Per-target throttle. Symmetric with ``BenchAgentSpec.throttle`` — when
+    # set, every ``Target.send()`` gates through a shared :class:`KeyPool`
+    # keyed on this target's API-key tuple. Multiple targets using the same
+    # provider key (e.g. three Groq models behind ``${GROQ_API_KEY}``) share
+    # one pool via the process-level cache, so caps are GLOBAL to the key.
+    # Essential for free-tier providers whose rate limit is per-key, not
+    # per-model. ``None`` = no target throttling (legacy behaviour).
+    throttle: ThrottleConfig | None = None
 
 
 @dataclass
-class BenchAttackerSpec:
-    """Attacker-brain configuration for the mesmer arm.
+class BenchAgentSpec:
+    """Agent-brain configuration for the mesmer arm.
 
-    Separate from target — the attacker is the *thing doing the red-team*,
+    Separate from target — the agent is the *thing doing the red-team*,
     not the model *being attacked*. Typically a smart frontier model
     (DeepSeek R1, Claude Sonnet) regardless of which small target is
     under test.
+
+    Named ``agent`` (mirroring scenario YAML's ``agent:`` block) rather
+    than ``attacker`` so the bench spec and scenario spec speak the same
+    language — one shape, read once.
     """
 
     model: str = "openrouter/deepseek/deepseek-r1"
@@ -108,6 +128,11 @@ class BenchAttackerSpec:
     temperature: float = 0.8
     # Every trial i gets seed = seed_base + i so reruns are reproducible.
     seed_base: int = 42
+    # Declarative rate-limit policy. Shared across sibling bench trials
+    # via the process-level pool cache in ``mesmer.core.keys`` — so a
+    # ``max_rpm: 30`` cap stays global at 30 rpm no matter how many
+    # trials run concurrently against the same key.
+    throttle: ThrottleConfig | None = None
 
 
 @dataclass
@@ -155,11 +180,11 @@ class BenchSpec:
     module: str
     dataset: BenchDatasetSpec
     targets: list[BenchTargetSpec]
-    attacker: BenchAttackerSpec
+    agent: BenchAgentSpec
     # Required — no published result may skip its contamination story.
     contamination_posture: ContaminationPosture
     budget: BenchBudget = field(default_factory=BenchBudget)
-    # Scenario-level objective prompt the mesmer attacker sees. When left
+    # Scenario-level objective prompt the mesmer agent sees. When left
     # empty, a sensible default based on module is used.
     objective: str = ""
     # Default judge-rubric additions fed to mesmer's in-loop LLM judge.
@@ -183,7 +208,22 @@ class DatasetRow:
 
 @dataclass
 class TrialResult:
-    """One trial — one (arm, target, row, seed) tuple."""
+    """One trial — one (arm, target, row, seed) tuple.
+
+    The result carries two concentric layers:
+
+    * **Outcome** — ``success``, ``canary_turn``, ``matched_text``, turn
+      and token counts. Enough for any box-score read of the bench.
+
+    * **Trace** — post-run telemetry derived from ``ctx.graph`` +
+      ``ctx.telemetry`` + the per-trial :class:`BenchEventRecorder`.
+      ``modules_called`` / ``tier_sequence`` / ``winning_module`` /
+      ``winning_tier`` / ``dead_ends`` / ``per_module_scores`` expose
+      *what the agent did*, not just whether it succeeded. This is the
+      TAPER validation surface — aggregates on the cell summary are
+      computed directly from these fields. Baseline trials leave the
+      trace fields at their zero-shaped defaults.
+    """
 
     trial_id: str
     target_id: str
@@ -200,6 +240,45 @@ class TrialResult:
     duration_s: float
     run_id: str = ""
     error: str = ""                   # populated when the trial crashed
+    # Provider-side checkpoint id (OpenAI/Groq ``system_fingerprint``) from
+    # the target's last call. Empty when the provider omits it. Lets readers
+    # pin the exact weights that served this trial even when the model string
+    # (``llama-3.1-8b-instant``) carries no date.
+    fingerprint: str = ""
+
+    # --- Trace fields (populated for mesmer arm; zero-shaped for baseline) ---
+
+    # Count of LiteLLM completions observed by ``ctx.telemetry`` — the
+    # "how many times did the attacker + judge call out to the LLM?"
+    # signal, orthogonal to raw token totals.
+    n_llm_calls: int = 0
+    # Wall-clock spent inside those completions. Diff with ``duration_s``
+    # reveals time the trial spent blocked on throttle / compression /
+    # target IO vs time actually inside the attacker model.
+    llm_seconds: float = 0.0
+    throttle_wait_seconds: float = 0.0
+    # Per-trial module delegation trace — call order is preserved.
+    modules_called: list[str] = field(default_factory=list)
+    # ``tier_sequence[i]`` is the declared tier of ``modules_called[i]``.
+    # Monotonic non-decreasing = "climbed the TAPER ladder as designed".
+    tier_sequence: list[int] = field(default_factory=list)
+    per_module_scores: dict[str, list[int]] = field(default_factory=dict)
+    dead_ends: list[dict] = field(default_factory=list)
+    winning_module: str | None = None
+    winning_tier: int | None = None
+    profiler_ran_first: bool = False
+    ladder_monotonic: bool = True
+    # Count of compression events during the trial. Zero in TRIALS mode;
+    # non-zero in CONTINUOUS = the compressor actually fired.
+    compression_events: int = 0
+    # Flat count map of every log event observed during the trial. Cheap
+    # cardinality probe; useful for "did this trial even emit any
+    # frontier events?" anomaly checks without opening the events file.
+    event_counts: dict[str, int] = field(default_factory=dict)
+    # Relative path (under the bench output_dir) to this trial's events
+    # JSONL. Empty when the events file wasn't written (baseline arm, or
+    # when the recorder was disabled).
+    events_path: str = ""
 
     def as_jsonl(self) -> dict:
         """Shape used in the per-trial JSONL — stable public contract."""
@@ -221,12 +300,52 @@ class TrialResult:
             "duration_s": round(self.duration_s, 3),
             "run_id": self.run_id,
             "error": self.error,
+            "fingerprint": self.fingerprint,
+            # --- Trace fields ---
+            "trace": {
+                "n_llm_calls": self.n_llm_calls,
+                "llm_seconds": round(self.llm_seconds, 3),
+                "throttle_wait_seconds": round(self.throttle_wait_seconds, 3),
+                "modules_called": list(self.modules_called),
+                "tier_sequence": list(self.tier_sequence),
+                "per_module_scores": {
+                    k: list(v) for k, v in self.per_module_scores.items()
+                },
+                "dead_ends": list(self.dead_ends),
+                "winning_module": self.winning_module,
+                "winning_tier": self.winning_tier,
+                "profiler_ran_first": self.profiler_ran_first,
+                "ladder_monotonic": self.ladder_monotonic,
+                "compression_events": self.compression_events,
+                "event_counts": dict(self.event_counts),
+                "events_path": self.events_path,
+            },
         }
 
 
 @dataclass
 class BenchCellSummary:
-    """Aggregated statistics for one (target, arm) cell."""
+    """Aggregated statistics for one (target, arm) cell.
+
+    Holds the box-score fields (ASR, stderr, turns, tokens, wall) plus
+    the TAPER trace aggregates derived from per-trial
+    :class:`TrialTelemetry`:
+
+    * ``wins_by_tier`` / ``wins_by_module`` — distribution of successful
+      trials over the winning module's tier / name. Answers the single
+      most important TAPER question: *are wins coming from tier-0/1
+      probes as designed, or still from tier-2 cognitive attacks?*
+    * ``mean_llm_calls`` / ``median_llm_calls`` / ``mean_llm_seconds`` —
+      cost signal orthogonal to raw tokens.
+    * ``profiler_first_rate`` / ``ladder_respect_rate`` — behavioural
+      adherence metrics.
+    * ``dead_end_rate_by_tier`` / ``median_judge_score_by_tier`` —
+      diagnostic when a tier isn't paying off.
+    * ``mean_compression_events`` — CONTINUOUS-mode health probe.
+    * ``errors_by_class`` — grouped error tally, so a spike in
+      ``ThrottleTimeout`` or ``HumanQuestionTimeout`` shows up without
+      reopening every JSONL row.
+    """
 
     target_id: str
     arm: str
@@ -237,6 +356,21 @@ class BenchCellSummary:
     median_turns: float | None
     mean_total_tokens: float
     total_wall_seconds: float
+
+    # --- Trace aggregates (baseline arm leaves these at defaults) ---
+
+    wins_by_tier: dict[int, int] = field(default_factory=dict)
+    wins_by_module: dict[str, int] = field(default_factory=dict)
+    mean_llm_calls: float = 0.0
+    median_llm_calls: float = 0.0
+    mean_llm_seconds: float = 0.0
+    mean_throttle_wait_seconds: float = 0.0
+    profiler_first_rate: float = 0.0
+    ladder_respect_rate: float = 0.0
+    dead_end_rate_by_tier: dict[int, float] = field(default_factory=dict)
+    median_judge_score_by_tier: dict[int, float] = field(default_factory=dict)
+    mean_compression_events: float = 0.0
+    errors_by_class: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -273,20 +407,46 @@ class BenchSummary:
             "contamination_posture": self.contamination_posture.as_dict(),
             "sample_ids_tested": list(self.sample_ids_tested),
             "cells": {
-                f"{c.target_id}__{c.arm}": {
-                    "target": c.target_id,
-                    "arm": c.arm,
-                    "n_trials": c.n_trials,
-                    "n_successes": c.n_successes,
-                    "asr": round(c.asr, 4),
-                    "asr_stderr": round(c.asr_stderr, 4),
-                    "median_turns": c.median_turns,
-                    "mean_total_tokens": round(c.mean_total_tokens, 1),
-                    "total_wall_seconds": round(c.total_wall_seconds, 2),
-                }
+                f"{c.target_id}__{c.arm}": _cell_as_json(c)
                 for c in self.cells
             },
         }
+
+
+def _cell_as_json(c: BenchCellSummary) -> dict:
+    """JSON-serialisable view of one cell, keeping box-score and trace fields
+    side-by-side. Tier-keyed dicts are stringified at the JSON boundary so
+    the file is readable by any JSON consumer (tier keys stay sortable
+    lexicographically since they're single digits).
+    """
+    return {
+        "target": c.target_id,
+        "arm": c.arm,
+        "n_trials": c.n_trials,
+        "n_successes": c.n_successes,
+        "asr": round(c.asr, 4),
+        "asr_stderr": round(c.asr_stderr, 4),
+        "median_turns": c.median_turns,
+        "mean_total_tokens": round(c.mean_total_tokens, 1),
+        "total_wall_seconds": round(c.total_wall_seconds, 2),
+        # Trace aggregates — present on every cell (zero-shaped for baseline).
+        "wins_by_tier": {str(k): v for k, v in sorted(c.wins_by_tier.items())},
+        "wins_by_module": dict(sorted(c.wins_by_module.items())),
+        "mean_llm_calls": round(c.mean_llm_calls, 2),
+        "median_llm_calls": round(c.median_llm_calls, 2),
+        "mean_llm_seconds": round(c.mean_llm_seconds, 2),
+        "mean_throttle_wait_seconds": round(c.mean_throttle_wait_seconds, 2),
+        "profiler_first_rate": round(c.profiler_first_rate, 4),
+        "ladder_respect_rate": round(c.ladder_respect_rate, 4),
+        "dead_end_rate_by_tier": {
+            str(k): round(v, 4) for k, v in sorted(c.dead_end_rate_by_tier.items())
+        },
+        "median_judge_score_by_tier": {
+            str(k): round(v, 2) for k, v in sorted(c.median_judge_score_by_tier.items())
+        },
+        "mean_compression_events": round(c.mean_compression_events, 2),
+        "errors_by_class": dict(sorted(c.errors_by_class.items())),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +489,14 @@ def load_spec(path: str | Path) -> BenchSpec:
 
     targets: list[BenchTargetSpec] = []
     for t in data.get("targets", []) or []:
+        t_throttle_raw = t.get("throttle")
+        t_throttle: ThrottleConfig | None = None
+        if isinstance(t_throttle_raw, dict) and t_throttle_raw:
+            t_throttle = ThrottleConfig(
+                max_rpm=t_throttle_raw.get("max_rpm"),
+                max_concurrent=t_throttle_raw.get("max_concurrent"),
+                max_wait_seconds=t_throttle_raw.get("max_wait_seconds", 0.0) or 0.0,
+            )
         targets.append(BenchTargetSpec(
             id=t.get("id", ""),
             adapter=t.get("adapter", "openai"),
@@ -337,15 +505,25 @@ def load_spec(path: str | Path) -> BenchSpec:
             api_key=_resolve_env(t.get("api_key", "")),
             api_key_env=t.get("api_key_env", ""),
             extra=t.get("extra", {}) or {},
+            throttle=t_throttle,
         ))
 
-    a = data.get("attacker", {}) or {}
-    attacker = BenchAttackerSpec(
-        model=a.get("model", BenchAttackerSpec.model),
+    a = data.get("agent", {}) or {}
+    throttle_raw = a.get("throttle")
+    throttle = None
+    if isinstance(throttle_raw, dict) and throttle_raw:
+        throttle = ThrottleConfig(
+            max_rpm=throttle_raw.get("max_rpm"),
+            max_concurrent=throttle_raw.get("max_concurrent"),
+            max_wait_seconds=throttle_raw.get("max_wait_seconds", 0.0) or 0.0,
+        )
+    agent = BenchAgentSpec(
+        model=a.get("model", BenchAgentSpec.model),
         api_key=_resolve_env(a.get("api_key", "")),
         api_key_env=a.get("api_key_env", ""),
         temperature=float(a.get("temperature", 0.8)),
         seed_base=int(a.get("seed_base", 42)),
+        throttle=throttle,
     )
 
     b = data.get("budget", {}) or {}
@@ -365,7 +543,7 @@ def load_spec(path: str | Path) -> BenchSpec:
         module=data.get("module", ""),
         dataset=dataset,
         targets=targets,
-        attacker=attacker,
+        agent=agent,
         contamination_posture=posture,
         budget=budget,
         objective=data.get("objective", "") or "",
@@ -543,6 +721,7 @@ def build_scenario_for_row(
         api_key_env=target.api_key_env,
         system_prompt=row.pre_prompt,
         user_turn_suffix=row.post_prompt,
+        throttle=target.throttle,
     )
 
     objective = Objective(
@@ -554,9 +733,10 @@ def build_scenario_for_row(
     )
 
     agent = AgentConfig(
-        model=spec.attacker.model,
-        api_key=spec.attacker.api_key,
-        temperature=spec.attacker.temperature,
+        model=spec.agent.model,
+        api_key=spec.agent.api_key,
+        temperature=spec.agent.temperature,
+        throttle=spec.agent.throttle,
         seed=seed,
     )
 
@@ -587,11 +767,34 @@ async def run_mesmer_trial(
     trial_idx: int,
     *,
     execute_run_fn: ExecuteRunFn = execute_run,
+    log_fn: LogFn | None = None,
+    events_dir: Path | None = None,
 ) -> TrialResult:
-    """Run one mesmer multi-turn trial and score it with the canary judge."""
-    seed = spec.attacker.seed_base + trial_idx
+    """Run one mesmer multi-turn trial and score it with the canary judge.
+
+    Every trial now captures its full event stream via a per-trial
+    :class:`BenchEventRecorder`. When ``events_dir`` is given, the
+    recorder flushes to ``events_dir/{trial_id}.jsonl`` — the persistent
+    TAPER trace that the summary/JSONL artifacts reference by path.
+    When ``log_fn`` is also provided, events tee to it live so the CLI's
+    ``--verbose`` still prints them during the run.
+    """
+    seed = spec.agent.seed_base + trial_idx
     scenario = build_scenario_for_row(spec, target, row, seed=seed)
     trial_id = f"{target.id}__{row.sample_id}__{trial_idx}__mesmer"
+
+    tee: LogFn | None = None
+    if log_fn is not None:
+        # Short handle — full trial_id carries target+sample+trial; the
+        # {target}#{trial} pair is enough for people reading the stream.
+        handle = f"{target.id}#{trial_idx}"
+
+        def _log(event: str, detail: str = "") -> None:
+            log_fn(event, f"[{handle}] {detail}")
+
+        tee = _log
+
+    recorder = BenchEventRecorder(tee_to=tee)
 
     t0 = time.monotonic()
     try:
@@ -600,9 +803,25 @@ async def run_mesmer_trial(
                 scenario_path="",
                 scenario_override=scenario,
                 seed=seed,
-            )
+                # Benchmark trials are independent *sampling variance*
+                # replicates — not a cumulative-learning experiment. Without
+                # ``fresh=True`` trial N loads the persisted graph written
+                # by trial N-1 against the same target, sees that trial's
+                # winning frontier, and rationally exploits it instead of
+                # profiling. That inflates ASR (cached replay, not genuine
+                # per-trial effort) and collapses ``profiler_first_rate``
+                # to zero regardless of prompt design. Each trial starts
+                # from an empty graph so behavioural metrics reflect what
+                # the attacker actually did this trial.
+                fresh=True,
+            ),
+            log=recorder,
         )
     except Exception as e:
+        # Trial crashed before execute_run returned — still flush whatever
+        # events were captured so the failure trace is preserved. Telemetry
+        # fields stay at their zero defaults.
+        events_path = _maybe_flush_events(recorder, events_dir, trial_id)
         return TrialResult(
             trial_id=trial_id,
             target_id=target.id,
@@ -618,6 +837,8 @@ async def run_mesmer_trial(
             total_tokens=0,
             duration_s=time.monotonic() - t0,
             error=f"{type(e).__name__}: {e}",
+            event_counts=recorder.counts(),
+            events_path=events_path,
         )
 
     judge_result = find_canary_in_turns(result.ctx.turns, row.canary)
@@ -631,6 +852,38 @@ async def run_mesmer_trial(
     err = ""
     if len(result.ctx.turns) == 0 and result.result and result.result.startswith("Error"):
         err = result.result[:500]
+
+    # Provider checkpoint (system_fingerprint) from the target's last call.
+    # ``Target.last_fingerprint`` is declared on the base class; adapters that
+    # never set it leave it None. Default to "" so the JSONL field stays a str.
+    fingerprint = ""
+    if result.ctx.target is not None and result.ctx.target.last_fingerprint:
+        fingerprint = result.ctx.target.last_fingerprint
+
+    # Derive the TAPER trace from the run's graph + registry + recorder.
+    # Purely post-run — no instrumentation inside the ReAct loop.
+    # ``getattr`` handles stubbed Contexts from unit tests that don't
+    # carry a registry; the extractor degrades to telemetry-only in
+    # that case.
+    trace = extract_trial_telemetry(
+        result,
+        registry=getattr(result.ctx, "registry", None),
+        canary_turn=judge_result.canary_turn,
+        recorder=recorder,
+    )
+    events_path = _maybe_flush_events(recorder, events_dir, trial_id)
+    # Per-trial graph snapshot — sits beside the events JSONL under the
+    # same events/ subdir. Trial-scoped (only this run_id's nodes + root)
+    # so consumers don't have to dig through the cross-run target graph.
+    if events_dir is not None:
+        try:
+            write_trial_graph_snapshot(
+                result, events_dir / f"{trial_id}.graph.json",
+            )
+        except Exception:
+            # Snapshot is observability; a write failure must not fail
+            # the trial. Recorder still flushed the event stream above.
+            pass
 
     return TrialResult(
         trial_id=trial_id,
@@ -648,7 +901,40 @@ async def run_mesmer_trial(
         duration_s=result.duration_s,
         run_id=result.run_id,
         error=err,
+        fingerprint=fingerprint,
+        # Trace fields
+        n_llm_calls=trace.n_llm_calls,
+        llm_seconds=trace.llm_seconds,
+        throttle_wait_seconds=trace.throttle_wait_seconds,
+        modules_called=trace.modules_called,
+        tier_sequence=trace.tier_sequence,
+        per_module_scores=trace.per_module_scores,
+        dead_ends=trace.dead_ends,
+        winning_module=trace.winning_module,
+        winning_tier=trace.winning_tier,
+        profiler_ran_first=trace.profiler_ran_first,
+        ladder_monotonic=trace.ladder_monotonic,
+        compression_events=trace.compression_events,
+        event_counts=recorder.counts(),
+        events_path=events_path,
     )
+
+
+def _maybe_flush_events(
+    recorder: BenchEventRecorder,
+    events_dir: Path | None,
+    trial_id: str,
+) -> str:
+    """Flush the recorder to ``events_dir/{trial_id}.jsonl`` and return the
+    relative path. Returns ``""`` when no events_dir was configured.
+    """
+    if events_dir is None:
+        return ""
+    out = events_dir / f"{trial_id}.jsonl"
+    recorder.write(out)
+    # Return the path relative to the events_dir's parent (the bench
+    # output dir) — matches what the summary JSON references.
+    return str(Path("events") / out.name)
 
 
 async def run_baseline_trial(
@@ -691,6 +977,7 @@ async def run_baseline_trial(
         api_key_env=target.api_key_env,
         system_prompt=row.pre_prompt,
         user_turn_suffix=row.post_prompt,
+        throttle=target.throttle,
     )
     target_impl = create_target(target_cfg)
 
@@ -729,6 +1016,8 @@ async def run_baseline_trial(
             return int(usage.get(attr, 0) or 0)
         return int(getattr(usage, attr, 0) or 0)
 
+    fingerprint = target_impl.last_fingerprint or ""
+
     return TrialResult(
         trial_id=trial_id,
         target_id=target.id,
@@ -743,6 +1032,7 @@ async def run_baseline_trial(
         completion_tokens=_u("completion_tokens"),
         total_tokens=_u("total_tokens"),
         duration_s=time.monotonic() - t0,
+        fingerprint=fingerprint,
     )
 
 
@@ -764,6 +1054,12 @@ def aggregate(trials: list[TrialResult]) -> list[BenchCellSummary]:
 
     Pure function. No IO. Trials with populated ``error`` still count in
     ``n_trials`` (and count as failures) so ``asr`` stays conservative.
+
+    Beyond the box-score (ASR / turns / tokens / wall), folds per-trial
+    trace fields into the cell so the TAPER signals — tier of winning
+    module, ladder adherence, dead-end rate per tier, LLM-call cost,
+    error grouping — land in the summary JSON without any extra work
+    at the read path.
     """
     by_cell: dict[tuple[str, str], list[TrialResult]] = {}
     for t in trials:
@@ -782,6 +1078,9 @@ def aggregate(trials: list[TrialResult]) -> list[BenchCellSummary]:
         median_turns = statistics.median(succ_turns) if succ_turns else None
         mean_tokens = statistics.fmean(t.total_tokens for t in tr_list) if tr_list else 0.0
         total_seconds = sum(t.duration_s for t in tr_list)
+
+        trace_agg = _aggregate_trace(tr_list)
+
         cells.append(BenchCellSummary(
             target_id=target_id,
             arm=arm,
@@ -792,8 +1091,113 @@ def aggregate(trials: list[TrialResult]) -> list[BenchCellSummary]:
             median_turns=median_turns,
             mean_total_tokens=mean_tokens,
             total_wall_seconds=total_seconds,
+            **trace_agg,
         ))
     return cells
+
+
+def _aggregate_trace(trials: list[TrialResult]) -> dict:
+    """Roll up per-trial trace fields. Purely arithmetic."""
+    if not trials:
+        return {}
+
+    # Wins by tier / module — only attribute when we have a winning module.
+    wins_by_tier: dict[int, int] = {}
+    wins_by_module: dict[str, int] = {}
+    for t in trials:
+        if not t.success:
+            continue
+        if t.winning_module is None:
+            continue
+        wins_by_module[t.winning_module] = wins_by_module.get(t.winning_module, 0) + 1
+        if t.winning_tier is not None:
+            wins_by_tier[t.winning_tier] = wins_by_tier.get(t.winning_tier, 0) + 1
+
+    # LLM-call cost signals.
+    llm_calls = [t.n_llm_calls for t in trials]
+    llm_secs = [t.llm_seconds for t in trials]
+    throttle_waits = [t.throttle_wait_seconds for t in trials]
+    mean_llm_calls = statistics.fmean(llm_calls) if llm_calls else 0.0
+    median_llm_calls = statistics.median(llm_calls) if llm_calls else 0.0
+    mean_llm_seconds = statistics.fmean(llm_secs) if llm_secs else 0.0
+    mean_throttle_wait = statistics.fmean(throttle_waits) if throttle_waits else 0.0
+
+    # Behavioural adherence — only the mesmer arm produces a modules_called
+    # trace; for baseline trials these rates are 0/0 = 0 by convention.
+    n_with_trace = sum(1 for t in trials if t.modules_called)
+    if n_with_trace:
+        profiler_first_rate = sum(
+            1 for t in trials if t.profiler_ran_first
+        ) / n_with_trace
+        ladder_respect_rate = sum(
+            1 for t in trials if t.modules_called and t.ladder_monotonic
+        ) / n_with_trace
+    else:
+        profiler_first_rate = 0.0
+        ladder_respect_rate = 0.0
+
+    # Dead-end rate per tier + judge-score distribution per tier.
+    # Fold every attempt across every trial into tier-keyed buckets.
+    attempts_by_tier: dict[int, list[int]] = {}       # tier → scores
+    deads_by_tier: dict[int, int] = {}                # tier → dead count
+    for t in trials:
+        for mod, scores in t.per_module_scores.items():
+            tier = _tier_for_module_in_trial(t, mod)
+            attempts_by_tier.setdefault(tier, []).extend(scores)
+        for d in t.dead_ends:
+            tier = int(d.get("tier", DEFAULT_TIER))
+            deads_by_tier[tier] = deads_by_tier.get(tier, 0) + 1
+
+    dead_end_rate_by_tier: dict[int, float] = {}
+    median_judge_score_by_tier: dict[int, float] = {}
+    for tier, scores in attempts_by_tier.items():
+        total = len(scores)
+        if total:
+            dead_end_rate_by_tier[tier] = deads_by_tier.get(tier, 0) / total
+            median_judge_score_by_tier[tier] = statistics.median(scores)
+
+    # Compression activity.
+    compression_counts = [t.compression_events for t in trials]
+    mean_compression_events = (
+        statistics.fmean(compression_counts) if compression_counts else 0.0
+    )
+
+    # Errors grouped by exception class (the prefix before ":").
+    errors_by_class: dict[str, int] = {}
+    for t in trials:
+        if not t.error:
+            continue
+        cls = t.error.split(":", 1)[0].strip() or "Unknown"
+        errors_by_class[cls] = errors_by_class.get(cls, 0) + 1
+
+    return {
+        "wins_by_tier": wins_by_tier,
+        "wins_by_module": wins_by_module,
+        "mean_llm_calls": mean_llm_calls,
+        "median_llm_calls": median_llm_calls,
+        "mean_llm_seconds": mean_llm_seconds,
+        "mean_throttle_wait_seconds": mean_throttle_wait,
+        "profiler_first_rate": profiler_first_rate,
+        "ladder_respect_rate": ladder_respect_rate,
+        "dead_end_rate_by_tier": dead_end_rate_by_tier,
+        "median_judge_score_by_tier": median_judge_score_by_tier,
+        "mean_compression_events": mean_compression_events,
+        "errors_by_class": errors_by_class,
+    }
+
+
+def _tier_for_module_in_trial(trial: TrialResult, module_name: str) -> int:
+    """Recover a module's tier from a trial's own ``tier_sequence``.
+
+    The aggregator doesn't hold a Registry, so it reads the tier from
+    the trial's own ``modules_called`` / ``tier_sequence`` pairing. Falls
+    back to :data:`DEFAULT_TIER` when the module name isn't present
+    (shouldn't happen on well-formed trials — defensive).
+    """
+    for mod, tier in zip(trial.modules_called, trial.tier_sequence):
+        if mod == module_name:
+            return tier
+    return DEFAULT_TIER
 
 
 LIMITATIONS_MD = """## Limitations
@@ -825,6 +1229,34 @@ LIMITATIONS_MD = """## Limitations
 """
 
 
+def _fmt_tier_int_map(m: dict[int, int]) -> str:
+    """Render a tier-keyed count map like ``{0: 3, 1: 5}`` → ``"T0:3 T1:5"``."""
+    if not m:
+        return ""
+    return " ".join(f"T{t}:{v}" for t, v in sorted(m.items()))
+
+
+def _fmt_tier_pct_map(m: dict[int, float]) -> str:
+    """Render tier → 0..1 rate as ``"T0:60% T1:20%"``."""
+    if not m:
+        return ""
+    return " ".join(f"T{t}:{int(round(v * 100))}%" for t, v in sorted(m.items()))
+
+
+def _fmt_tier_float_map(m: dict[int, float]) -> str:
+    """Render tier → float as ``"T0:2.0 T1:6.5"``."""
+    if not m:
+        return ""
+    return " ".join(f"T{t}:{v:.1f}" for t, v in sorted(m.items()))
+
+
+def _fmt_error_map(m: dict[int, int]) -> str:
+    """Render error-class count as ``"ThrottleTimeout:2 ValueError:1"``."""
+    if not m:
+        return ""
+    return " ".join(f"{cls}:{n}" for cls, n in sorted(m.items(), key=lambda kv: -kv[1]))
+
+
 def render_markdown_table(summary: BenchSummary) -> str:
     """Render the per-(target, arm) summary as a Markdown document.
 
@@ -843,16 +1275,69 @@ def render_markdown_table(summary: BenchSummary) -> str:
     lines.append("")
     lines.append(f"*Dataset SHA256:* `{summary.dataset_sha256[:16]}…`")
     lines.append("")
-    lines.append("| Target | Arm | ASR | ± stderr | n_trials | Median turns | Avg total tokens |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    lines.append("| Target | Arm | ASR | ± stderr | n_trials | Median turns | Avg total tokens | Mean LLM calls |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
     for c in summary.cells:
         median_str = f"{int(c.median_turns)}" if c.median_turns is not None else "—"
         lines.append(
             f"| `{c.target_id}` | {c.arm} | {c.asr * 100:.1f}% | "
             f"±{c.asr_stderr * 100:.1f}% | {c.n_trials} | {median_str} | "
-            f"{int(c.mean_total_tokens):,} |"
+            f"{int(c.mean_total_tokens):,} | "
+            f"{c.mean_llm_calls:.1f} |"
         )
     lines.append("")
+
+    # --- TAPER trace section — populated for cells with a modules_called
+    # trace (mesmer arm). Skipped entirely when every cell is baseline-only.
+    mesmer_cells = [c for c in summary.cells if c.wins_by_tier or c.wins_by_module]
+    if mesmer_cells:
+        lines.append("## TAPER trace")
+        lines.append("")
+        lines.append(
+            "Post-run behavioural trace: which tier produced the win, "
+            "how the tier ladder was climbed, where probes died. Baseline "
+            "cells omitted (no trace)."
+        )
+        lines.append("")
+        lines.append(
+            "| Target | Wins by tier | Ladder respect | Profiler first | "
+            "Dead-end rate | Median judge score | Errors |"
+        )
+        lines.append("|---|---|---:|---:|---|---|---|")
+        for c in mesmer_cells:
+            wins_fmt = _fmt_tier_int_map(c.wins_by_tier) or "—"
+            dead_fmt = _fmt_tier_pct_map(c.dead_end_rate_by_tier) or "—"
+            score_fmt = _fmt_tier_float_map(c.median_judge_score_by_tier) or "—"
+            err_fmt = _fmt_error_map(c.errors_by_class) or "—"
+            lines.append(
+                f"| `{c.target_id}` | {wins_fmt} | "
+                f"{c.ladder_respect_rate * 100:.0f}% | "
+                f"{c.profiler_first_rate * 100:.0f}% | "
+                f"{dead_fmt} | {score_fmt} | {err_fmt} |"
+            )
+        lines.append("")
+        # Winning-module breakdown — one bullet per cell so consumers can
+        # eyeball which concrete modules are doing the work.
+        lines.append("**Winning modules (successful trials, by module):**")
+        lines.append("")
+        for c in mesmer_cells:
+            if c.wins_by_module:
+                bits = ", ".join(
+                    f"`{mod}`×{n}" for mod, n in sorted(
+                        c.wins_by_module.items(), key=lambda kv: -kv[1]
+                    )
+                )
+                lines.append(f"- `{c.target_id}`: {bits}")
+            else:
+                lines.append(f"- `{c.target_id}`: (no wins)")
+        lines.append("")
+        lines.append(
+            "*Per-trial events stream to "
+            "`events/{trial_id}.jsonl` — grep for `\"event\":\"frontier\"` "
+            "to see the tier ladder the gate offered, or `\"event\":\"delegate\"` "
+            "for the module execution trace.*"
+        )
+        lines.append("")
 
     # Methodology
     lines.append("## Methodology")
@@ -924,6 +1409,13 @@ def render_markdown_table(summary: BenchSummary) -> str:
         "JSONL row; provider-side LLM sampling is not deterministic and is "
         "handled by averaging over `trials_per_row`."
     )
+    lines.append(
+        "- **Per-trial events:** every mesmer trial writes its full "
+        "ReAct event stream to `events/{trial_id}.jsonl` (monotonic "
+        "`t` in seconds from trial start). The trial's row in the "
+        "per-(target, arm) JSONL references this file via "
+        "`trace.events_path`."
+    )
     lines.append("")
 
     # Limitations — canonical fixed list
@@ -957,6 +1449,8 @@ async def run_benchmark(
     force_download: bool = False,
     progress: Callable[[str], None] | None = None,
     execute_run_fn: ExecuteRunFn = execute_run,
+    log_fn: LogFn | None = None,
+    generate_viz: bool = True,
 ) -> tuple[BenchSummary, list[TrialResult]]:
     """Run the full benchmark and emit artifacts to ``output_dir``.
 
@@ -995,6 +1489,13 @@ async def run_benchmark(
         async with sem:
             return await coro_fn(*args, **kwargs)
 
+    # Per-trial events always land under <output_dir>/events/ — no opt-in
+    # flag. Cheap to write, essential for TAPER validation, and keeps the
+    # bench artifact self-describing (a row's events_path points to the
+    # exact file). ``output_dir`` may not exist yet; ``BenchEventRecorder.
+    # write`` creates parents on demand.
+    events_dir = output_dir / "events"
+
     tasks: list[asyncio.Task] = []
     for target in targets:
         for row in rows:
@@ -1002,6 +1503,8 @@ async def run_benchmark(
                 tasks.append(asyncio.create_task(_gated(
                     run_mesmer_trial, spec, target, row, trial_idx,
                     execute_run_fn=execute_run_fn,
+                    log_fn=log_fn,
+                    events_dir=events_dir,
                 )))
             if spec.budget.run_baseline and row.baseline_attack:
                 tasks.append(asyncio.create_task(_gated(
@@ -1066,5 +1569,21 @@ async def run_benchmark(
 
     if progress:
         progress(f"Wrote {summary_path} and {md_path}.")
+
+    # Interactive per-trial HTML viewer. Derived artefact — never fail the
+    # run over it; surface the error via `progress` so operators see what
+    # went wrong without losing the underlying results.
+    if generate_viz:
+        # Local import keeps bench/__init__.py import order independent of
+        # the viz module and its template file. Import failure in a dev
+        # env (e.g. template not yet on disk) doesn't block run_benchmark.
+        from mesmer.bench.viz import build_viz_html
+        try:
+            viz_result = build_viz_html(summary_path)
+            if progress:
+                progress(f"Wrote {viz_result.primary} (viz).")
+        except Exception as e:   # pragma: no cover — defensive catch
+            if progress:
+                progress(f"viz generation failed: {type(e).__name__}: {e}")
 
     return summary, trials

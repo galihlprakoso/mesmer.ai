@@ -31,8 +31,9 @@ Every claim traces back to a committed artifact that anyone can re-run:
    verified on every run; mismatches abort with a clear error. See
    [datasets/README.md](datasets/README.md) for provenance.
 2. **Model versions are pinned.** Target and attacker reference models
-   by snapshot / tag. Ollama manifest digests can be recorded in the
-   summary JSON by the operator.
+   by snapshot / tag. Every per-trial JSONL row captures the provider's
+   `system_fingerprint` (OpenAI / Groq) so even model strings that don't
+   carry a date stay reproducible to the exact checkpoint that served.
 3. **The judge is code.** `mesmer/bench/canary.py` is a deterministic
    substring matcher with unit tests. No LLM, no randomness, same
    inputs always score the same way. The in-loop LLM judge guides
@@ -80,10 +81,16 @@ uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --no-baseline
 
 ## Prerequisites
 
-- **Ollama**: `ollama pull llama3.1:8b-instruct-q4_K_M`, then `ollama serve`.
-- **Attacker**: `export GEMINI_API_KEY=...`. Swap the attacker `model:`
-  in the spec to any LiteLLM-reachable model if you want a different
-  brain — but bump the `spec.version` so old artifacts stay traceable.
+- **Groq targets**: `export GROQ_API_KEY=...`. Buy credits if running at
+  `sample>10` — free-tier TPD is too low for the canonical three-target
+  run (see the Contamination Posture + Limitations block in every run's
+  README for the rate-limit math). Developer plan pricing is in
+  [console.groq.com/settings/billing](https://console.groq.com/settings/billing).
+- **Attacker (Gemini Flash)**: `export GEMINI_API_KEY=...`. Free tier is
+  usually enough since the attacker tokens are small relative to target
+  tokens. Swap the attacker `model:` in the spec to any LiteLLM-reachable
+  model if you want a different brain — but bump `spec.version` so old
+  artifacts stay traceable.
 
 ## Reading the output
 
@@ -103,8 +110,9 @@ Clone the existing YAML and modify. Required top-level blocks:
   mesmer's canonical `{pre_prompt, post_prompt, canary,
   baseline_attack, sample_id}`. See
   [datasets/README.md](datasets/README.md) for provenance.
-- `targets:` — any OpenAI-compatible endpoint (or `openai_compat`
-  + Ollama).
+- `targets:` — any OpenAI-compatible endpoint (Groq, OpenAI, Together,
+  DeepInfra, local Ollama, etc.) via the `openai` adapter; `rest` and
+  `websocket` adapters for non-OpenAI-shaped APIs.
 - `attacker:` — the red-team brain (LiteLLM-reachable).
 - `contamination_posture:` — **required**. Must declare all of:
   - `dataset_release_date` — when the upstream data was first public.
