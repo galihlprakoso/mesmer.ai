@@ -10,12 +10,12 @@ datasets/cache/*.jsonl
 
 # Run artifacts — one set per `mesmer bench` invocation. They are
 # re-producible output, not source. Every run writes a new timestamped
-# bundle, so committing them by default pollutes git history.
+# bundle (top-level summary/README/jsonl + per-trial traces under
+# events/ + interactive viz HTML), so committing them by default
+# pollutes git history.
 #
 # When a run IS publication-worthy, force-commit the specific files:
 #   git add -f benchmarks/results/20260423T090105Z-v1-*.{jsonl,json,md}
 # and (optionally) reference them from the spec's companion README.
-results/*.jsonl
-results/*.json
-results/*.md
+results/**
 !results/.gitkeep
