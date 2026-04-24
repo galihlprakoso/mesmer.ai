@@ -3,18 +3,20 @@ title: Introduction
 description: What mesmer is, and why it exists.
 ---
 
-Mesmer is a **cognitive hacking toolkit for LLMs**. It red-teams an LLM target
-by running ReAct agents that pick cognitive-science-based techniques —
-foot-in-door, authority bias, narrative transport, cognitive overload — judges
-each attempt on a 1-10 rubric, and persists a per-target attack graph so every
-successive run gets smarter.
+Mesmer is a **cognitive hacking toolkit for LLMs**. It red-teams an LLM
+target by running ReAct agents that pick profiling → planning →
+execution moves from a tiered attack ladder — field-level payload
+shapes *before* cognitive techniques — judges every attempt on a 1-10
+rubric, and persists a per-target attack graph so every successive run
+gets smarter.
 
 ## The premise
 
 LLMs are minds, not filesystems. Static prompt banks — the shape most
-red-teaming tools take — fail against modern targets because a frozen attack
-can't adapt to a defense it hasn't seen. Mesmer treats attack generation as a
-**search problem over cognitive space**: explore, exploit, prune, remember.
+red-teaming tools take — fail against modern targets because a frozen
+attack can't adapt to a defense it hasn't seen. Mesmer treats attack
+generation as a **search problem over cognitive space**: explore,
+exploit, prune, remember.
 
 <AsciiDiagram caption="The top-level loop.">
 {`   ┌──────────┐     ┌──────────┐     ┌──────────┐
@@ -30,9 +32,19 @@ can't adapt to a defense it hasn't seen. Mesmer treats attack generation as a
                                   └────────────────┘`}
 </AsciiDiagram>
 
+Every module execution is recorded as an `AttackNode` — including the
+leader's own. The frontier proposer respects the **TAPER tier ladder**
+(T0 naive → T1 structural → T2 cognitive → T3 composed), so simple
+moves get tried before expensive ones, and wins are attributable to
+the cheapest technique that worked.
+
 ## What you can do today
 
 <ModuleGrid />
+
+16 shipped modules: 1 leader, 1 profiler, 1 planner, 6 field-level
+techniques (T0/T1), 6 cognitive techniques (T2). All YAML, all
+declarative, all picked up by `Registry.auto_discover()` on startup.
 
 ## Where to start
 
@@ -41,10 +53,17 @@ can't adapt to a defense it hasn't seen. Mesmer treats attack generation as a
   <Card title="Quickstart" href="/docs/getting-started/quickstart" />
   <Card title="Why mesmer" href="/docs/getting-started/why-mesmer" />
   <Card title="The attack graph" href="/docs/concepts/attack-graph" />
+  <Card title="TAPER tier ladder" href="/docs/concepts/taper-tiers" />
+  <Card title="Scratchpad & shared state" href="/docs/concepts/scratchpad" />
+  <Card title="Bench tracing & viz" href="/docs/concepts/bench-trace" />
+  <Card title="Benchmarks" href="/docs/benchmarks" />
 </Cards>
 
 ---
 
-Mesmer is open source, Python-first, uses LiteLLM for provider dispatch, and
-ships as a CLI + FastAPI backend + Svelte web UI. State lives outside the repo
-at `~/.mesmer/` so runs survive across sessions.
+Mesmer is open source, Python 3.10+, uses LiteLLM for all provider
+dispatch, and ships as a CLI (`mesmer run`, `mesmer bench`,
+`mesmer serve`) plus a FastAPI + Svelte 5 / D3 web UI. Cross-run state
+lives outside the repo at `~/.mesmer/` so attack graphs survive across
+sessions, and each bench trial writes a self-contained D3 HTML
+mind-map you can open offline.

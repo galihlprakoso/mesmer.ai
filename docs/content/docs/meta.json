@@ -1,0 +1,12 @@
+{
+  "title": "Mesmer Docs",
+  "pages": [
+    "index",
+    "getting-started",
+    "concepts",
+    "modules",
+    "scenarios",
+    "benchmarks",
+    "cli"
+  ]
+}
