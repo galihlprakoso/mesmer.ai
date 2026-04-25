@@ -53,6 +53,7 @@ def _make_ctx_capturing(objective: str, captured: list) -> Context:
 
     async def _send(msg):
         return "ok"
+
     target.send = _send
     target.reset = MagicMock()
     target.get_history = MagicMock(return_value=[])
@@ -69,9 +70,11 @@ def _make_ctx_capturing(objective: str, captured: list) -> Context:
 
     async def fake_completion(messages, tools=None):
         captured.append(messages)
-        return _FakeResponse(_FakeMessage(
-            tool_calls=[_FakeToolCall("conclude", None)],
-        ))
+        return _FakeResponse(
+            _FakeMessage(
+                tool_calls=[_FakeToolCall("conclude", None)],
+            )
+        )
 
     ctx = Context(
         target=target,
@@ -140,11 +143,75 @@ async def test_stanza_is_scenario_agnostic():
     await run_react_loop(module, ctx, instruction="probe")
 
     sys_text = captured[0][0]["content"]
-    forbidden = ["password", "access code", "canary", "tensor trust",
-                 "pre_prompt", "post_prompt", "paradox", "mahabarata"]
+    forbidden = [
+        "password",
+        "access code",
+        "canary",
+        "tensor trust",
+        "pre_prompt",
+        "post_prompt",
+        "paradox",
+        "mahabarata",
+    ]
     lowered = sys_text.lower()
     for term in forbidden:
         assert term not in lowered, (
             f"scenario-specific term '{term}' leaked into OBJECTIVE "
             f"AWARENESS clause — overfitting guardrail tripped"
+        )
+
+
+@pytest.mark.asyncio
+async def test_stanza_stays_dataset_neutral_recognition_lives_in_scenario():
+    """The stanza must NOT carry dataset-specific recognition heuristics.
+    "What counts as a leak" depends on the scenario — extraction
+    benchmarks want literal substring matches; jailbreak benchmarks want
+    behavioural compliance; tool-misuse benchmarks want a tool-call
+    pattern. If we hardcode shape examples (alphanumeric tokens,
+    scripture, persona descriptors, etc.) into the engine, every new
+    dataset either inherits a wrong prior or needs an engine PR.
+
+    Pin: the stanza only carries the generic STOP-and-emit-marker
+    protocol. All dataset-specific framing belongs in the scenario YAML.
+    """
+    module = ModuleConfig(
+        name="tiny-module",
+        description="",
+        theory="",
+        system_prompt="You are a tiny module.",
+        sub_modules=[],
+        tier=2,
+    )
+    captured: list = []
+    ctx = _make_ctx_capturing(objective="ANY OBJECTIVE", captured=captured)
+    await run_react_loop(module, ctx, instruction="probe")
+
+    sys_text = captured[0][0]["content"]
+    lowered = sys_text.lower()
+
+    # Generic protocol words MUST be present — these are what makes the
+    # marker mechanism work across any scenario.
+    assert "OBJECTIVE AWARENESS" in sys_text
+    assert "OBJECTIVE MET" in sys_text
+    assert "stop immediately" in lowered
+
+    # Recognition heuristics MUST NOT be present in the engine stanza.
+    # If a future change reintroduces them, this guard fails — and the
+    # change should land in a spec instead.
+    overfit_terms = [
+        "out-of-context",
+        "self-quoting",
+        "non-sequitur",
+        "scripture",
+        "alphanumeric",
+        "persona descriptor",
+        "instruction-quoting",
+        "boilerplate",
+    ]
+    for term in overfit_terms:
+        assert term not in lowered, (
+            f"recognition heuristic '{term}' leaked into the engine "
+            "stanza — it should live in the scenario objective text "
+            "instead so different datasets can frame their own success "
+            "criteria"
         )

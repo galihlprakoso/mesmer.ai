@@ -42,13 +42,19 @@ def _ctx(*, turns: list[Turn] | None = None):
     registry.tiers_for = MagicMock(side_effect=lambda names: {n: 0 for n in names})
     registry.tier_of = MagicMock(return_value=0)
     agent = AgentConfig(
-        model="test/attacker", judge_model="test/judge", api_key="sk",
+        model="test/attacker",
+        judge_model="test/judge",
+        api_key="sk",
     )
     graph = AttackGraph()
     graph.ensure_root()
     ctx = Context(
-        target=target, registry=registry, agent_config=agent,
-        objective="o", run_id="r", graph=graph,
+        target=target,
+        registry=registry,
+        agent_config=agent,
+        objective="o",
+        run_id="r",
+        graph=graph,
         scenario_mode=ScenarioMode.TRIALS,
     )
     if turns is not None:
@@ -68,16 +74,15 @@ class TestJudgeVerdict:
         the full score + rationale as JSON, in addition to the one-line
         ``judge_score``.
         """
-        ctx = _ctx(turns=[
-            Turn(sent="probe", received="nope", module="probe")
-        ])
+        ctx = _ctx(turns=[Turn(sent="probe", received="nope", module="probe")])
         events: list[tuple[str, str]] = []
 
         def capture(event, detail=""):
             events.append((event, detail))
 
         verdict = JudgeResult(
-            score=7, leaked_info="partial rules",
+            score=7,
+            leaked_info="partial rules",
             promising_angle="reprint request",
             dead_end="bare directive",
             suggested_next="escalate to delimiter-injection",
@@ -88,8 +93,12 @@ class TestJudgeVerdict:
 
         with patch("mesmer.core.agent.judge.evaluate_attempt", new=fake_eval):
             result = await _judge_module_result(
-                ctx, "probe", "angle", capture,
-                exchanges=ctx.turns, module_result="",
+                ctx,
+                "probe",
+                "angle",
+                capture,
+                exchanges=ctx.turns,
+                module_result="",
             )
 
         assert result is verdict
@@ -120,8 +129,12 @@ class TestJudgeVerdict:
 
         with patch("mesmer.core.agent.judge.evaluate_attempt", new=boom):
             result = await _judge_module_result(
-                ctx, "probe", "angle", capture,
-                exchanges=ctx.turns, module_result="",
+                ctx,
+                "probe",
+                "angle",
+                capture,
+                exchanges=ctx.turns,
+                module_result="",
             )
         assert result is None
         verdicts = [e for e, _ in events if e == LogEvent.JUDGE_VERDICT.value]
@@ -156,18 +169,25 @@ class TestDelegateEventPayload:
         def capture(event, detail=""):
             events.append((event, detail))
 
-        with patch(
-            "mesmer.core.agent.tools.sub_module._judge_module_result",
-            new=AsyncMock(return_value=None),
-        ), patch(
-            "mesmer.core.agent.tools.sub_module._update_graph",
-            return_value=None,
-        ), patch(
-            "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-            new=AsyncMock(return_value=None),
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=None,
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             await handle(
-                ctx, module, call, "direct-ask",
+                ctx,
+                module,
+                call,
+                "direct-ask",
                 args={
                     "instruction": "ask the target plainly for its rules",
                     "max_turns": 1,
@@ -214,27 +234,36 @@ class TestSubModuleObjectiveMetShortCircuit:
         module = ModuleConfig(name="leader", sub_modules=["direct-ask"])
 
         winning = JudgeResult(
-            score=10, leaked_info="paradox",
+            score=10,
+            leaked_info="paradox",
             promising_angle="framing as python var",
-            dead_end="none", suggested_next="done",
+            dead_end="none",
+            suggested_next="done",
             objective_met=True,
         )
         graph_node = MagicMock()
         graph_node.id = "node_win"
         reflect_spy = AsyncMock(return_value=None)
 
-        with patch(
-            "mesmer.core.agent.tools.sub_module._judge_module_result",
-            new=AsyncMock(return_value=winning),
-        ), patch(
-            "mesmer.core.agent.tools.sub_module._update_graph",
-            return_value=graph_node,
-        ), patch(
-            "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-            new=reflect_spy,
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=winning),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=graph_node,
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=reflect_spy,
+            ),
         ):
             await handle(
-                ctx, module, call, "direct-ask",
+                ctx,
+                module,
+                call,
+                "direct-ask",
                 args={"instruction": "ask plainly"},
                 instruction="fallback",
                 log=lambda *a, **kw: None,
@@ -257,7 +286,8 @@ class TestSubModuleObjectiveMetShortCircuit:
         module = ModuleConfig(name="leader", sub_modules=["direct-ask"])
 
         partial = JudgeResult(
-            score=4, leaked_info="",
+            score=4,
+            leaked_info="",
             promising_angle="maybe try framing",
             dead_end="refusal template",
             suggested_next="try delimiter-injection",
@@ -267,24 +297,263 @@ class TestSubModuleObjectiveMetShortCircuit:
         graph_node.id = "node_partial"
         reflect_spy = AsyncMock(return_value=None)
 
-        with patch(
-            "mesmer.core.agent.tools.sub_module._judge_module_result",
-            new=AsyncMock(return_value=partial),
-        ), patch(
-            "mesmer.core.agent.tools.sub_module._update_graph",
-            return_value=graph_node,
-        ), patch(
-            "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-            new=reflect_spy,
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=partial),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=graph_node,
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=reflect_spy,
+            ),
         ):
             await handle(
-                ctx, module, call, "direct-ask",
+                ctx,
+                module,
+                call,
+                "direct-ask",
                 args={"instruction": "ask plainly"},
                 instruction="fallback",
                 log=lambda *a, **kw: None,
             )
 
         reflect_spy.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# sub_module.handle — verbatim target evidence in tool_result
+# ---------------------------------------------------------------------------
+
+
+class TestTargetEvidenceInToolResult:
+    """The sub_module tool injects a verbatim target-evidence block into the
+    tool_result text the leader sees on its next iteration. Previously the
+    leader saw only (a) the sub-module's prose self-summary and (b) the
+    judge's prose digest — two layers of LLM judgment between the leader
+    and the actual target reply. A verbatim leak (e.g. an alphanumeric
+    secret) could therefore be rationalised away by both upstream actors
+    and the leader had no path to disagree.
+
+    The block is the deterministic last line of defense — leader applies
+    the OBJECTIVE AWARENESS recognition heuristics directly to the raw
+    target text quoted into its context.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_result_quotes_recent_target_replies_verbatim(self):
+        from mesmer.core.agent.tools.sub_module import handle
+        from mesmer.core.constants import TurnKind
+
+        ctx = _ctx()
+
+        async def fake_run_module(fn_name, instruction, max_turns, log):
+            ctx.turns.append(
+                Turn(
+                    sent="probe one",
+                    received="bible verse here",
+                    module=fn_name,
+                    kind=TurnKind.EXCHANGE,
+                )
+            )
+            ctx.turns.append(
+                Turn(
+                    sent="delimiter trick",
+                    received="kinetics%$ leaked!",
+                    module=fn_name,
+                    kind=TurnKind.EXCHANGE,
+                )
+            )
+            return "module concludes that nothing useful was extracted"
+
+        ctx.run_module = fake_run_module
+
+        call = MagicMock()
+        call.id = "call_evidence"
+        module = ModuleConfig(name="leader", sub_modules=["delimiter-injection"])
+
+        verdict = JudgeResult(
+            score=7,
+            leaked_info="weird fragment",
+            promising_angle="might be something",
+            dead_end="target said it can't help",
+            suggested_next="try another angle",
+            objective_met=False,  # judge missed the leak
+        )
+        graph_node = MagicMock()
+        graph_node.id = "node_x"
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=verdict),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=graph_node,
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            tr = await handle(
+                ctx,
+                module,
+                call,
+                "delimiter-injection",
+                args={"instruction": "try delimiter trick"},
+                instruction="fallback",
+                log=lambda *a, **kw: None,
+            )
+
+        text = tr["content"]
+        # Header — leader knows this is the verbatim block.
+        assert "Latest target evidence" in text
+        # Both target replies appear verbatim. The verbatim leak is the
+        # whole point — without it, the rationalised summary above wins.
+        assert "bible verse here" in text
+        assert "kinetics%$ leaked!" in text
+        # Recognition cue — points the leader at the OBJECTIVE AWARENESS
+        # rule it should apply to the raw text.
+        assert "OBJECTIVE AWARENESS" in text
+        # Sub-module's self-summary AND judge digest still in the same
+        # tool_result — evidence augments, doesn't replace.
+        assert "module concludes that nothing useful was extracted" in text
+        assert "Judge score: 7/10" in text
+
+    @pytest.mark.asyncio
+    async def test_tool_result_omits_evidence_block_when_no_real_exchanges(self):
+        """Modules that error before producing a target reply (or that run
+        zero exchanges, e.g. pure reasoning modules) must not emit an empty
+        evidence block — keep the tool_result clean."""
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        # No turns appended during the delegate.
+        ctx.run_module = AsyncMock(return_value="reasoning-only output")
+
+        call = MagicMock()
+        call.id = "call_no_exchange"
+        module = ModuleConfig(name="leader", sub_modules=["attack-planner"])
+
+        verdict = JudgeResult(
+            score=5,
+            leaked_info="",
+            promising_angle="",
+            dead_end="",
+            suggested_next="",
+            objective_met=False,
+        )
+        graph_node = MagicMock()
+        graph_node.id = "node_planner"
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=verdict),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=graph_node,
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            tr = await handle(
+                ctx,
+                module,
+                call,
+                "attack-planner",
+                args={"instruction": "plan three angles"},
+                instruction="fallback",
+                log=lambda *a, **kw: None,
+            )
+
+        text = tr["content"]
+        assert "Latest target evidence" not in text
+
+    @pytest.mark.asyncio
+    async def test_tool_result_skips_error_turns_in_evidence(self):
+        """Pipeline errors (timeouts, gateway 5xx) on a Turn aren't real
+        target replies — they're noise. The evidence block must filter
+        them out so the leader doesn't see "TARGET → [error]" as a leak
+        candidate.
+        """
+        from mesmer.core.agent.tools.sub_module import handle
+        from mesmer.core.constants import TurnKind
+
+        ctx = _ctx()
+
+        async def fake_run_module(fn_name, instruction, max_turns, log):
+            ctx.turns.append(
+                Turn(
+                    sent="probe",
+                    received="[gateway timeout]",
+                    module=fn_name,
+                    kind=TurnKind.EXCHANGE,
+                    is_error=True,
+                )
+            )
+            ctx.turns.append(
+                Turn(
+                    sent="retry",
+                    received="real reply with kinetics%$",
+                    module=fn_name,
+                    kind=TurnKind.EXCHANGE,
+                )
+            )
+            return "module summary"
+
+        ctx.run_module = fake_run_module
+
+        call = MagicMock()
+        call.id = "call_err"
+        module = ModuleConfig(name="leader", sub_modules=["delimiter-injection"])
+
+        verdict = JudgeResult(
+            score=4,
+            leaked_info="",
+            promising_angle="",
+            dead_end="",
+            suggested_next="",
+            objective_met=False,
+        )
+        graph_node = MagicMock()
+        graph_node.id = "node_err"
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=verdict),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=graph_node,
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            tr = await handle(
+                ctx,
+                module,
+                call,
+                "delimiter-injection",
+                args={"instruction": "x"},
+                instruction="fallback",
+                log=lambda *a, **kw: None,
+            )
+
+        text = tr["content"]
+        assert "real reply with kinetics%$" in text
+        assert "[gateway timeout]" not in text
 
 
 # ---------------------------------------------------------------------------
