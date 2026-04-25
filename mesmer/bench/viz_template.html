@@ -20,6 +20,7 @@
     --t1: #f59e0b;
     --t2: #ef4444;
     --t3: #8b5cf6;
+    --t-baseline: #64748b;
     --t-unknown: #6b7280;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -51,6 +52,18 @@
   }
   .sel select:focus { outline: 1px solid var(--accent); }
   header .spacer { flex: 1 0 auto; }
+  header button.toggle {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 10px; font: 11px var(--mono); cursor: pointer;
+  }
+  header button.toggle:hover {
+    border-color: var(--accent); color: var(--accent);
+  }
+  header button.toggle.active {
+    background: rgba(122,162,247,.15);
+    border-color: var(--accent); color: var(--accent);
+  }
   .pill {
     padding: 2px 8px; border-radius: 10px; font-size: 11px;
     font-family: var(--mono); border: 1px solid var(--border);
@@ -76,33 +89,117 @@
   }
   #canvas {
     position: relative; overflow: hidden;
+    display: flex; flex-direction: column;
     background:
       radial-gradient(circle at 10% 10%, rgba(122,162,247,.04), transparent 40%),
       radial-gradient(circle at 90% 90%, rgba(139,92,246,.04), transparent 40%),
       var(--bg);
   }
-  #canvas svg { width: 100%; height: 100%; display: block; cursor: grab; }
-  #canvas svg:active { cursor: grabbing; }
-  #canvas .toolbar {
+  /* Each pane is a fully-self-contained tree viewer (label + SVG + tools).
+     A second pane is grafted in below the first when compare mode is on. */
+  .pane {
+    position: relative; flex: 1 1 0; min-height: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .pane:last-child { border-bottom: none; }
+  .pane.hidden { display: none; }
+  .pane > svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  .pane > svg:active { cursor: grabbing; }
+  .pane .pane-label {
+    position: absolute; top: 10px; right: 14px; z-index: 3;
+    display: flex; align-items: center; gap: 8px;
+    padding: 3px 9px; border-radius: 999px;
+    background: rgba(15,17,21,.85); border: 1px solid var(--border);
+    font: 10px var(--mono); color: var(--muted);
+    text-transform: uppercase; letter-spacing: .08em;
+  }
+  .pane .pane-label .arm-tag {
+    color: var(--text); font-weight: 600;
+    padding: 1px 6px; border-radius: 3px;
+    background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .pane .pane-label .arm-tag.baseline {
+    color: var(--t-baseline); border-color: var(--t-baseline);
+  }
+  .pane .pane-label .arm-tag.mesmer {
+    color: var(--accent); border-color: var(--accent);
+  }
+  .pane .pane-toolbar {
     position: absolute; top: 10px; left: 10px;
     display: flex; gap: 6px; z-index: 2;
   }
-  #canvas .toolbar button {
+  .pane .pane-toolbar button {
     background: var(--panel-2); color: var(--text);
     border: 1px solid var(--border); border-radius: 4px;
     padding: 4px 9px; font: 11px var(--mono); cursor: pointer;
   }
-  #canvas .toolbar button:hover { border-color: var(--accent); color: var(--accent); }
+  .pane .pane-toolbar button:hover {
+    border-color: var(--accent); color: var(--accent);
+  }
+  .pane .pane-empty {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; color: var(--muted); text-align: center;
+    padding: 24px; font-family: var(--mono); font-size: 12px;
+    pointer-events: none;
+  }
 
   .node circle, .node rect { stroke-width: 1.5px; transition: r 120ms; }
+  .node { cursor: pointer; }
   .node:hover circle { r: 16; }
-  .node.selected circle { stroke: #fff; stroke-width: 2.5px; }
-  .node.selected rect { stroke: #fff; stroke-width: 3px; }
+
+  /* Frontier nodes — proposed but never delegated to. Visually demoted so
+     they read as "ghost" siblings rather than real attempts. The dashed
+     stroke is the same dialect as DEAD nodes but with lower opacity, so
+     a quick scan separates "tried-and-died" (DEAD) from "never-tried"
+     (FRONTIER). */
+  .node.frontier circle {
+    fill-opacity: 0.35;
+    stroke-dasharray: 4 3;
+    stroke-opacity: 0.7;
+  }
+  .node.frontier text { opacity: 0.65; }
+
+  .node.dead circle { stroke-dasharray: 3 2; opacity: .7; }
+
+  /* Selection — the user's interaction signal MUST dominate winner glow.
+     Bright cyan ring + drop-shadow so a click is unmistakable, even when
+     the clicked node is also the winning one. */
+  .node.selected circle {
+    stroke: var(--accent); stroke-width: 3.5px;
+    filter: drop-shadow(0 0 8px var(--accent));
+  }
+  .node.selected rect {
+    stroke: var(--accent); stroke-width: 3.5px;
+    filter: drop-shadow(0 0 8px var(--accent));
+  }
+
+  /* Winning marker — gold ring + ★ badge instead of a permanent halo.
+     Smaller, off to the side, doesn't compete with selection. */
+  .node.winning circle {
+    stroke: #fbbf24; stroke-width: 2.5px;
+  }
+  .node .winner-badge {
+    fill: #fbbf24; font-size: 11px; font-weight: 700;
+    pointer-events: none;
+  }
+
   .node text { fill: var(--text); font-size: 11px; font-family: var(--mono); pointer-events: none; }
   .node .badge { font-size: 12px; }
-  .node.dead circle { stroke-dasharray: 3 2; opacity: .7; }
-  .node.winning circle { filter: drop-shadow(0 0 6px #fff); stroke: #fff; stroke-width: 2.5px; }
   .node.leader rect { filter: drop-shadow(0 0 4px rgba(255,255,255,.35)); }
+  /* Sequence number on actually-ran modules — shows the leader's call order. */
+  .node .seq-num {
+    fill: var(--muted); font-size: 9px; font-family: var(--mono);
+    pointer-events: none;
+  }
+  /* The synthetic LEADER orchestrator node — diamond-ish, sits between
+     root and the per-call sub-modules. Distinct from the leader-verdict
+     square (which is the leader's CONCLUDE node at run end). */
+  .node.leader-orchestrator polygon {
+    fill: var(--accent); fill-opacity: 0.15;
+    stroke: var(--accent); stroke-width: 2px;
+  }
+  .node.leader-orchestrator text { fill: var(--accent); font-weight: 600; }
 
   .link { fill: none; stroke: var(--border); stroke-width: 1.2px; }
   .link.on-winning-path { stroke: #fff; stroke-width: 1.8px; opacity: .8; }
@@ -122,10 +219,21 @@
     color: var(--muted); font-size: 11px;
   }
   #detail .row b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+  #detail .row b.long {
+    text-align: right; max-width: 60%;
+    word-break: break-all; white-space: normal; line-height: 1.4;
+  }
   #detail section { margin-top: 14px; }
   #detail section h3 {
     margin: 0 0 6px 0; font-size: 11px; color: var(--muted);
     text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  #detail section h3 .h-tag {
+    font-family: var(--mono); font-size: 10px; color: var(--muted);
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 3px; padding: 1px 5px; letter-spacing: .04em;
+    text-transform: none;
   }
   #detail .msg {
     background: var(--panel-2); border: 1px solid var(--border);
@@ -145,10 +253,47 @@
     color: #a7f3d0; padding: 6px 8px; border-radius: 5px;
     font-family: var(--mono); font-size: 11px; word-break: break-word;
   }
+  /* Banner shown at the top of the side panel for FRONTIER nodes —
+     proposals the leader never executed. Catches the user thinking
+     "this module ran and produced nothing" when actually it was
+     never invoked. */
+  #detail .frontier-banner {
+    background: rgba(245,158,11,.08); border: 1px solid var(--warn);
+    color: #fde68a; padding: 8px 10px; border-radius: 5px;
+    margin-bottom: 12px; font-size: 11px; line-height: 1.55;
+  }
+  #detail .frontier-banner b {
+    display: block; font-family: var(--mono); font-size: 11px;
+    color: var(--warn); margin-bottom: 4px; letter-spacing: .04em;
+  }
+  /* Banner for the winning node — same shape, OK styling. */
+  #detail .winner-banner {
+    background: rgba(251,191,36,.08); border: 1px solid #fbbf24;
+    color: #fde68a; padding: 8px 10px; border-radius: 5px;
+    margin-bottom: 12px; font-size: 11px;
+  }
+  #detail .winner-banner b {
+    display: block; font-family: var(--mono); font-size: 11px;
+    color: #fbbf24; margin-bottom: 4px; letter-spacing: .04em;
+  }
   #detail pre {
     background: var(--panel-2); border: 1px solid var(--border);
     padding: 6px 8px; border-radius: 4px; font-size: 11px;
     white-space: pre-wrap; word-break: break-word; margin: 0;
+    max-height: 280px; overflow-y: auto;
+  }
+  #detail details {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 8px; margin-bottom: 6px;
+  }
+  #detail details > summary {
+    cursor: pointer; font-family: var(--mono); font-size: 11px;
+    color: var(--muted); padding: 2px 0;
+  }
+  #detail details > summary:hover { color: var(--accent); }
+  #detail details[open] > summary { color: var(--text); }
+  #detail details > pre {
+    margin-top: 6px; border: none; padding: 0; background: transparent;
   }
 
   .tier-dot {
@@ -179,21 +324,35 @@
   <span class="sub" id="meta-sub"></span>
   <span class="spacer"></span>
   <div class="sel"><span>target</span><select id="sel-target"></select></div>
-  <div class="sel"><span>arm</span><select id="sel-arm"></select></div>
+  <div class="sel" id="sel-arm-wrap"><span>arm</span><select id="sel-arm"></select></div>
   <div class="sel"><span>row</span><select id="sel-row"></select></div>
   <div class="sel"><span>seed</span><select id="sel-seed"></select></div>
+  <button class="toggle" id="btn-compare" title="Show baseline + mesmer side-by-side for the selected row">Compare</button>
 </header>
 
 <div id="banner" class="warn"><span>Select a trial to render.</span></div>
 
 <main>
   <div id="canvas">
-    <div class="toolbar">
-      <button id="btn-fit">Fit</button>
-      <button id="btn-expand">Expand all</button>
-      <button id="btn-collapse">Collapse</button>
+    <!-- Pane A is always present. Pane B appears below when compare mode is on. -->
+    <div class="pane" data-pane="A">
+      <span class="pane-label"><span class="arm-tag" id="paneA-arm">—</span><span id="paneA-info"></span></span>
+      <div class="pane-toolbar">
+        <button data-act="fit" data-pane="A">Fit</button>
+        <button data-act="expand" data-pane="A">Expand all</button>
+        <button data-act="collapse" data-pane="A">Collapse</button>
+      </div>
+      <svg></svg>
     </div>
-    <svg></svg>
+    <div class="pane hidden" data-pane="B">
+      <span class="pane-label"><span class="arm-tag" id="paneB-arm">—</span><span id="paneB-info"></span></span>
+      <div class="pane-toolbar">
+        <button data-act="fit" data-pane="B">Fit</button>
+        <button data-act="expand" data-pane="B">Expand all</button>
+        <button data-act="collapse" data-pane="B">Collapse</button>
+      </div>
+      <svg></svg>
+    </div>
   </div>
   <aside id="detail">
     <div class="empty-state">Click a node to inspect it.</div>
@@ -202,13 +361,15 @@
 
 <footer>
   <span id="legend">
-    <span class="tier-dot" style="background:var(--t0)"></span>T0 naive
-    <span class="tier-dot" style="background:var(--t1); margin-left:10px"></span>T1 structural
-    <span class="tier-dot" style="background:var(--t2); margin-left:10px"></span>T2 cognitive
-    <span class="tier-dot" style="background:var(--t3); margin-left:10px"></span>T3 composed
-    <span class="tier-dot" style="background:var(--t-unknown); margin-left:10px"></span>root/unknown
+    <span class="tier-dot" style="background:var(--t0)"></span>T0
+    <span class="tier-dot" style="background:var(--t1); margin-left:6px"></span>T1
+    <span class="tier-dot" style="background:var(--t2); margin-left:6px"></span>T2
+    <span class="tier-dot" style="background:var(--t3); margin-left:6px"></span>T3
+    <span class="tier-dot" style="background:var(--t-baseline); margin-left:10px"></span>baseline
+    <span style="display:inline-block;width:8px;height:8px;border-radius:50%;border:1.5px dashed var(--muted);margin:0 4px 0 10px;vertical-align:middle;opacity:.6"></span>frontier (proposed, never ran)
     <span style="display:inline-block;width:9px;height:9px;margin:0 4px 0 14px;vertical-align:middle;background:var(--ok);border:1px solid rgba(255,255,255,.3);border-radius:1px"></span>leader ✓
     <span style="display:inline-block;width:9px;height:9px;margin:0 4px 0 10px;vertical-align:middle;background:var(--err);border:1px solid rgba(255,255,255,.3);border-radius:1px"></span>leader ✗
+    <span style="margin-left:14px;color:#fbbf24">★ winner</span>
   </span>
   <span id="footer-info"></span>
 </footer>
@@ -224,8 +385,10 @@
     0: "var(--t0)", 1: "var(--t1)", 2: "var(--t2)", 3: "var(--t3)",
   };
   const UNKNOWN_COLOR = "var(--t-unknown)";
+  const BASELINE_COLOR = "var(--t-baseline)";
 
   const data = JSON.parse(document.getElementById("bench-data").textContent);
+  const MODULES = (data.meta && data.meta.modules) || {};
   document.getElementById("meta-sub").textContent =
     `${data.meta.spec || "bench"} · ${data.meta.version || ""} · run ${data.meta.date || ""} · ${data.trials.length} trials`;
   document.getElementById("footer-info").textContent =
@@ -237,6 +400,10 @@
   const selA = document.getElementById("sel-arm");
   const selR = document.getElementById("sel-row");
   const selS = document.getElementById("sel-seed");
+  const selArmWrap = document.getElementById("sel-arm-wrap");
+  const btnCompare = document.getElementById("btn-compare");
+
+  let _compare = false;
 
   function uniq(xs) { return Array.from(new Set(xs)); }
   function displayVal(v) {
@@ -275,13 +442,28 @@
     populate(selS, seeds, preferred.seed);
   }
 
-  function currentTrial() {
+  function findTrial({target, arm, sample_id, seed}) {
     return data.trials.find(t =>
-      t.target === selT.value &&
-      t.arm === selA.value &&
-      t.sample_id === selR.value &&
-      String(t.seed) === selS.value
+      t.target === target &&
+      t.arm === arm &&
+      t.sample_id === sample_id &&
+      String(t.seed) === String(seed)
     );
+  }
+
+  function findFirstTrialForArm({target, arm, sample_id}) {
+    // For baseline (seed=null) or whenever a seed is irrelevant we just
+    // grab the first matching trial for (target, arm, sample_id).
+    return data.trials.find(t =>
+      t.target === target && t.arm === arm && t.sample_id === sample_id
+    );
+  }
+
+  function currentMainTrial() {
+    return findTrial({
+      target: selT.value, arm: selA.value,
+      sample_id: selR.value, seed: selS.value,
+    });
   }
 
   for (const sel of [selT, selA, selR, selS]) {
@@ -296,6 +478,17 @@
   }
 
   refreshCascade();
+
+  /* ---------- compare-mode toggle ---------- */
+
+  btnCompare.addEventListener("click", () => {
+    _compare = !_compare;
+    btnCompare.classList.toggle("active", _compare);
+    btnCompare.textContent = _compare ? "Compare ✓" : "Compare";
+    selArmWrap.style.display = _compare ? "none" : "";
+    document.querySelector('.pane[data-pane="B"]').classList.toggle("hidden", !_compare);
+    renderCurrent();
+  });
 
   /* ---------- banner ---------- */
 
@@ -316,9 +509,9 @@
       return;
     }
     if (trial.success) {
-      const mod = trial.trace?.winning_module || "?";
+      const mod = trial.trace?.winning_module || (trial.arm === "baseline" ? "baseline" : "?");
       const tier = trial.trace?.winning_tier;
-      const tierLbl = tier === 0 || tier ? `T${tier}` : "?";
+      const tierLbl = tier === 0 || tier ? `T${tier}` : (trial.arm === "baseline" ? "—" : "?");
       make("ok",
         `<span class="pill ok">SUCCESS</span>
          <span>won at turn ${trial.canary_turn} via <code>${esc(mod)}</code> (${tierLbl})</span>
@@ -340,27 +533,41 @@
        <span class="sub">${trial.turns} turns · ${(trial.total_tokens?.total || 0).toLocaleString()} tok · ${trial.duration_s.toFixed(1)}s</span>`);
   }
 
-  /* ---------- d3 tree render ---------- */
+  /* ---------- per-pane render state ---------- */
 
-  const svg = d3.select("#canvas svg");
-  const zoomLayer = svg.append("g").attr("class", "zoom");
-  const linkLayer = zoomLayer.append("g").attr("class", "links");
-  const nodeLayer = zoomLayer.append("g").attr("class", "nodes");
+  // Two panes share zoom state structure but render independent trees.
+  // Each pane has its own d3 zoom behaviour, layers, and current trial.
+  function makePaneState(paneEl) {
+    const svg = d3.select(paneEl).select("svg");
+    const zoomLayer = svg.append("g").attr("class", "zoom");
+    const linkLayer = zoomLayer.append("g").attr("class", "links");
+    const nodeLayer = zoomLayer.append("g").attr("class", "nodes");
+    const zoom = d3.zoom()
+      .scaleExtent([0.25, 4])
+      .on("zoom", (ev) => zoomLayer.attr("transform", ev.transform));
+    svg.call(zoom);
+    return {
+      paneEl, svg, zoomLayer, linkLayer, nodeLayer, zoom,
+      collapsed: new Set(), trial: null, winId: null,
+    };
+  }
+  const paneA = makePaneState(document.querySelector('.pane[data-pane="A"]'));
+  const paneB = makePaneState(document.querySelector('.pane[data-pane="B"]'));
 
-  const zoom = d3.zoom()
-    .scaleExtent([0.25, 4])
-    .on("zoom", (ev) => zoomLayer.attr("transform", ev.transform));
-  svg.call(zoom);
+  // Last-clicked node id (could be from either pane). The detail panel
+  // tracks it so a re-render doesn't reset the user's selection.
+  let _selectedNodeId = null;
+  let _selectedFromPane = null;
 
-  let _collapsed = new Set();
+  /* ---------- d3 helpers shared across panes ---------- */
 
-  function buildHierarchy(nodes, rootId) {
+  function buildHierarchy(nodes, rootId, collapsed) {
     const seen = new Set();
     function build(id) {
       if (seen.has(id) || !nodes[id]) return null;
       seen.add(id);
       const n = nodes[id];
-      const childIds = _collapsed.has(id) ? [] : (n.children || []);
+      const childIds = collapsed.has(id) ? [] : (n.children || []);
       return {
         ...n,
         _childIds: n.children || [],
@@ -370,8 +577,118 @@
     return build(rootId);
   }
 
+  /* Leader-orchestration timeline.
+   *
+   * The persisted graph stores parent/child as TAP-style refinement
+   * pointers — a fulfilled-frontier child sits under whichever attempt
+   * proposed it. Visually that reads as "target-profiler delegated to
+   * attack-planner", which is wrong: the LEADER orchestrates every
+   * delegation and the modules don't talk to each other.
+   *
+   * This synthesizer rebuilds the hierarchy as the user's mental model
+   * actually maps:
+   *
+   *   root ─→ LEADER (synthetic) ─→ 1. target-profiler
+   *                                  └─ frontier-A (dashed, never ran)
+   *                                  └─ frontier-B (dashed)
+   *                              ─→ 2. attack-planner
+   *                                  └─ frontier-C (dashed)
+   *                              ─→ 3. <next ran module>
+   *                              ─→ leader-verdict (square, terminator)
+   *
+   * Real delegations are SIBLINGS under LEADER, ordered by timestamp.
+   * Frontier proposals stay attached to the attempt that produced them
+   * (so the user can see "which attempt's reflection proposed this")
+   * but are visually demoted via the .frontier class.
+   *
+   * The leader-verdict is always the LAST child of LEADER regardless of
+   * where the persisted graph attaches it — the storage parent (most
+   * recent timestamp) sometimes lands on a frontier sibling, which is a
+   * graph-data quirk that shouldn't bleed into the visualisation. */
+  function buildLeaderTimeline(nodes, rootId, collapsed) {
+    if (!rootId || !nodes[rootId]) return null;
+    const root = nodes[rootId];
+
+    // Bucket all non-root nodes:
+    const ranAttempts = [];          // status != frontier, source != leader
+    const frontierByParent = {};     // parentId → [frontier-node]
+    let leaderVerdict = null;
+    for (const [id, n] of Object.entries(nodes)) {
+      if (id === rootId) continue;
+      if (n.source === "leader") { leaderVerdict = n; continue; }
+      if (n.status === "frontier") {
+        const p = n.parent_id || rootId;
+        (frontierByParent[p] ||= []).push(n);
+        continue;
+      }
+      ranAttempts.push(n);
+    }
+
+    // Order real delegations by timestamp — that's the leader's call
+    // sequence. Numeric fallback to id when timestamp is missing keeps
+    // the ordering deterministic for synthetic graphs.
+    ranAttempts.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)
+                                || a.id.localeCompare(b.id));
+
+    function attachFrontier(parentNode) {
+      const props = frontierByParent[parentNode.id] || [];
+      return props.map(n => ({
+        ...n,
+        _childIds: n.children || [],
+        children: [],   // frontier proposals are leaves in the timeline view
+      }));
+    }
+
+    // Build the synthetic LEADER node carrying every real delegation
+    // plus the leader-verdict terminator.
+    const leaderId = "__leader__";
+    const leaderChildren = ranAttempts.map((n, idx) => ({
+      ...n,
+      _childIds: n.children || [],
+      _seqNum: idx + 1,                   // 1-based index for label
+      children: collapsed.has(n.id) ? [] : attachFrontier(n),
+    }));
+    if (leaderVerdict) {
+      leaderChildren.push({
+        ...leaderVerdict,
+        _childIds: leaderVerdict.children || [],
+        children: [],
+      });
+    }
+
+    return {
+      ...root,
+      _childIds: root.children || [],
+      children: [{
+        id: leaderId,
+        module: "leader",
+        approach: "orchestrator — picks the next sub-module to delegate to",
+        status: "alive",
+        source: "synthetic",
+        score: 0,
+        depth: 1,
+        parent_id: rootId,
+        _isLeaderOrchestrator: true,
+        _childIds: leaderChildren.map(c => c.id),
+        children: leaderChildren,
+        messages_sent: [],
+        target_responses: [],
+        leaked_info: "",
+        module_output: "",
+        reflection: "",
+      }],
+    };
+  }
+
   function pickWinningNodeId(trial) {
-    if (!trial.success || !trial.graph) return null;
+    if (!trial || !trial.success || !trial.graph) return null;
+    if (trial.arm === "baseline") {
+      // Synthesized baseline tree has exactly one non-root node.
+      const nonRoot = Object.keys(trial.graph.nodes).find(
+        id => id !== trial.graph.root_id
+      );
+      return nonRoot || null;
+    }
     const winMod = trial.trace?.winning_module;
     if (!winMod) return null;
     let best = null;
@@ -385,11 +702,13 @@
   }
 
   function tierOf(trial, module) {
+    if (module === "baseline") return null;
     return (trial.module_tiers || {})[module];
   }
 
   function colorFor(trial, node) {
-    if (node.module === "root") return UNKNOWN_COLOR;
+    if (!node || node.module === "root") return UNKNOWN_COLOR;
+    if (node.module === "baseline") return BASELINE_COLOR;
     const t = tierOf(trial, node.module);
     if (t === 0 || t === 1 || t === 2 || t === 3) return TIER_COLOR[t];
     return UNKNOWN_COLOR;
@@ -399,8 +718,6 @@
     return node && node.source === "leader";
   }
   function leaderVerdictColor(node) {
-    // PROMISING = objective_met=true; DEAD = objective_met=false.
-    // Anything else (e.g. an error path) rendered gray.
     if (node.status === "promising") return "var(--ok)";
     if (node.status === "dead") return "var(--err)";
     return "var(--t-unknown)";
@@ -408,15 +725,25 @@
   function shortLabel(node) {
     const mod = node.module || "?";
     const s = (node.score ?? 0);
+    if (node._isLeaderOrchestrator) return "leader";
     if (mod === "root") return "root";
     if (isLeaderVerdict(node)) {
-      // Leader's own execution node — show verdict, not tier score.
       const verdict = node.status === "promising"
         ? "✓ objective met"
         : node.status === "dead"
           ? "✗ no consolidation"
           : node.status;
       return `${mod} · ${verdict}`;
+    }
+    if (mod === "baseline") {
+      return node.status === "promising"
+        ? "baseline · ✓ matched"
+        : "baseline · ✗ no match";
+    }
+    if (node.status === "frontier") {
+      // Frontier proposals don't have meaningful scores — make that clear
+      // by using a "proposed" marker instead of "s0".
+      return `${mod} · proposed`;
     }
     return `${mod} · s${s}`;
   }
@@ -428,62 +755,265 @@
       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  let _selectedId = null;
-  let _current = null;
+  function fitToView(pane, root) {
+    const bbox = pane.nodeLayer.node().getBBox();
+    const svgEl = pane.svg.node();
+    const W = svgEl.clientWidth, H = svgEl.clientHeight;
+    if (!W || !H) return;                   // pane hidden: skip
+    const pad = 30;
+    const scale = Math.min(
+      (W - pad * 2) / Math.max(bbox.width, 1),
+      (H - pad * 2) / Math.max(bbox.height, 1),
+      1.2
+    );
+    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale;
+    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale;
+    pane.svg.transition().duration(300)
+      .call(pane.zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+  }
 
-  function renderCurrent() {
-    const trial = currentTrial();
-    _current = trial;
-    setBanner(trial);
-    _selectedId = null;
-    _collapsed = new Set();
-    linkLayer.selectAll("*").remove();
-    nodeLayer.selectAll("*").remove();
+  function winningPathIds(trial, winId) {
+    // In the timeline view, the rendered tree is root → LEADER → winner.
+    // The raw graph's parent chain doesn't map to that — every actually-
+    // ran sub-module is reparented under the synthetic leader node — so
+    // the path is just those three ids. For the baseline 2-node tree we
+    // walk the raw parent_id chain since that IS the rendered shape.
+    if (!winId || !trial.graph) return new Set();
+    if (trial.arm === "baseline") {
+      const path = new Set();
+      let cur = winId;
+      while (cur) {
+        path.add(cur);
+        cur = trial.graph.nodes[cur]?.parent_id;
+      }
+      return path;
+    }
+    return new Set([trial.graph.root_id, "__leader__", winId]);
+  }
 
-    if (!trial || !trial.graph || !trial.graph.root_id) {
-      renderNoGraphState(trial);
+  /* ---------- pane rendering ---------- */
+
+  function clearPane(pane) {
+    pane.linkLayer.selectAll("*").remove();
+    pane.nodeLayer.selectAll("*").remove();
+    pane.paneEl.querySelectorAll(".pane-empty").forEach(el => el.remove());
+  }
+
+  function renderEmptyPane(pane, msg) {
+    clearPane(pane);
+    const empty = document.createElement("div");
+    empty.className = "pane-empty";
+    empty.textContent = msg;
+    pane.paneEl.appendChild(empty);
+  }
+
+  function renderPane(pane, trial) {
+    pane.trial = trial;
+    pane.collapsed = new Set();
+    if (!trial) {
+      renderEmptyPane(pane, "No trial selected for this pane.");
+      pane.winId = null;
       return;
     }
-
-    document.getElementById("detail").innerHTML =
-      '<div class="empty-state">Click a node to inspect it.</div>';
-
-    const winId = pickWinningNodeId(trial);
-    drawTree(trial, winId);
-  }
-
-  function renderNoGraphState(trial) {
-    // Baseline trials don't run the ReAct loop → no attack graph is
-    // written. Mesmer trials can also hit this if the snapshot file
-    // went missing. Either way, show the trial metadata in the side
-    // panel and a clear explanation on the canvas.
-    const canvas = document.getElementById("canvas");
-    // Replace the svg (temporarily) with a centred message.
-    const svg = canvas.querySelector("svg");
-    const msgKind = trial
-      ? (trial.arm === "baseline"
-          ? "Baseline trial — single-shot attack, no decision tree."
-          : "No attack graph snapshot was written for this trial.")
-      : "No trial selected.";
-    // Draw into the SVG as a centred text so it survives zoom events.
-    const W = svg.clientWidth, H = svg.clientHeight;
-    nodeLayer.append("text")
-      .attr("x", W / 2).attr("y", H / 2 - 10)
-      .attr("text-anchor", "middle")
-      .attr("fill", "var(--muted)")
-      .attr("font-family", "var(--mono)")
-      .attr("font-size", 13)
-      .text(msgKind);
-    if (trial && trial.arm === "baseline") {
-      nodeLayer.append("text")
-        .attr("x", W / 2).attr("y", H / 2 + 14)
-        .attr("text-anchor", "middle")
-        .attr("fill", "var(--muted)")
-        .attr("font-size", 11)
-        .text("Switch arm → mesmer to see the ReAct decision tree.");
+    if (!trial.graph || !trial.graph.root_id) {
+      // Mesmer crash before any module ran — nothing to draw. Baseline
+      // trials always have a synthesized graph here, so this branch only
+      // hits malformed mesmer trials.
+      renderEmptyPane(pane,
+        trial.arm === "baseline"
+          ? "Baseline trial — no recorded send/receive (target call aborted)."
+          : "No attack-graph snapshot was written for this trial."
+      );
+      pane.winId = null;
+      return;
     }
-    renderTrialMetaPanel(trial);
+    pane.winId = pickWinningNodeId(trial);
+    drawTree(pane);
   }
+
+  function buildPaneHierarchy(trial, collapsed) {
+    // Baseline trials get the literal 2-node graph (root → baseline) we
+    // synthesized server-side; the leader-timeline view doesn't apply.
+    if (trial.arm === "baseline") {
+      return buildHierarchy(trial.graph.nodes, trial.graph.root_id, collapsed);
+    }
+    return buildLeaderTimeline(trial.graph.nodes, trial.graph.root_id, collapsed);
+  }
+
+  function drawTree(pane) {
+    const trial = pane.trial;
+    clearPane(pane);
+    const hData = buildPaneHierarchy(trial, pane.collapsed);
+    if (!hData) return;
+    const root = d3.hierarchy(hData);
+
+    const nodeHSpace = 180;
+    const nodeVSpace = 52;
+    const treeLayout = d3.tree().nodeSize([nodeVSpace, nodeHSpace]);
+    treeLayout(root);
+
+    const winPath = winningPathIds(trial, pane.winId);
+
+    pane.linkLayer.selectAll("path")
+      .data(root.links(), d => `${d.source.data.id}->${d.target.data.id}`)
+      .join("path")
+      .attr("class", d =>
+        "link" + (winPath.has(d.source.data.id) && winPath.has(d.target.data.id) ? " on-winning-path" : "")
+      )
+      .attr("d", d3.linkHorizontal().x(d => d.y).y(d => d.x));
+
+    const nodeSel = pane.nodeLayer.selectAll("g")
+      .data(root.descendants(), d => d.data.id)
+      .join("g")
+      .attr("class", d => {
+        let cls = "node";
+        if (d.data._isLeaderOrchestrator) cls += " leader-orchestrator";
+        else if (isLeaderVerdict(d.data)) cls += " leader";
+        else if (d.data.status === "frontier") cls += " frontier";
+        else if (d.data.status === "dead") cls += " dead";
+        if (d.data.id === pane.winId) cls += " winning";
+        // Restore selected highlight after redraw if the user had one.
+        if (_selectedNodeId && d.data.id === _selectedNodeId) cls += " selected";
+        return cls;
+      })
+      .attr("transform", d => `translate(${d.y},${d.x})`)
+      .on("click", (ev, d) => {
+        ev.stopPropagation();
+        _selectedNodeId = d.data.id;
+        _selectedFromPane = pane === paneA ? "A" : "B";
+        renderDetail(trial, d.data);
+        // Clear selection in both panes, then highlight the right one.
+        for (const p of [paneA, paneB]) {
+          p.nodeLayer.selectAll("g.node").classed(
+            "selected",
+            (p === pane) ? (g => g.data.id === _selectedNodeId) : false
+          );
+        }
+      });
+
+    // Synthetic LEADER orchestrator → diamond. Sits between root and the
+    // ran sub-modules so the orchestration pattern is explicit.
+    nodeSel.filter(d => d.data._isLeaderOrchestrator)
+      .append("polygon")
+      .attr("points", "0,-14 14,0 0,14 -14,0");
+
+    // Real sub-module attempts + frontier proposals + root → circles.
+    nodeSel.filter(d => !isLeaderVerdict(d.data) && !d.data._isLeaderOrchestrator)
+      .append("circle")
+      .attr("r", d => d.data.status === "frontier" ? 11 : 14)
+      .attr("fill", d => colorFor(trial, d.data))
+      .attr("stroke", "rgba(255,255,255,.2)");
+
+    // Leader-verdict (CONCLUDE node at run end) → square.
+    nodeSel.filter(d => isLeaderVerdict(d.data))
+      .append("rect")
+      .attr("x", -14).attr("y", -14)
+      .attr("width", 28).attr("height", 28).attr("rx", 3)
+      .attr("fill", d => leaderVerdictColor(d.data))
+      .attr("stroke", "rgba(255,255,255,.35)")
+      .attr("stroke-width", 2);
+
+    // Primary label under each node.
+    nodeSel.append("text")
+      .attr("y", 30).attr("text-anchor", "middle")
+      .text(d => shortLabel(d.data));
+
+    // Sequence number above the node — only on actually-ran sub-modules.
+    // Tells the user "this was the leader's Nth call". Frontier nodes
+    // don't get one because they were never called.
+    nodeSel.filter(d => typeof d.data._seqNum === "number")
+      .append("text")
+      .attr("class", "seq-num")
+      .attr("y", -20).attr("text-anchor", "middle")
+      .text(d => `#${d.data._seqNum}`);
+
+    // Winner ★ badge — small, off to the side, replaces the previous
+    // permanent halo so selection feedback dominates.
+    nodeSel.filter(d => d.data.id === pane.winId)
+      .append("text")
+      .attr("class", "winner-badge")
+      .attr("x", 18).attr("y", -8)
+      .attr("text-anchor", "start")
+      .text("★ winner");
+
+    nodeSel.filter(d => d.data.source === "human")
+      .append("text")
+      .attr("class", "badge").attr("x", 0).attr("y", -18)
+      .attr("text-anchor", "middle").text("★");
+
+    nodeSel.filter(d => (d.data._childIds || []).length > (d.data.children || []).length)
+      .append("text")
+      .attr("class", "badge").attr("x", 18).attr("y", 5)
+      .attr("text-anchor", "start").attr("fill", "var(--muted)")
+      .text("+");
+
+    nodeSel.on("dblclick", (ev, d) => {
+      ev.stopPropagation();
+      if (pane.collapsed.has(d.data.id)) pane.collapsed.delete(d.data.id);
+      else pane.collapsed.add(d.data.id);
+      drawTree(pane);
+    });
+
+    requestAnimationFrame(() => fitToView(pane, root));
+  }
+
+  /* ---------- pane labels ---------- */
+
+  function setPaneLabel(pane, trial) {
+    const isA = pane === paneA;
+    const armEl = document.getElementById(isA ? "paneA-arm" : "paneB-arm");
+    const infoEl = document.getElementById(isA ? "paneA-info" : "paneB-info");
+    if (!trial) {
+      armEl.textContent = "—"; armEl.className = "arm-tag";
+      infoEl.textContent = "";
+      return;
+    }
+    armEl.textContent = trial.arm.toUpperCase();
+    armEl.className = "arm-tag " + trial.arm;
+    const seed = (trial.seed == null) ? "—" : trial.seed;
+    const okIcon = trial.success ? "✓" : (trial.error ? "!" : "✗");
+    infoEl.textContent = ` · seed ${seed} · ${okIcon} ${trial.turns} turn${trial.turns === 1 ? "" : "s"}`;
+  }
+
+  /* ---------- top-level render ---------- */
+
+  function renderCurrent() {
+    const main = currentMainTrial();
+    setBanner(main);
+
+    if (_compare) {
+      // Force baseline-on-top, mesmer-on-bottom regardless of arm dropdown.
+      // Baseline has one row per sample_id; mesmer has N seeds, pick whichever
+      // is currently selected (or the first one if user is on baseline arm).
+      const baseline = findFirstTrialForArm({
+        target: selT.value, arm: "baseline", sample_id: selR.value,
+      });
+      let mesmer = findTrial({
+        target: selT.value, arm: "mesmer",
+        sample_id: selR.value, seed: selS.value,
+      });
+      if (!mesmer) {
+        mesmer = findFirstTrialForArm({
+          target: selT.value, arm: "mesmer", sample_id: selR.value,
+        });
+      }
+      renderPane(paneA, baseline);
+      renderPane(paneB, mesmer);
+      setPaneLabel(paneA, baseline);
+      setPaneLabel(paneB, mesmer);
+      // Side panel defaults to the user-selected arm's trial summary.
+      const summaryFor = (selA.value === "baseline") ? baseline : mesmer;
+      renderTrialMetaPanel(summaryFor);
+    } else {
+      renderPane(paneA, main);
+      renderPane(paneB, null);
+      setPaneLabel(paneA, main);
+      setPaneLabel(paneB, null);
+      renderTrialMetaPanel(main);
+    }
+  }
+
+  /* ---------- detail panel: trial summary (default state) ---------- */
 
   function renderTrialMetaPanel(trial) {
     const el = document.getElementById("detail");
@@ -497,10 +1027,15 @@
     el.innerHTML = `
       <h2>Trial summary</h2>
       <div class="row"><span>target</span><b>${esc(trial.target)}</b></div>
+      <div class="row"><span>target model</span><b class="long">${esc(trial.target_model || "—")}</b></div>
       <div class="row"><span>arm</span><b>${esc(trial.arm)}</b></div>
+      ${trial.arm === "mesmer" ? `
+        <div class="row"><span>attacker model</span><b class="long">${esc(trial.attacker_model || "—")}</b></div>
+      ` : ""}
       <div class="row"><span>sample id</span><b>${esc(trial.sample_id)}</b></div>
       <div class="row"><span>seed</span><b>${trial.seed == null ? "—" : trial.seed}</b></div>
-      <div class="row"><span>run id</span><b>${esc(trial.run_id).slice(0,12) || "—"}</b></div>
+      <div class="row"><span>run id</span><b>${esc(trial.run_id || "").slice(0,12) || "—"}</b></div>
+      <div class="row"><span>fingerprint</span><b>${esc(trial.fingerprint || "").slice(0,16) || "—"}</b></div>
       <div class="row"><span>success</span><b>${trial.success ? "yes" : "no"}</b></div>
       <div class="row"><span>turns</span><b>${trial.turns}</b></div>
       <div class="row"><span>duration</span><b>${dur.toFixed(2)}s</b></div>
@@ -510,145 +1045,43 @@
           <div class="leaked">🎯 ${esc(trial.matched_text)}</div></section>` : ""}
       ${trial.error ? `
         <section><h3>Error</h3><pre>${esc(trial.error)}</pre></section>` : ""}
+      ${trial.target_system_prompt ? `
+        <section><h3>Target defense — system prompt</h3>
+          <details><summary>show full system prompt (${trial.target_system_prompt.length} chars)</summary>
+          <pre>${esc(trial.target_system_prompt)}</pre></details></section>` : ""}
+      ${trial.target_user_turn_suffix ? `
+        <section><h3>Target defense — user-turn suffix</h3>
+          <details><summary>show full suffix (${trial.target_user_turn_suffix.length} chars)</summary>
+          <pre>${esc(trial.target_user_turn_suffix)}</pre></details></section>` : ""}
       ${t.events_path ? `
         <section><h3>Events path</h3>
           <pre>${esc(t.events_path)}</pre></section>` : ""}
       ${trial.arm === "baseline" ? `
-        <section><h3>Why no tree?</h3>
-          <div class="empty">Baseline trials are single-shot: one attack prompt
-          from the dataset's <code>baseline_attack</code> column, one target
-          response, pass/fail by canary scan. No ReAct loop runs, so there's
-          no attack graph to visualise.</div></section>` : ""}
+        <section><h3>Baseline arm</h3>
+          <div class="empty">Baseline trials are single-shot: one attack from the dataset's
+          <code>baseline_attack</code> column, one target reply, pass/fail by canary scan.
+          The single node in the canvas above shows the actual send/receive — click it
+          to inspect.</div></section>` : ""}
     `;
   }
 
-  function fitToView(root) {
-    const bbox = nodeLayer.node().getBBox();
-    const svgEl = svg.node();
-    const W = svgEl.clientWidth, H = svgEl.clientHeight;
-    const pad = 40;
-    const scale = Math.min(
-      (W - pad * 2) / Math.max(bbox.width, 1),
-      (H - pad * 2) / Math.max(bbox.height, 1),
-      1.2
-    );
-    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale;
-    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale;
-    svg.transition().duration(300)
-      .call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
-  }
-
-  function winningPathIds(trial, winId) {
-    if (!winId || !trial.graph) return new Set();
-    const path = new Set();
-    let cur = winId;
-    while (cur) {
-      path.add(cur);
-      cur = trial.graph.nodes[cur]?.parent_id;
-    }
-    return path;
-  }
-
-  function drawTree(trial, winId) {
-    const hData = buildHierarchy(trial.graph.nodes, trial.graph.root_id);
-    if (!hData) return;
-    const root = d3.hierarchy(hData);
-
-    // Dynamic size based on node count so big trees don't squish.
-    const nNodes = root.descendants().length;
-    const nodeHSpace = 180;
-    const nodeVSpace = 52;
-    const treeLayout = d3.tree().nodeSize([nodeVSpace, nodeHSpace]);
-    treeLayout(root);
-
-    const winPath = winningPathIds(trial, winId);
-
-    linkLayer.selectAll("path").remove();
-    linkLayer.selectAll("path")
-      .data(root.links(), d => `${d.source.data.id}->${d.target.data.id}`)
-      .join("path")
-      .attr("class", d =>
-        "link" + (winPath.has(d.source.data.id) && winPath.has(d.target.data.id) ? " on-winning-path" : "")
-      )
-      .attr("d", d3.linkHorizontal().x(d => d.y).y(d => d.x));
-
-    nodeLayer.selectAll("g").remove();
-    const nodeSel = nodeLayer.selectAll("g")
-      .data(root.descendants(), d => d.data.id)
-      .join("g")
-      .attr("class", d => {
-        let cls = "node";
-        if (d.data.status === "dead" && !isLeaderVerdict(d.data)) cls += " dead";
-        if (d.data.id === winId) cls += " winning";
-        if (isLeaderVerdict(d.data)) cls += " leader";
-        return cls;
-      })
-      .attr("transform", d => `translate(${d.y},${d.x})`)
-      .on("click", (ev, d) => {
-        ev.stopPropagation();
-        _selectedId = d.data.id;
-        renderDetail(trial, d.data);
-        nodeLayer.selectAll("g.node").classed(
-          "selected", g => g.data.id === _selectedId
-        );
-      });
-
-    // Sub-module + root nodes → circles keyed to TAPER tier.
-    nodeSel.filter(d => !isLeaderVerdict(d.data))
-      .append("circle")
-      .attr("r", 14)
-      .attr("fill", d => colorFor(trial, d.data))
-      .attr("stroke", "rgba(255,255,255,.2)");
-
-    // Leader-verdict nodes → square keyed to objective_met verdict
-    // (green=met, red=not). Distinguishes "the leader's own execution
-    // record" from sub-module attempts visually without needing to
-    // read the source field.
-    nodeSel.filter(d => isLeaderVerdict(d.data))
-      .append("rect")
-      .attr("x", -14).attr("y", -14)
-      .attr("width", 28).attr("height", 28).attr("rx", 3)
-      .attr("fill", d => leaderVerdictColor(d.data))
-      .attr("stroke", "rgba(255,255,255,.35)")
-      .attr("stroke-width", 2);
-
-    // text label under node
-    nodeSel.append("text")
-      .attr("y", 30).attr("text-anchor", "middle")
-      .text(d => shortLabel(d.data));
-
-    // human-seeded badge
-    nodeSel.filter(d => d.data.source === "human")
-      .append("text")
-      .attr("class", "badge").attr("x", 0).attr("y", -18)
-      .attr("text-anchor", "middle").text("★");
-
-    // collapsible chevron when node has hidden children
-    nodeSel.filter(d => (d.data._childIds || []).length > (d.data.children || []).length)
-      .append("text")
-      .attr("class", "badge").attr("x", 18).attr("y", 5)
-      .attr("text-anchor", "start").attr("fill", "var(--muted)")
-      .text("+");
-
-    // Double-click on node toggles its subtree.
-    nodeSel.on("dblclick", (ev, d) => {
-      ev.stopPropagation();
-      if (_collapsed.has(d.data.id)) _collapsed.delete(d.data.id);
-      else _collapsed.add(d.data.id);
-      drawTree(trial, winId);
-    });
-
-    // Fit after paint.
-    requestAnimationFrame(() => fitToView(root));
-  }
-
-  /* ---------- detail panel ---------- */
+  /* ---------- detail panel: per-node ---------- */
 
   function renderDetail(trial, node) {
+    // The synthetic LEADER orchestrator gets its own fixed explainer —
+    // it's not a real node, it's a viz construct. Render that and exit.
+    if (node._isLeaderOrchestrator) {
+      renderLeaderOrchestratorPanel(trial, node);
+      return;
+    }
+
     const tier = tierOf(trial, node.module);
     const tierLbl = (tier === 0 || tier) ? `T${tier}` : "—";
-    const isWinning = trial.trace?.winning_module === node.module &&
-                      node.id === pickWinningNodeId(trial);
+    const isFrontier = node.status === "frontier";
+    const isWinning = (
+      (trial.trace?.winning_module === node.module || (trial.arm === "baseline" && node.module === "baseline"))
+      && node.id === pickWinningNodeId(trial)
+    );
     const el = document.getElementById("detail");
     const msgs = node.messages_sent || [];
     const resps = node.target_responses || [];
@@ -658,55 +1091,172 @@
       pairs.push({ sent: msgs[i] ?? "", got: resps[i] ?? "" });
     }
 
+    const modCfg = MODULES[node.module] || null;
+
+    // Frontier banner — make it unmistakable that this node was proposed
+    // but never delegated to. Closes the "why is this module empty?"
+    // confusion when the user clicks a dashed grey ghost node.
+    const frontierBanner = isFrontier ? `
+      <div class="frontier-banner">
+        <b>⚠ Frontier proposal — never executed</b>
+        The leader's reflection-and-expand step proposed this approach as a candidate
+        next move, but the leader did not pick it up. No target turns ran, no judge
+        scored anything, no exchange was captured. This is what's left on the
+        frontier when the trial's turn budget ends or the leader concludes early.
+      </div>
+    ` : "";
+
+    const winnerBanner = isWinning ? `
+      <div class="winner-banner">
+        <b>★ Winning node</b>
+        First sub-module call whose target turn contained the canary substring.
+        The trial's final verdict comes from the LEADER's concluded output, not
+        this node — but this is where the leak originated.
+      </div>
+    ` : "";
+
     el.innerHTML = `
-      <h2>${esc(node.module)}${isWinning ? ' <span class="pill ok">WINNING</span>' : ''}</h2>
+      <h2>${esc(node.module)}${typeof node._seqNum === "number" ? ` <span class="pill">#${node._seqNum}</span>` : ""}</h2>
+      ${frontierBanner}
+      ${winnerBanner}
       <div class="row"><span>tier</span><b><span class="tier-dot" style="background:${colorFor(trial, node)}"></span>${tierLbl}</b></div>
-      <div class="row"><span>score</span><b>${node.score ?? 0}</b></div>
+      <div class="row"><span>score</span><b>${isFrontier ? "—" : (node.score ?? 0)}</b></div>
       <div class="row"><span>status</span><b>${esc(node.status || "?")}</b></div>
       <div class="row"><span>source</span><b>${esc(node.source || "?")}</b></div>
       <div class="row"><span>depth</span><b>${node.depth ?? 0}</b></div>
       <div class="row"><span>node id</span><b>${esc(node.id).slice(0,12)}</b></div>
+      <div class="row"><span>arm</span><b>${esc(trial.arm)}</b></div>
+      ${trial.arm === "mesmer" ? `
+        <div class="row"><span>attacker model</span><b class="long">${esc(trial.attacker_model || "—")}</b></div>
+      ` : ""}
+      <div class="row"><span>target model</span><b class="long">${esc(trial.target_model || "—")}</b></div>
       ${node.approach ? `
-        <section><h3>Approach</h3><pre>${esc(node.approach)}</pre></section>` : ""}
+        <section>
+          <h3>${isFrontier ? "Proposed approach" : "Instruction"}
+            <span class="h-tag">${isFrontier ? "frontier.approach (would-have-been)" : "delegate.approach"}</span></h3>
+          <pre>${esc(node.approach)}</pre>
+        </section>` : ""}
       ${pairs.length ? `
-        <section><h3>Exchange</h3>
+        <section><h3>Exchange <span class="h-tag">target round-trips</span></h3>
           ${pairs.map((p, i) => `
             ${p.sent ? `<div class="msg me"><span class="lbl">attacker → target · turn ${i+1}</span>${esc(p.sent)}</div>` : ""}
             ${p.got ? `<div class="msg them"><span class="lbl">target → attacker</span>${esc(p.got)}</div>` : ""}
           `).join("")}
         </section>` : ""}
-      ${node.leaked_info ? `
-        <section><h3>Leaked info (judge extract)</h3>
+      ${node.leaked_info && !isFrontier ? `
+        <section><h3>Leaked info <span class="h-tag">judge extract</span></h3>
           <div class="leaked">🎯 ${esc(node.leaked_info)}</div></section>` : ""}
-      ${node.reflection ? `
+      ${node.reflection && !isFrontier ? `
         <section><h3>Reflection</h3><pre>${esc(node.reflection)}</pre></section>` : ""}
-      ${node.module_output ? `
+      ${node.module_output && !isFrontier ? `
         <section><h3>Module output (conclude)</h3><pre>${esc(node.module_output)}</pre></section>` : ""}
-      ${!node.approach && !pairs.length && !node.leaked_info && !node.reflection && !node.module_output
+      ${modCfg ? renderModuleConfig(modCfg) : ""}
+      ${trial.target_system_prompt ? `
+        <section><h3>Target defense — system prompt</h3>
+          <details><summary>show full system prompt (${trial.target_system_prompt.length} chars)</summary>
+          <pre>${esc(trial.target_system_prompt)}</pre></details></section>` : ""}
+      ${!node.approach && !pairs.length && !node.leaked_info && !node.reflection && !node.module_output && !modCfg
         ? '<div class="empty">No data captured for this node.</div>' : ""}
     `;
   }
 
-  /* ---------- toolbar ---------- */
+  function renderLeaderOrchestratorPanel(trial, node) {
+    const el = document.getElementById("detail");
+    const ranCount = (node.children || []).filter(
+      c => c.source !== "leader" && c.status !== "frontier"
+    ).length;
+    const verdict = (node.children || []).find(c => c.source === "leader");
+    const verdictText = verdict
+      ? (verdict.status === "promising" ? "✓ objective met" : "✗ no consolidation")
+      : "(no verdict node)";
+    el.innerHTML = `
+      <h2>leader <span class="pill">${esc(trial.arm)}</span></h2>
+      <div class="frontier-banner" style="border-color:var(--accent);background:rgba(122,162,247,.08);color:#cdd6f4">
+        <b style="color:var(--accent)">Synthetic node — viz construct</b>
+        The leader is mesmer's orchestration loop. It picks the next sub-module
+        from the frontier, delegates to it, reads the judge verdict, then loops
+        until the objective is met or the turn budget is exhausted. Sub-modules
+        below this node are listed in the order the leader actually called them.
+      </div>
+      <div class="row"><span>module</span><b class="long">${esc(trial.target_model || "—")}'s leader run</b></div>
+      <div class="row"><span>real delegations</span><b>${ranCount}</b></div>
+      <div class="row"><span>verdict</span><b>${verdictText}</b></div>
+      <div class="row"><span>arm</span><b>${esc(trial.arm)}</b></div>
+      ${trial.arm === "mesmer" ? `
+        <div class="row"><span>attacker model</span><b class="long">${esc(trial.attacker_model || "—")}</b></div>
+      ` : ""}
+      <section>
+        <h3>How to read this view</h3>
+        <pre>The graph is laid out as the leader's call timeline:
 
-  document.getElementById("btn-fit").addEventListener("click", () => {
-    if (_current && _current.graph) {
-      const root = d3.hierarchy(buildHierarchy(_current.graph.nodes, _current.graph.root_id));
-      d3.tree().nodeSize([52, 180])(root);
-      fitToView(root);
-    }
-  });
-  document.getElementById("btn-expand").addEventListener("click", () => {
-    _collapsed = new Set();
-    if (_current) drawTree(_current, pickWinningNodeId(_current));
-  });
-  document.getElementById("btn-collapse").addEventListener("click", () => {
-    if (!_current || !_current.graph) return;
-    _collapsed = new Set();
-    for (const [id, n] of Object.entries(_current.graph.nodes)) {
-      if ((n.children || []).length && n.depth >= 1) _collapsed.add(id);
-    }
-    drawTree(_current, pickWinningNodeId(_current));
+  root ─▶ LEADER ─▶ #1 first delegation
+                   │   └─ frontier-A (proposed, never ran)
+                   │   └─ frontier-B (proposed, never ran)
+                   ▶ #2 second delegation
+                   ▶ ...
+                   ▶ leader-verdict  (square — run terminator)
+
+Solid coloured circles are real delegations the leader made.
+Dashed muted circles are frontier proposals (status=frontier) —
+candidates the leader's reflection step proposed but never picked.
+Click any node for its full instruction + module config + exchange.</pre>
+      </section>
+    `;
+  }
+
+  function renderModuleConfig(cfg) {
+    const tierLbl = (cfg.tier === 0 || cfg.tier) ? `T${cfg.tier}` : "—";
+    return `
+      <section>
+        <h3>Module config <span class="h-tag">${esc(cfg.name)} · ${tierLbl}</span></h3>
+        ${cfg.description ? `
+          <details open><summary>description</summary>
+          <pre>${esc(cfg.description)}</pre></details>` : ""}
+        ${cfg.theory ? `
+          <details><summary>theory</summary>
+          <pre>${esc(cfg.theory)}</pre></details>` : ""}
+        ${cfg.system_prompt ? `
+          <details><summary>system_prompt (${cfg.system_prompt.length} chars)</summary>
+          <pre>${esc(cfg.system_prompt)}</pre></details>` : ""}
+        ${cfg.judge_rubric ? `
+          <details><summary>judge_rubric</summary>
+          <pre>${esc(cfg.judge_rubric)}</pre></details>` : ""}
+        ${(cfg.sub_modules || []).length ? `
+          <div class="row"><span>sub_modules</span><b class="long">${esc(cfg.sub_modules.join(", "))}</b></div>` : ""}
+        <div class="row"><span>reset_target</span><b>${cfg.reset_target ? "true" : "false"}</b></div>
+      </section>
+    `;
+  }
+
+  /* ---------- toolbars (per-pane) ---------- */
+
+  document.querySelectorAll(".pane-toolbar button").forEach(btn => {
+    btn.addEventListener("click", (ev) => {
+      const which = btn.getAttribute("data-pane");
+      const act = btn.getAttribute("data-act");
+      const pane = (which === "A") ? paneA : paneB;
+      if (!pane.trial || !pane.trial.graph) return;
+      if (act === "fit") {
+        const hData = buildPaneHierarchy(pane.trial, pane.collapsed);
+        if (!hData) return;
+        const root = d3.hierarchy(hData);
+        d3.tree().nodeSize([52, 180])(root);
+        fitToView(pane, root);
+      } else if (act === "expand") {
+        pane.collapsed = new Set();
+        drawTree(pane);
+      } else if (act === "collapse") {
+        pane.collapsed = new Set();
+        // Collapse every actually-ran sub-module so its frontier-children
+        // disappear — leaves a clean leader-timeline of real delegations.
+        for (const [id, n] of Object.entries(pane.trial.graph.nodes)) {
+          if ((n.children || []).length && n.status !== "frontier" && n.source !== "leader") {
+            pane.collapsed.add(id);
+          }
+        }
+        drawTree(pane);
+      }
+    });
   });
 
   /* ---------- boot ---------- */

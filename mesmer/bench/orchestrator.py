@@ -280,6 +280,32 @@ class TrialResult:
     # when the recorder was disabled).
     events_path: str = ""
 
+    # --- Provenance fields (populated for every arm) ----------------------
+    #
+    # Captured at trial-creation time so the viz can render "what model
+    # did what" without re-reading the spec or chasing the events file.
+    # Both fields are pass-through copies of the corresponding spec values
+    # — string-valued, never inspected by the orchestrator itself.
+    target_model: str = ""               # e.g. "llama-3.1-8b-instant"
+    attacker_model: str = ""             # e.g. "gemini/gemini-2.5-flash"
+
+    # Defense sandwich shipped to the target on every turn. Both come from
+    # the dataset row (``pre_prompt`` / ``post_prompt`` for Tensor Trust).
+    # Surfaced here so a viz reader can see the full target context that
+    # surrounded each attacker message without joining back to the dataset.
+    target_system_prompt: str = ""
+    target_user_turn_suffix: str = ""
+
+    # --- Baseline arm only -----------------------------------------------
+    #
+    # The single-shot attack the baseline arm replayed and the target's
+    # one-shot reply. Mesmer trials leave these empty — their per-turn
+    # exchanges already live in the trial's graph snapshot. Captured here
+    # so the viz can render baseline trials as a single send/receive node
+    # without parsing a graph that was never written.
+    baseline_attack_prompt: str = ""
+    baseline_target_response: str = ""
+
     def as_jsonl(self) -> dict:
         """Shape used in the per-trial JSONL — stable public contract."""
         return {
@@ -301,6 +327,14 @@ class TrialResult:
             "run_id": self.run_id,
             "error": self.error,
             "fingerprint": self.fingerprint,
+            # --- Provenance fields (every arm) ---
+            "target_model": self.target_model,
+            "attacker_model": self.attacker_model,
+            "target_system_prompt": self.target_system_prompt,
+            "target_user_turn_suffix": self.target_user_turn_suffix,
+            # --- Baseline arm only (mesmer leaves both empty) ---
+            "baseline_attack_prompt": self.baseline_attack_prompt,
+            "baseline_target_response": self.baseline_target_response,
             # --- Trace fields ---
             "trace": {
                 "n_llm_calls": self.n_llm_calls,
@@ -782,6 +816,14 @@ async def run_mesmer_trial(
     seed = spec.agent.seed_base + trial_idx
     scenario = build_scenario_for_row(spec, target, row, seed=seed)
     trial_id = f"{target.id}__{row.sample_id}__{trial_idx}__mesmer"
+    # Provenance fields surfaced on every TrialResult exit path. Values
+    # come straight from the spec / row — no inspection needed at runtime.
+    provenance = dict(
+        target_model=target.model,
+        attacker_model=spec.agent.model,
+        target_system_prompt=row.pre_prompt,
+        target_user_turn_suffix=row.post_prompt,
+    )
 
     tee: LogFn | None = None
     if log_fn is not None:
@@ -839,6 +881,7 @@ async def run_mesmer_trial(
             error=f"{type(e).__name__}: {e}",
             event_counts=recorder.counts(),
             events_path=events_path,
+            **provenance,
         )
 
     # Authoritative success scan: the LEADER's concluded output. An
@@ -937,6 +980,7 @@ async def run_mesmer_trial(
         compression_events=trace.compression_events,
         event_counts=recorder.counts(),
         events_path=events_path,
+        **provenance,
     )
 
 
@@ -971,6 +1015,16 @@ async def run_baseline_trial(
     from mesmer.targets import create_target
 
     trial_id = f"{target.id}__{row.sample_id}__0__baseline"
+    # Provenance fields are identical across all three exit paths — capture
+    # them once so the viz always has full context, even on failed/aborted
+    # baseline trials.
+    provenance = dict(
+        target_model=target.model,
+        attacker_model="",                              # baseline has no attacker LLM
+        target_system_prompt=row.pre_prompt,
+        target_user_turn_suffix=row.post_prompt,
+        baseline_attack_prompt=row.baseline_attack,
+    )
     if not row.baseline_attack:
         return TrialResult(
             trial_id=trial_id,
@@ -987,6 +1041,7 @@ async def run_baseline_trial(
             total_tokens=0,
             duration_s=0.0,
             error="no_baseline_attack_in_dataset_row",
+            **provenance,
         )
 
     target_cfg = TargetConfig(
@@ -1020,6 +1075,7 @@ async def run_baseline_trial(
             total_tokens=0,
             duration_s=time.monotonic() - t0,
             error=f"{type(e).__name__}: {e}",
+            **provenance,
         )
 
     judge_result = find_canary_in_turns([reply], row.canary)
@@ -1053,6 +1109,8 @@ async def run_baseline_trial(
         total_tokens=_u("total_tokens"),
         duration_s=time.monotonic() - t0,
         fingerprint=fingerprint,
+        # Override the empty default in ``provenance`` with the actual reply.
+        **{**provenance, "baseline_target_response": reply or ""},
     )
 
 
@@ -1466,6 +1524,7 @@ async def run_benchmark(
     target_filter: set[str] | None = None,
     sample_override: int | None = None,
     trials_override: int | None = None,
+    sample_ids_filter: set[str] | None = None,
     force_download: bool = False,
     progress: Callable[[str], None] | None = None,
     execute_run_fn: ExecuteRunFn = execute_run,
@@ -1479,6 +1538,14 @@ async def run_benchmark(
       - ``<iso>-<spec-version>-summary.json`` — aggregate stats
       - ``<iso>-<spec-version>-README.md`` — human-readable table
 
+    ``sample_ids_filter`` — when set, only rows whose ``sample_id`` is in
+    the set run. Applied BEFORE ``sample_override``: callers asking for a
+    specific row by id are saying "this row, no others" — adding a head
+    truncation on top would silently drop the row when its dataset
+    position is past the truncation point. Misses are reported via
+    ``progress`` so a typoed sample_id surfaces as a no-op rather than a
+    confusing zero-trials run.
+
     Returns ``(summary, trials)`` so callers (unit tests, web) can use
     the results without re-parsing the files.
     """
@@ -1486,8 +1553,26 @@ async def run_benchmark(
         spec.dataset, force_download=force_download, root_dir=spec_dir
     )
 
+    if sample_ids_filter:
+        wanted = {str(s) for s in sample_ids_filter}
+        rows = [r for r in rows if r.sample_id in wanted]
+        missing = wanted - {r.sample_id for r in rows}
+        if missing and progress:
+            progress(
+                f"--row filter: {len(missing)} sample_id(s) not found in "
+                f"dataset: {sorted(missing)}"
+            )
+        if not rows:
+            raise ValueError(
+                f"--row filter matched zero dataset rows. Wanted: "
+                f"{sorted(wanted)}"
+            )
+
     sample_n = sample_override if sample_override is not None else spec.budget.sample
-    if sample_n and sample_n > 0:
+    if sample_n and sample_n > 0 and not sample_ids_filter:
+        # ``--row`` is "this exact row" — applying ``--sample`` head truncation
+        # on top would silently drop the requested row. When both are given
+        # we honour the explicit row filter and ignore the head limit.
         rows = rows[:sample_n]
 
     trials_per_row = (

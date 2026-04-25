@@ -891,6 +891,81 @@ class TestRunBenchmarkEndToEnd:
         assert "simulated provider outage" in trials[0].error
         assert summary.cells[0].n_successes == 0
 
+    async def test_sample_ids_filter_runs_only_named_rows(self, tmp_path: Path):
+        """``--row 113309827255148`` semantics — exact match, not head trunc.
+
+        The dataset has three rows; we ask for the middle one. Without the
+        filter the orchestrator would dispatch a trial per row; with the
+        filter only the named row produces a trial. ``sample_override`` is
+        also set, but the row filter is "this row, no others" — the head-
+        truncation must not kick in and silently drop our requested row.
+        """
+        cache = tmp_path / "data.jsonl"
+        _write_jsonl(cache, [
+            {"sample_id": 11, "pre_prompt": "p1", "post_prompt": "",
+             "access_code": "c1", "attack": "a1"},
+            {"sample_id": 22, "pre_prompt": "p2", "post_prompt": "",
+             "access_code": "c2", "attack": "a2"},
+            {"sample_id": 33, "pre_prompt": "p3", "post_prompt": "",
+             "access_code": "c3", "attack": "a3"},
+        ])
+        spec = _minimal_spec(tmp_path)
+        spec.budget.trials_per_row = 1
+        spec.budget.run_baseline = False
+
+        async def fake(config, **_):
+            return SimpleNamespace(
+                run_id="r", duration_s=0.1, graph=None, memory=None,
+                scenario=config.scenario_override, result="ok",
+                ctx=SimpleNamespace(
+                    turns=[SimpleNamespace(received="x", sent="y", is_error=False)],
+                    telemetry=SimpleNamespace(
+                        prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                        llm_seconds=0, n_calls=0,
+                    ),
+                    target=SimpleNamespace(last_fingerprint=None),
+                ),
+                telemetry=SimpleNamespace(
+                    prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                    llm_seconds=0, n_calls=0,
+                ),
+            )
+
+        summary, trials = await run_benchmark(
+            spec,
+            spec_dir=tmp_path,
+            output_dir=tmp_path / "results-rowfilter",
+            sample_ids_filter={"22"},
+            sample_override=1,    # would slice to first row without the filter
+            execute_run_fn=fake,
+        )
+        assert len(trials) == 1
+        assert trials[0].sample_id == "22"
+
+    async def test_sample_ids_filter_unknown_row_raises(self, tmp_path: Path):
+        """A typoed sample_id should fail loud, not silently produce zero trials.
+
+        Catches the most common operator error: pasting a row id with a
+        leading/trailing space, an old format, or a wrong dataset.
+        """
+        import pytest
+
+        cache = tmp_path / "data.jsonl"
+        _write_jsonl(cache, [
+            {"sample_id": 1, "pre_prompt": "p", "post_prompt": "",
+             "access_code": "c", "attack": "a"},
+        ])
+        spec = _minimal_spec(tmp_path)
+        spec.budget.run_baseline = False
+
+        with pytest.raises(ValueError, match="zero dataset rows"):
+            await run_benchmark(
+                spec,
+                spec_dir=tmp_path,
+                output_dir=tmp_path / "results-bad",
+                sample_ids_filter={"not-a-real-id"},
+            )
+
     async def test_target_filter(self, tmp_path: Path):
         cache = tmp_path / "data.jsonl"
         _write_jsonl(cache, [

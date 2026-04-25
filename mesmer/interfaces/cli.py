@@ -609,8 +609,18 @@ def serve(port, host, no_browser, scenario_dir):
          "HTML is a derived artefact you can always rebuild with "
          "`mesmer bench-viz {stem}-summary.json`.",
 )
+@click.option(
+    "--row",
+    "rows",
+    multiple=True,
+    default=(),
+    help="Run only the dataset row(s) with these sample_id values. "
+         "Repeatable: `--row 1234 --row 5678`. When set, overrides "
+         "--sample (the row filter is exact, not head-truncating). "
+         "Useful for re-running a single failed trial after a fix.",
+)
 def bench(spec_path, targets, sample, trials, output, concurrency, download,
-          no_baseline, verbose, no_viz):
+          no_baseline, verbose, no_viz, rows):
     """Run a benchmark spec and emit reproducible results.
 
     A spec is a YAML file that binds one mesmer module to one dataset and
@@ -633,6 +643,7 @@ def bench(spec_path, targets, sample, trials, output, concurrency, download,
         no_baseline=no_baseline,
         verbose=verbose,
         no_viz=no_viz,
+        rows=rows,
     ))
 
 
@@ -648,6 +659,7 @@ async def _bench(
     no_baseline: bool,
     verbose: bool,
     no_viz: bool,
+    rows: tuple[str, ...] = (),
 ):
     from mesmer.bench import load_spec, run_benchmark
 
@@ -663,6 +675,8 @@ async def _bench(
     if targets:
         target_ids = {t.strip() for t in targets.split(",") if t.strip()}
 
+    sample_ids_filter = {r.strip() for r in rows if r and r.strip()} or None
+
     # Default output dir: <spec>/../../results/. Spec lives in
     # benchmarks/specs/foo.yaml, so parent.parent = benchmarks/.
     if output is None:
@@ -672,13 +686,18 @@ async def _bench(
 
     spec_dir = spec_path_obj.parent.parent   # <benchmarks/>
 
+    rows_label = (
+        f"row filter: {', '.join(sorted(sample_ids_filter))}"
+        if sample_ids_filter
+        else f"{sample or spec.budget.sample or 'all'} rows"
+    )
     console.print(Panel(
         f"[bold]{spec.name}[/bold]\n"
         f"Version: {spec.version} · Module: {spec.module}\n"
         f"Targets: {', '.join(t.id for t in spec.targets)}\n"
         f"Dataset: {spec.dataset.upstream_url or spec.dataset.local_cache}\n"
         f"Budget: {spec.budget.max_turns} turns · "
-        f"{sample or spec.budget.sample or 'all'} rows · "
+        f"{rows_label} · "
         f"{trials or spec.budget.trials_per_row} trials/row\n"
         f"Baseline arm: {'on' if spec.budget.run_baseline else 'off'}",
         title="[bold magenta]mesmer bench[/bold magenta]",
@@ -696,6 +715,7 @@ async def _bench(
         target_filter=target_ids,
         sample_override=sample,
         trials_override=trials,
+        sample_ids_filter=sample_ids_filter,
         force_download=download,
         progress=_progress,
         # --verbose streams every ReAct event. With concurrency > 1 trials

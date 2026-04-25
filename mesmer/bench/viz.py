@@ -156,14 +156,57 @@ def _derive_stem(summary_path: Path) -> str:
 
 
 def _meta_for(summary: dict) -> dict:
-    """Pull rendering-relevant metadata out of the summary JSON."""
+    """Pull rendering-relevant metadata out of the summary JSON.
+
+    Also embeds a snapshot of the module registry so the viz can render
+    each node's full ``description`` / ``theory`` / ``system_prompt`` /
+    ``judge_rubric`` without the user having to crack open the YAMLs.
+    Built-in modules are auto-discovered from ``BUILTIN_MODULES`` — the
+    same path :func:`mesmer.core.runner.execute_run` resolves at run
+    time. Discovery failures are non-fatal: the viz degrades to "no
+    module config available" instead of crashing the build.
+    """
     return {
         "spec": summary.get("spec"),
         "version": summary.get("version"),
         "module": summary.get("module"),
         "date": summary.get("date"),
         "dataset_sha256": summary.get("dataset_sha256", ""),
+        "modules": _registry_snapshot(),
     }
+
+
+def _registry_snapshot() -> dict:
+    """Return ``{module_name: {description, theory, system_prompt, ...}}``.
+
+    Pure side-effect-free read over the on-disk module YAMLs. Empty dict
+    on any error so a missing registry never aborts the viz build.
+    """
+    try:
+        from mesmer.core.registry import Registry
+        from mesmer.core.runner import BUILTIN_MODULES
+    except Exception as e:                               # pragma: no cover
+        logger.warning("bench-viz: registry import failed: %s", e)
+        return {}
+    try:
+        registry = Registry()
+        registry.auto_discover(BUILTIN_MODULES)
+    except Exception as e:                               # pragma: no cover
+        logger.warning("bench-viz: registry auto_discover failed: %s", e)
+        return {}
+    out: dict[str, dict] = {}
+    for name, mod in registry.modules.items():
+        out[name] = {
+            "name": name,
+            "description": mod.description,
+            "theory": mod.theory,
+            "system_prompt": mod.system_prompt,
+            "judge_rubric": mod.judge_rubric,
+            "tier": mod.tier,
+            "reset_target": bool(mod.reset_target),
+            "sub_modules": list(mod.sub_modules),
+        }
+    return out
 
 
 def _header_title(summary: dict) -> str:
@@ -274,6 +317,12 @@ def _trial_payload(row: dict, graph_dict: dict | None) -> dict:
     ``target/arm/sample_id/seed`` without nested lookups. ``module_tiers``
     is derived once here from the zip of ``modules_called`` + ``tier_sequence``
     so the client can color nodes without re-zipping per render.
+
+    Baseline trials never write a graph snapshot, so we synthesize one
+    here from the trial's ``baseline_attack_prompt`` /
+    ``baseline_target_response`` fields. The result is a tiny two-node
+    tree (``root`` → ``baseline``) that the renderer treats exactly like
+    a real graph — no special baseline-only viz code path.
     """
     trace = row.get("trace") or {}
     modules_called = list(trace.get("modules_called") or [])
@@ -283,10 +332,14 @@ def _trial_payload(row: dict, graph_dict: dict | None) -> dict:
         if isinstance(mod, str) and isinstance(tier, int):
             module_tiers[mod] = tier
 
+    arm = row.get("arm", "")
+    if graph_dict is None and arm == "baseline":
+        graph_dict = _synthesize_baseline_graph(row)
+
     return {
         "trial_id": row.get("trial_id", ""),
         "target": row.get("target", ""),
-        "arm": row.get("arm", ""),
+        "arm": arm,
         "sample_id": row.get("sample_id", ""),
         "seed": row.get("seed", 0),
         "success": bool(row.get("success")),
@@ -298,6 +351,15 @@ def _trial_payload(row: dict, graph_dict: dict | None) -> dict:
         "error": row.get("error") or "",
         "fingerprint": row.get("fingerprint", ""),
         "run_id": row.get("run_id", ""),
+        # Provenance + defense sandwich (every arm).
+        "target_model": row.get("target_model", ""),
+        "attacker_model": row.get("attacker_model", ""),
+        "target_system_prompt": row.get("target_system_prompt", ""),
+        "target_user_turn_suffix": row.get("target_user_turn_suffix", ""),
+        # Baseline-only fields. Empty for mesmer; the renderer reads them
+        # only when ``arm == "baseline"``.
+        "baseline_attack_prompt": row.get("baseline_attack_prompt", ""),
+        "baseline_target_response": row.get("baseline_target_response", ""),
         "trace": {
             "modules_called": modules_called,
             "tier_sequence": tier_sequence,
@@ -316,6 +378,79 @@ def _trial_payload(row: dict, graph_dict: dict | None) -> dict:
         "graph": None if graph_dict is None else {
             "root_id": graph_dict.get("root_id"),
             "nodes": graph_dict.get("nodes") or {},
+        },
+    }
+
+
+def _synthesize_baseline_graph(row: dict) -> dict | None:
+    """Build a two-node ``root → baseline`` tree from a baseline jsonl row.
+
+    Returns ``None`` when the row carries neither a recorded attack
+    prompt nor a target response (early-aborts before send) — the viewer
+    keeps its existing "no graph captured" empty-state in that case.
+
+    Status / score on the synthesized node mirror the trial outcome so
+    the existing colour rules (DEAD vs PROMISING vs ALIVE) light up:
+
+    - ``status: "promising"`` and ``score: 10`` when the canary scan
+      succeeded (renders green).
+    - ``status: "dead"`` and ``score: 1`` when it failed (renders red,
+      dashed). Mirrors how the in-loop judge would have classified a
+      single attempt with no leak.
+    """
+    attack = row.get("baseline_attack_prompt") or ""
+    response = row.get("baseline_target_response") or ""
+    if not attack and not response:
+        return None
+
+    success = bool(row.get("success"))
+    status = "promising" if success else "dead"
+    score = 10 if success else 1
+    matched = row.get("matched_text") or ""
+    leaked = matched if success else ""
+    reflection = (
+        f"baseline single-shot attack — {'matched canary' if success else 'no canary match'}"
+    )
+
+    root_id = "baseline-root"
+    node_id = "baseline-trial"
+    return {
+        "root_id": root_id,
+        "nodes": {
+            root_id: {
+                "id": root_id,
+                "parent_id": None,
+                "module": "root",
+                "approach": "baseline arm — single-shot replay",
+                "messages_sent": [],
+                "target_responses": [],
+                "score": 0,
+                "leaked_info": "",
+                "module_output": "",
+                "reflection": "",
+                "status": "alive",
+                "children": [node_id],
+                "depth": 0,
+                "run_id": "",
+                "source": "agent",
+            },
+            node_id: {
+                "id": node_id,
+                "parent_id": root_id,
+                "module": "baseline",
+                "approach": "Replay the dataset's recorded baseline_attack column.",
+                "messages_sent": [attack],
+                "target_responses": [response],
+                "score": score,
+                "leaked_info": leaked,
+                "module_output": response,
+                "reflection": reflection,
+                "status": status,
+                "children": [],
+                "depth": 1,
+                "run_id": "",
+                "source": "agent",
+            },
         },
     }
 
