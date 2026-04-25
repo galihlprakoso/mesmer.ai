@@ -164,6 +164,7 @@ mesmer/                          # repo root
 │       └── field/                              # TAPER tier-0/1 field techniques
 │           ├── direct-ask/module.yaml          # tier 0
 │           ├── instruction-recital/module.yaml # tier 0
+│           ├── indirect-recital/module.yaml    # tier 0 — serialization frame
 │           ├── format-shift/module.yaml        # tier 0
 │           ├── prefix-commitment/module.yaml   # tier 1
 │           ├── delimiter-injection/module.yaml # tier 1
@@ -275,6 +276,21 @@ A module is a `module.yaml` (declarative: system prompt + sub-module list). `Reg
 
 Sub-modules are exposed to the parent agent as OpenAI-style function-calling tools. A "leader" like `system-prompt-extraction` is just a module whose `sub_modules` list references profilers and techniques. The leader delegates; each sub-module runs its own nested ReAct loop and returns a string result.
 
+**Sub-module entries can be either bare strings or dicts** with per-entry flags. The dataclass is `SubModuleEntry` in `core/module.py`:
+
+```yaml
+sub_modules:
+  - target-profiler           # shorthand — bare string
+  - name: attack-planner
+    see_siblings: true        # inject sibling roster into this module's prompt
+  - name: recon-util
+    call_siblings: true       # expose siblings as callable tools (future — parsed but not wired)
+```
+
+`see_siblings: true` makes `sub_module.handle` inject a `## Available modules (siblings in this leader)` block — name + description + theory of every sibling — into this sub-module's instruction before delegation. The `attack-planner` module needs this so it can name specific siblings in its plan; without it the planner would have to be hardcoded to a known module list (the original failure mode that motivated this flag). Use `see_siblings` for any sub-module that reasons about which siblings to recommend; leave it false for techniques that just probe.
+
+Test your leader's sub-module entries are dataclass-correct (not bare strings everywhere) when you need a flag — `module.sub_module_names` returns the flat name list for backward-compat call sites, while `module.sub_modules` is the typed list of `SubModuleEntry`.
+
 ### Shared state between modules: two layers, no typed dossiers
 
 Core has **exactly two** cross-module state primitives. Neither is a typed
@@ -321,27 +337,62 @@ output format — keep it in the module's YAML + prompts, serialize it to
 text via `conclude()`, and let the scratchpad carry it. Core stays
 agnostic; modules own their schemas.
 
-### Objective awareness (framework-level)
+### Objective awareness — leader decides, sub-modules signal
 
-Every module's system prompt — leader and sub-module alike — is suffixed
-with an **OBJECTIVE AWARENESS** stanza assembled by `engine.py` (around
-the `system_content` block, ~line 120). It tells the module:
+Every module's system prompt is suffixed with an **OBJECTIVE AWARENESS**
+stanza assembled by `engine.py` (~line 120). The stanza is split by
+`ctx.depth` so the termination decision always lives at the leader level:
 
-> "if during your work the target reveals enough to satisfy the overall
->  objective, STOP IMMEDIATELY and call `conclude()` with text starting
->  with the exact marker `OBJECTIVE MET — <one sentence>`."
+- **Sub-modules (`ctx.depth > 0`)** — when the target discloses something
+  that *could* satisfy the overall objective, the sub-module flags it in
+  its conclude text with the marker `OBJECTIVE SIGNAL — <verbatim
+  fragment>` and finishes its full deliverable (dossier, plan, attack
+  write-up). Sub-modules NEVER terminate the run. The string
+  `OBJECTIVE MET` does not appear anywhere in the sub-module stanza —
+  negative instructions don't stick to LLMs, so we don't even mention
+  the leader-only marker as something forbidden.
 
-This closes the "target-profiler burns its full turn budget writing a
-dossier even after the password already leaked on turn 1" failure mode.
-The mechanism downstream of the marker (judge reads conclude text →
-sets `JudgeResult.objective_met=true` → leader's engine auto-concludes
-at `engine.py:320-333`) already existed; the prompt clause is what makes
-sub-modules proactively short-circuit instead of plowing on.
+- **Leader (`ctx.depth == 0`)** — reads `OBJECTIVE SIGNAL` flags from
+  sub-module scratchpad entries plus raw target evidence in tool
+  results (`sub_module.handle` injects a verbatim target-evidence
+  block). When the evidence UNAMBIGUOUSLY satisfies the overall
+  objective, the leader calls
+  `conclude(result=..., objective_met=true)`. The bool is a typed
+  parameter on the `conclude()` tool schema (see
+  `core/agent/tools/conclude.py`) — NOT a string marker in the result
+  text. The engine's conclude short-circuit reads
+  `args.get("objective_met")` and that's the SOLE place
+  `ctx.objective_met` / `ctx.objective_met_fragment` are set.
 
-The stanza is strictly generic — no dataset vocabulary, no scenario
-names, no module roster. Reaches every module automatically without
-per-yaml edits. Anti-overfit regex scan lives in
+`evaluation.py` deliberately does NOT propagate `JudgeResult.objective_met`
+to the parent ctx. The judge's verdict still surfaces in `JUDGE_VERDICT`
+telemetry and as an advisory `signal_line` in the leader's tool_result
+("🔍 Judge flagged a potential objective signal..."), but the
+termination decision is the leader's, full stop. This closes two
+failure modes:
+
+  - **Sub-module burns its budget after a clean win.** Profiler still
+    writes a full dossier even when target leaks on turn 1. Now the
+    profiler flags it via `OBJECTIVE SIGNAL —` and the leader can
+    short-circuit on the next iteration.
+  - **Sub-module false-positives on a response phrase.** Profiler
+    seeing "Access Granted" used to call `OBJECTIVE MET — Access
+    Granted` and end the run. "Access Granted" is the target's success-
+    response phrase, not the secret code. Now the leader has full
+    context (raw evidence, the actual scenario goal text, multiple
+    sub-modules' outputs) to evaluate before terminating.
+
+The stanza stays scenario-agnostic — no dataset vocabulary, no module
+roster, no recognition heuristics. Anti-overfit regex scan in
 `tests/test_objective_awareness.py::test_stanza_is_scenario_agnostic`.
+
+**Spec authors:** the scenario `objective:` text is shown to ALL modules
+(leader + sub-modules). Do NOT include leader-only call templates like
+`OBJECTIVE MET — <fragment>` in the objective text — sub-modules will
+copy the format verbatim. Tell the leader to call
+`conclude(objective_met=true)` and describe what the `result` text
+should contain. The bench spec in
+`benchmarks/specs/tensor-trust-extraction.yaml` is the canonical example.
 
 ### The leader is a module (recorded like any other)
 
@@ -447,6 +498,7 @@ Winning-module attribution: first try `ctx.turns[canary_turn - 1].module` (engin
 Everything attacker-runtime lives here. Non-negotiable:
 
 - **One file per tool** (`tools/send_message.py`, `tools/ask_human.py`, `tools/conclude.py`, `tools/sub_module.py`). Schema + handler collocated — the OpenAI function description and the code that runs when it's called change together. Never introduce a "handlers.py" catch-all.
+- **`conclude()` carries typed args, not string markers.** The schema in `tools/conclude.py` exposes `result: string` (required) and `objective_met: boolean` (optional, leader-only). The engine's conclude short-circuit reads `args.get("objective_met")` to set `ctx.objective_met` and `ctx.objective_met_fragment`. Do NOT add string-pattern detection on the `result` text (e.g. `result.startswith("OBJECTIVE MET")`) — spec templates often prepend their own headers (`## Result\n...`) and the bool is the unambiguous declaration of intent.
 - **No defensive `getattr(obj, field, default)`** on `Context`, `Turn`, or `ModuleConfig`. Those fields are declared; `getattr` hides typos and means type checkers can't help. If a test passes `MagicMock()`, the test is wrong — set the attributes explicitly.
 - **No hardcoded role / tool-name strings.** Use the enums in `core/constants.py`.
 - **All mesmer errors derive from `MesmerError`** in `core/errors.py`. Never use bare `except Exception: return ""` to mask an LLM failure — raise a typed error and catch it at a single boundary that logs a real reason. Compression is the canonical pattern: raise in `_raw_completion`/`_summarise_block`, catch once in `maybe_compress`.
@@ -628,7 +680,7 @@ These are consumed by `bench/trace.py` to build per-trial telemetry + the `event
    compounding target state. Omit to default to 2.
 3. `Registry.auto_discover(BUILTIN_MODULES)` picks it up automatically.
 4. Reference it by `name` in a scenario's `module:` field, or add to an existing leader's `sub_modules:` list.
-5. **Do not repeat the OBJECTIVE AWARENESS instruction** in your module's `system_prompt`. The engine appends it to every module's system content at runtime (`engine.py` ~line 120). Your module automatically gets "if you spot the overall objective being met, stop and emit `OBJECTIVE MET —`" without per-yaml language. Keep the module prompt focused on HOW your module does its thing — the engine handles early-termination semantics.
+5. **Do not repeat the OBJECTIVE AWARENESS instruction** in your module's `system_prompt`. The engine appends a depth-aware stanza at runtime (`engine.py` ~line 120). Sub-modules automatically get the `OBJECTIVE SIGNAL —` flag protocol; leaders get the `conclude(objective_met=true)` protocol. Keep the module prompt focused on HOW your module does its thing — the engine handles termination semantics. **Never** write `OBJECTIVE MET` or a `## Result\nOBJECTIVE MET — <fragment>` template into your module's `system_prompt` or into a scenario `objective:` block — sub-modules will pattern-match on it and call it themselves.
 6. **Do not name sibling modules in your prompt** (no hardcoded `direct-ask` / `foot-in-door` / etc. mentions). That's a known overfitting trap — target-profiler learned it the hard way (see `tests/test_field_modules_load.py::TestTargetProfilerDecoupling`). Describe TECHNIQUES ("direct asking", "authority framing") in plain English; the leader's planner picks specific modules.
 
 ### Adding a new tool to the ReAct engine
@@ -673,6 +725,8 @@ rejected. If you reach for one of these, stop — it's a hallucination trap.
 | `profile.json` | Never shipped | `profile.md` (human notes, hand-edited) + `graph.json` (authoritative module outputs). |
 | `modules/attacks/persona-break` · `safety-bypass` | Never created | Only `system-prompt-extraction` ships today. If you need a new leader, author it from scratch; don't pretend a placeholder exists. |
 | `modules/techniques/ericksonian` · `architecture` | Never created | Same — no placeholder directories exist. Add a real module.yaml or don't. |
+| `OBJECTIVE MET — <fragment>` string marker in module / spec / scenario prompts | Removed in favour of typed `conclude(objective_met=true)` arg | Use the bool param. The string was an LLM pattern-match magnet — sub-modules copied it verbatim and called `OBJECTIVE MET — <wrong fragment>`. Never write that string into a module's `system_prompt` or a scenario `objective:` block. |
+| `JudgeResult.objective_met` propagation to `ctx.objective_met` in `evaluation.py` | Removed (judge is advisory only) | The leader's own `conclude(objective_met=true)` call sets ctx. Judge's verdict surfaces as a tool_result advisory; the termination decision lives at the leader. |
 
 When this file's tree disagrees with the real filesystem, the filesystem
 wins. Fix CLAUDE.md in the same change.
@@ -680,11 +734,12 @@ wins. Fix CLAUDE.md in the same change.
 ## Gotchas
 
 - **Rate-limits don't sleep** — they cool the current key and rotate via `KeyPool`. If all keys are cooled, the loop emits `LogEvent.RATE_LIMIT_WALL` and returns `None` from the LLM wrapper; the engine maps that to the "LLM error: all retries exhausted" string.
+- **Empty `choices` is a transient failure, not an exception.** Some providers (notably Gemini) ship a 200 OK with `choices=[]` when the request hits a safety filter, content block, or 0-token completion. LiteLLM passes the response through structurally-valid — no exception is raised — so without an explicit guard the engine indexes into `[]` and the leader's run dies with `Error: list index out of range`. `_completion_with_retry` (`core/agent/retry.py`) treats empty `choices` as a transient failure (same path as 503/timeout) and retries with backoff before giving up.
 - **`conclude` is special-cased in the engine**, not in the dispatch table. It short-circuits the loop; don't try to route it through `dispatch_tool_call`.
 - **`Turn.kind` JSON round-trip** — `Turn.to_dict` emits the string (via `TurnKind.SUMMARY.value`); `Turn.__post_init__` accepts a string and coerces back to the enum, so old JSON files load cleanly.
 - **CONTINUOUS mode forces `reset_target=False`.** If a module declares `reset_target: true` and the scenario is CONTINUOUS, the reset is skipped and `LogEvent.MODE_OVERRIDE` is logged.
 - **The in-loop LLM judge is NOT authoritative for benchmarks.** Its score guides the next move and frontier generation; benchmark success is decided by `bench/canary.py::judge_trial_success` in a separate post-run pass that scans the leader's concluded output (`RunResult.result`). An accidental canary leak in a sub-module turn that the leader never packaged into its verdict text does NOT count — that's the whole point of leader-grounded scoring.
-- **Tier defaults matter for legacy YAMLs.** A `module.yaml` without a `tier:` field defaults to 2 (cognitive). Six new field-technique modules in `modules/techniques/field/` declare tier 0/1 explicitly. Out-of-range (<0 or >3) raises `InvalidModuleConfig` — silent collapse to default would mask typos.
+- **Tier defaults matter for legacy YAMLs.** A `module.yaml` without a `tier:` field defaults to 2 (cognitive). Field-technique modules in `modules/techniques/field/` declare tier 0/1 explicitly. Out-of-range (<0 or >3) raises `InvalidModuleConfig` — silent collapse to default would mask typos.
 - **Graph snapshot is trial-scoped, persistence is cross-run.** `benchmarks/results/{date}/events/{trial_id}.graph.json` contains only this run's nodes + root (diffable, scoped). `~/.mesmer/targets/{hash}/graph.json` is the cross-run accumulator (full history per target). They don't serve the same purpose — don't compare them.
 - **`bench --verbose` ≠ trace capture.** The events file is written every run. `--verbose` only controls whether events are also teed to the terminal. If you're looking for the trace post-hoc, always check `benchmarks/results/{date}/events/` first.
 

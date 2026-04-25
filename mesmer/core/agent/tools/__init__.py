@@ -49,7 +49,7 @@ def build_tool_list(module: ModuleConfig, ctx: Context) -> list[dict]:
     """
     tools: list[dict] = []
     if module.sub_modules:
-        tools.extend(ctx.registry.as_tools(module.sub_modules))
+        tools.extend(ctx.registry.as_tools(module.sub_module_names))
     tools.append(send_message.SCHEMA)
     tools.append(conclude.SCHEMA)
     if ctx.mode == ContextMode.CO_OP and ctx.human_broker is not None:

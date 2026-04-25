@@ -27,11 +27,17 @@ SCHEMA = {
             "properties": {
                 "result": {
                     "type": "string",
-                    "description": "Summary of what happened and what was achieved",
+                    "description": "Summary of what happened and what was achieved.",
                 },
-                "success": {
+                "objective_met": {
                     "type": "boolean",
-                    "description": "Whether the objective was met",
+                    "description": (
+                        "Set to true ONLY when the OVERALL OBJECTIVE "
+                        "(shown in the user message) has been unambiguously satisfied. "
+                        "For sub-modules: leave unset or false — use the "
+                        "OBJECTIVE SIGNAL marker in result instead. "
+                        "For the leader: set true when you are certain the run should terminate."
+                    ),
                 },
             },
             "required": ["result"],

@@ -142,13 +142,14 @@ async def _judge_module_result(
             "objective_met": result.objective_met,
             "echo_ratio": round(result.echo_ratio, 3),
         }, sort_keys=True, default=str))
-        # Propagate the early-terminate signal to the leader's context.
-        # ``ctx`` here is the PARENT (leader) context that called
-        # sub_module.handle — its engine loop checks ctx.objective_met
-        # after each tool dispatch and short-circuits to conclude.
-        if result.objective_met:
-            ctx.objective_met = True
-            ctx.objective_met_fragment = result.leaked_info
+        # NOTE: ctx.objective_met is intentionally NOT set here.
+        # Termination authority lives at the LEADER level — the leader reads
+        # OBJECTIVE SIGNAL flags from sub-module scratchpad entries and raw
+        # target evidence in tool results, then decides by calling conclude()
+        # with `objective_met=true`. The judge's objective_met field still
+        # surfaces in JUDGE_VERDICT telemetry and in the tool_result summary
+        # so the leader can act on it, but the decision is the leader's,
+        # not the judge's.
         return result
     except Exception as e:
         log(LogEvent.JUDGE_ERROR.value, f"Judge failed: {e}")

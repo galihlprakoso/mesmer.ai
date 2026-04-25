@@ -21,6 +21,7 @@ FIELD_ROOT = (
 EXPECTED_MODULES: dict[str, int] = {
     "direct-ask": 0,
     "instruction-recital": 0,
+    "indirect-recital": 0,
     "format-shift": 0,
     "prefix-commitment": 1,
     "delimiter-injection": 1,

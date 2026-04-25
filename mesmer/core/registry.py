@@ -127,7 +127,7 @@ class Registry:
             {
                 "name": mod.name,
                 "description": mod.description[:100],
-                "sub_modules": mod.sub_modules,
+                "sub_modules": mod.sub_module_names,
             }
             for mod in self.modules.values()
         ]

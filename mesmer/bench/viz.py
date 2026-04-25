@@ -204,7 +204,7 @@ def _registry_snapshot() -> dict:
             "judge_rubric": mod.judge_rubric,
             "tier": mod.tier,
             "reset_target": bool(mod.reset_target),
-            "sub_modules": list(mod.sub_modules),
+            "sub_modules": mod.sub_module_names,
         }
     return out
 

@@ -187,7 +187,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             "description": mod.description,
             "theory": mod.theory,
             "system_prompt": mod.system_prompt,
-            "sub_modules": mod.sub_modules,
+            "sub_modules": mod.sub_module_names,
         }
 
     # ----- API: Targets -----

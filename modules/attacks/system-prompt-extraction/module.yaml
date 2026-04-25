@@ -134,9 +134,11 @@ system_prompt: |
 
 sub_modules:
   - target-profiler
-  - attack-planner
+  - name: attack-planner
+    see_siblings: true
   - direct-ask
   - instruction-recital
+  - indirect-recital
   - format-shift
   - prefix-commitment
   - delimiter-injection

@@ -88,7 +88,30 @@ async def _completion_with_retry(ctx, messages, tools, log):
             await pool.acquire(log)
         try:
             try:
-                return await ctx.completion(messages=messages, tools=tools)
+                response = await ctx.completion(messages=messages, tools=tools)
+                # Some providers (notably Gemini) ship a 200 OK with empty
+                # `choices` when the request hits a safety filter, content
+                # block, or transient generation hiccup — completion_tokens=0,
+                # no message, no tool_calls. LiteLLM passes that through as
+                # a structurally-valid response so the exception path below
+                # never fires. Treat it as a transient failure and retry on
+                # the same key with backoff. If the retry budget runs out,
+                # fall through to the LLM_ERROR / None return path below
+                # exactly like any other exhausted retry.
+                if not response.choices:
+                    if attempt < MAX_LLM_RETRIES - 1:
+                        delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+                        log(
+                            LogEvent.LLM_RETRY.value,
+                            f"Empty choices in response (attempt {attempt + 1}/"
+                            f"{MAX_LLM_RETRIES}) — likely a safety block or "
+                            f"provider blip; retrying in {delay}s...",
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    log(LogEvent.LLM_ERROR.value, "Empty choices after max retries")
+                    return None
+                return response
             except Exception as e:
                 err_str = str(e)
 

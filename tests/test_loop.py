@@ -360,6 +360,78 @@ class TestErrorHandling:
         assert call_count[0] == 3  # tried 3 times
 
     @pytest.mark.asyncio
+    async def test_empty_choices_retries_then_recovers(self):
+        """Provider sometimes ships a 200 OK with empty `choices` (Gemini does
+        this on safety blocks / 0-token completions). LiteLLM passes that
+        through unchanged — no exception is raised — so the retry layer's
+        exception path doesn't catch it. Without an explicit empty-choices
+        guard the engine indexes into [] and the leader's run dies with
+        ``Error: list index out of range``.
+
+        The fix lives in retry.py: empty choices is treated as a transient
+        failure (same path as 503/timeout) and retried with backoff."""
+        call_count = [0]
+
+        class _EmptyChoicesResponse:
+            choices: list = []
+
+        async def empty_then_conclude(messages, tools=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: provider returns empty choices.
+                return _EmptyChoicesResponse()
+            # Retry: model concludes normally.
+            return FakeResponse(FakeMessage(
+                tool_calls=[FakeToolCall("conclude", {"result": "done"})]
+            ))
+
+        ctx = _make_ctx()
+        ctx.completion = empty_then_conclude
+        module = _make_module()
+
+        # Patch retry delays to be instant.
+        import mesmer.core.agent as agent_mod
+        original_delays = agent_mod.RETRY_DELAYS
+        agent_mod.RETRY_DELAYS = [0, 0, 0]
+        try:
+            result = await run_react_loop(module, ctx, "test")
+        finally:
+            agent_mod.RETRY_DELAYS = original_delays
+
+        assert result == "done"
+        assert call_count[0] == 2  # empty response triggered retry, retry succeeded
+
+    @pytest.mark.asyncio
+    async def test_empty_choices_exhausts_retries_returns_clean_error(self):
+        """When the provider keeps shipping empty choices past the retry
+        budget, the loop must return a clean LLM error string — not crash
+        with IndexError."""
+        call_count = [0]
+
+        class _EmptyChoicesResponse:
+            choices: list = []
+
+        async def always_empty(messages, tools=None):
+            call_count[0] += 1
+            return _EmptyChoicesResponse()
+
+        ctx = _make_ctx()
+        ctx.completion = always_empty
+        module = _make_module()
+
+        import mesmer.core.agent as agent_mod
+        original_delays = agent_mod.RETRY_DELAYS
+        agent_mod.RETRY_DELAYS = [0, 0, 0]
+        try:
+            result = await run_react_loop(module, ctx, "test")
+        finally:
+            agent_mod.RETRY_DELAYS = original_delays
+
+        # Same path as exhausted transient retries: clean string, no crash.
+        assert "LLM error" in result or "retries exhausted" in result
+        assert call_count[0] == 3  # tried MAX_LLM_RETRIES times
+
+    @pytest.mark.asyncio
     async def test_llm_error_transient_recovers(self):
         """Transient error on first call, succeeds on retry."""
         call_count = [0]

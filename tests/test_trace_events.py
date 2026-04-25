@@ -212,18 +212,22 @@ class TestDelegateEventPayload:
 # ---------------------------------------------------------------------------
 
 
-class TestSubModuleObjectiveMetShortCircuit:
-    """When the in-loop judge sets ``objective_met=True``, the engine's
-    auto-conclude fires on the next iteration. Running ``_reflect_and_expand``
-    after that point burns 2-3 refine_approach LLM calls for frontier nodes
-    nothing will ever execute — ~2k tokens + ~14s per winning trial.
-
-    These tests pin the short-circuit at ``sub_module.handle`` so the fix
-    can't silently regress.
+class TestSubModuleReflectAndExpand:
+    """_reflect_and_expand is always called after sub-module delegation —
+    regardless of whether the judge flagged objective_met. Termination
+    authority lives at the LEADER level: the judge's objective_met is an
+    advisory signal in the tool_result, not a run-stopper. If the leader
+    decides the objective is met it calls conclude("OBJECTIVE MET — ..."),
+    but unused frontier nodes from a correct signal are harmless, and a
+    wrong judge signal (e.g. "Access Granted" ≠ the secret code) should not
+    strand the attack by skipping frontier expansion.
     """
 
     @pytest.mark.asyncio
-    async def test_skips_reflect_and_expand_when_objective_met(self):
+    async def test_runs_reflect_and_expand_even_when_judge_flags_objective_met(self):
+        """Frontier expansion is NOT skipped when judge.objective_met=True.
+        The leader reads the OBJECTIVE SIGNAL in the tool_result and decides.
+        """
         from mesmer.core.agent.tools.sub_module import handle
 
         ctx = _ctx()
@@ -269,13 +273,12 @@ class TestSubModuleObjectiveMetShortCircuit:
                 log=lambda *a, **kw: None,
             )
 
-        reflect_spy.assert_not_awaited()
+        # Frontier expansion must still run — leader decides termination.
+        reflect_spy.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_runs_reflect_and_expand_when_objective_not_met(self):
-        """Below-threshold verdicts still hit the frontier-expansion path —
-        the short-circuit gates ONLY on ``objective_met``, not on score.
-        """
+        """Below-threshold verdicts still hit the frontier-expansion path."""
         from mesmer.core.agent.tools.sub_module import handle
 
         ctx = _ctx()
