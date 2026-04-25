@@ -105,6 +105,8 @@ class ToolName(str, Enum):
     SEND_MESSAGE = "send_message"
     ASK_HUMAN = "ask_human"
     CONCLUDE = "conclude"
+    UPDATE_SCRATCHPAD = "update_scratchpad"
+    TALK_TO_OPERATOR = "talk_to_operator"
 
 
 class TurnKind(str, Enum):
@@ -183,6 +185,14 @@ class LogEvent(str, Enum):
     ASK_HUMAN = "ask_human"
     HUMAN_ANSWER = "human_answer"
     ASK_HUMAN_ERROR = "ask_human_error"
+
+    # Operator <> leader chat (web UI). OPERATOR_MESSAGE fires when the
+    # backend queues an operator message onto the running ctx; OPERATOR_REPLY
+    # fires when the leader calls ``talk_to_operator``. Both surface in the
+    # chat panel as conversation rows.
+    OPERATOR_MESSAGE = "operator_message"
+    OPERATOR_REPLY = "operator_reply"
+    SCRATCHPAD_UPDATED = "scratchpad_updated"
 
     # Judge + reflection
     JUDGE = "judge"

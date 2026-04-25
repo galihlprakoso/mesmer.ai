@@ -1,382 +1,305 @@
 <script>
   import { onMount } from 'svelte'
-  import { graphData, selectedNode, activeModuleSet, activeModuleTop, isRunning } from '../lib/stores.js'
-  import { buildTree } from '../lib/graph-tree.js'
+  import {
+    graphData,
+    selectedNode,
+    activeModuleSet,
+    activeModuleTop,
+    scenarios,
+    selectedScenario,
+    selectedRunId,
+  } from '../lib/stores.js'
+  import { buildLeaderTimeline } from '../lib/leader-timeline.js'
+  import RunPicker from './RunPicker.svelte'
   import * as d3 from 'd3'
 
-  const ACTIVE_COLOR = '#06b6d4'  // cyan — distinct from frontier blue, promising green, amber human
+  // Status drives node color — tier is a scheduling concern, not a thing
+  // a human watching the run cares about. Frontier and the leader-verdict
+  // square keep their own visual treatments below.
+  const STATUS_COLOR = {
+    promising: 'var(--phosphor)',
+    dead:      'var(--red)',
+    alive:     'var(--text-muted)',
+  }
 
   let svgEl
   let containerEl
-  let tooltipEl
   let width = 800
   let height = 600
+  let collapsed = new Set()
+  let zoomBehavior
+  let initialTransformDone = false
 
-  // Live reference to the current active-module set used inside render().
-  // Updated via reactive subscription below so we don't need to pass it in
-  // every render() call path.
+  // Live refs so the reactive block stays a single subscription chain.
   let activeSetRef = new Set()
+  let activeTopRef = null
+  let selectedIdRef = null
+  let scenarioMetaRef = null
 
-  const STATUS_COLORS = {
-    dead: '#ef4444',
-    promising: '#22c55e',
-    frontier: '#3b82f6',
-    alive: '#6b7280',
-    root: '#a855f7',
+  function isLeaderVerdict(node) {
+    return node.source === 'leader'
   }
 
-  const SOURCE_COLORS = {
-    human: '#f59e0b',
+  function isFrontier(node) {
+    return node.status === 'frontier'
   }
 
-  function getGroupColor(d) {
-    if (d.data.source === 'human') return SOURCE_COLORS.human
-    if (d.data.isGroup) return STATUS_COLORS[d.data.bestStatus] || STATUS_COLORS.alive
-    return STATUS_COLORS[d.data.status] || STATUS_COLORS.alive
+  function colorFor(node) {
+    if (node._isLeaderOrchestrator) return 'var(--phosphor)'
+    if (isLeaderVerdict(node)) {
+      return node.status === 'promising' ? 'var(--phosphor)' : 'var(--red)'
+    }
+    return STATUS_COLOR[node.status] ?? 'var(--text-muted)'
   }
 
-  function getNodeRadius(d) {
-    if (d.data.id === 'root') return 14
-    const score = d.data.isGroup ? d.data.bestScore : (d.data.score || 0)
-    return Math.max(7, 5 + score * 1.3)
+  function shortLabel(node) {
+    // The shape + color already tell the story (square = leader verdict,
+    // green/red = win/loss, dashed = proposed, pulse = active). The label
+    // is just the module name — no scores, no verdict suffix, no clutter.
+    if (node._isLeaderOrchestrator) return node.module || 'leader'
+    if (isFrontier(node)) return `${node.module} · proposed`
+    return node.module
   }
 
-  function truncate(str, len) {
-    if (!str) return ''
-    return str.length > len ? str.slice(0, len) + '...' : str
+  function isNodeActive(data) {
+    if (!activeSetRef || activeSetRef.size === 0) return false
+    if (data._isLeaderOrchestrator) return false
+    if (data.status === 'dead') return false
+    return activeSetRef.has(data.module)
   }
 
-  function showTooltip(event, d) {
-    if (!tooltipEl) return
+  function nodeClass(d) {
     const data = d.data
+    const parts = ['node']
+    if (data._isLeaderOrchestrator) parts.push('leader-orchestrator')
+    else if (isLeaderVerdict(data)) parts.push('leader-verdict')
+    else if (isFrontier(data)) parts.push('frontier')
+    else if (data.status === 'dead') parts.push('dead')
+    if (selectedIdRef && data.id === selectedIdRef) parts.push('selected')
+    if (isNodeActive(data)) parts.push('active')
+    return parts.join(' ')
+  }
 
-    let html = ''
+  /* ---------- toolbar handlers ---------- */
 
-    if (data.isGroup) {
-      // Group tooltip
-      const statusLabel = data.bestStatus.toUpperCase()
-      html += `<div class="tt-header">`
-      html += `<span class="tt-status tt-${data.bestStatus}">${statusLabel}</span>`
-      html += `<span class="tt-score">${data.bestScore}/10</span>`
-      html += `</div>`
-      html += `<div class="tt-module">${data.module}</div>`
-      html += `<div class="tt-approach">${data.attemptCount} attempts &mdash; scores: ${data.scores.join(', ')}</div>`
-      if (data.leaked_info) html += `<div class="tt-leaked">${truncate(data.leaked_info, 100)}</div>`
+  function fit() {
+    if (!svgEl || !zoomBehavior) return
+    const layer = d3.select(svgEl).select('.node-layer').node()
+    if (!layer) return
+    const bbox = layer.getBBox()
+    const W = svgEl.clientWidth
+    const H = svgEl.clientHeight
+    if (!W || !H || !bbox.width || !bbox.height) return
+    const pad = 30
+    const scale = Math.min(
+      (W - pad * 2) / bbox.width,
+      (H - pad * 2) / bbox.height,
+      1.2,
+    )
+    const tx = (W - bbox.width * scale) / 2 - bbox.x * scale
+    const ty = (H - bbox.height * scale) / 2 - bbox.y * scale
+    d3.select(svgEl)
+      .transition()
+      .duration(300)
+      .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale))
+  }
 
-      // Show each attempt briefly
-      html += `<div class="tt-attempts">`
-      for (const a of data.attempts) {
-        const color = STATUS_COLORS[a.status] || STATUS_COLORS.alive
-        const score = a.score ?? 0
-        const approach = a.approach ? truncate(a.approach, 60) : '(no approach)'
-        html += `<div class="tt-attempt"><span class="tt-attempt-dot" style="background:${color}"></span>${score}/10 &mdash; ${approach}</div>`
+  function expandAll() {
+    collapsed = new Set()
+    render()
+  }
+
+  function collapseAll() {
+    if (!$graphData?.nodes) return
+    const next = new Set()
+    for (const n of Object.values($graphData.nodes)) {
+      const hasChildren = (n.children || []).length > 0
+      if (hasChildren && n.status !== 'frontier' && n.source !== 'leader') {
+        next.add(n.id)
       }
-      html += `</div>`
-    } else {
-      // Single node tooltip
-      const statusLabel = data.source === 'human' ? 'HUMAN HINT' : (data.status || 'unknown').toUpperCase()
-      const statusClass = data.source === 'human' ? 'human' : data.status
-      html += `<div class="tt-header">`
-      html += `<span class="tt-status tt-${statusClass}">${statusLabel}</span>`
-      if (data.score) html += `<span class="tt-score">${data.score}/10</span>`
-      html += `</div>`
-      html += `<div class="tt-module">${data.module || data.id}</div>`
-      if (data.approach) html += `<div class="tt-approach">${truncate(data.approach, 100)}</div>`
-      if (data.leaked_info) html += `<div class="tt-leaked">${truncate(data.leaked_info, 100)}</div>`
     }
-
-    tooltipEl.innerHTML = html
-    tooltipEl.style.display = 'block'
-
-    const rect = containerEl.getBoundingClientRect()
-    let x = event.clientX - rect.left + 14
-    let y = event.clientY - rect.top - 10
-    const ttRect = tooltipEl.getBoundingClientRect()
-    if (x + ttRect.width > rect.width - 8) x = x - ttRect.width - 28
-    if (y + ttRect.height > rect.height - 8) y = rect.height - ttRect.height - 8
-    if (y < 8) y = 8
-
-    tooltipEl.style.left = x + 'px'
-    tooltipEl.style.top = y + 'px'
+    collapsed = next
+    render()
   }
 
-  function hideTooltip() {
-    if (tooltipEl) tooltipEl.style.display = 'none'
-  }
+  /* ---------- render ---------- */
 
-  /** Get all ancestor node references for path highlighting */
-  function getAncestors(node) {
-    const path = []
-    let current = node
-    while (current) {
-      path.push(current)
-      current = current.parent
-    }
-    return path
-  }
-
-  function render(data) {
-    if (!svgEl || !data) return
+  function render() {
+    if (!svgEl) return
 
     const svg = d3.select(svgEl)
     svg.selectAll('*').remove()
 
-    const tree = buildTree(data)
-    if (!tree) {
-      svg.append('text')
-        .attr('x', width / 2)
-        .attr('y', height / 2)
-        .attr('text-anchor', 'middle')
-        .attr('fill', 'var(--text-muted)')
-        .text('No graph data yet')
-      return
-    }
+    if (!$graphData) return
+
+    const tree = buildLeaderTimeline($graphData, collapsed, scenarioMetaRef, $selectedRunId)
+    if (!tree) return
 
     const root = d3.hierarchy(tree)
-    const nodeCount = root.descendants().length
-    const radius = Math.min(width, height) / 2 - 60
+    const nodeHSpace = 200
+    const nodeVSpace = 56
+    d3.tree().nodeSize([nodeVSpace, nodeHSpace])(root)
 
-    const treeLayout = d3.tree()
-      .size([2 * Math.PI, radius])
-      .separation((a, b) => (a.parent === b.parent ? 1 : 2) / (a.depth || 1))
+    const zoomLayer = svg.append('g').attr('class', 'zoom-layer')
 
-    treeLayout(root)
+    // Recreate zoom behavior every render so its `zoom` handler captures the
+    // FRESH zoomLayer reference. The old layer is gone (svg.selectAll('*')
+    // removed it), so a stale closure would silently apply transforms to a
+    // detached DOM node — pan/zoom appear dead until a full reload.
+    if (!zoomBehavior) zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
+    zoomBehavior.on('zoom', e => zoomLayer.attr('transform', e.transform))
+    svg.call(zoomBehavior)
 
-    const g = svg.append('g')
-      .attr('transform', `translate(${width / 2},${height / 2})`)
+    // Restore prior pan/zoom on re-render (the user's transform survives
+    // graph updates). Only centre on the very first render.
+    const currentTransform = d3.zoomTransform(svg.node())
+    if (!initialTransformDone) {
+      const initialTx = 80
+      const initialTy = height / 2
+      svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(initialTx, initialTy).scale(1))
+      initialTransformDone = true
+    } else {
+      // Re-apply the existing transform to the new zoomLayer.
+      zoomLayer.attr('transform', currentTransform.toString())
+    }
 
-    // Zoom
-    const zoom = d3.zoom()
-      .scaleExtent([0.3, 4])
-      .on('zoom', (event) => {
-        g.attr('transform', `translate(${width / 2 + event.transform.x},${height / 2 + event.transform.y}) scale(${event.transform.k})`)
-      })
-    svg.call(zoom)
-
-    // Click background to deselect
-    svg.on('click', () => {
-      $selectedNode = null
-      hideTooltip()
-      resetHighlight()
+    // Background click clears selection. Only fire when the click target
+    // really is the SVG itself — not bubbled up from a node — so selecting
+    // a node doesn't immediately clear it again.
+    svg.on('click', (event) => {
+      if (event.target === svgEl) selectedNode.set(null)
     })
 
-    // Links
-    const links = g.selectAll('.link')
+    // ---------- edges ----------
+    zoomLayer.append('g')
+      .attr('class', 'link-layer')
+      .selectAll('path')
       .data(root.links())
       .join('path')
       .attr('class', 'link')
-      .attr('fill', 'none')
-      .attr('stroke', d => getGroupColor(d.target))
-      .attr('stroke-opacity', 0.35)
-      .attr('stroke-width', d => {
-        const score = d.target.data.isGroup ? d.target.data.bestScore : (d.target.data.score || 0)
-        return Math.max(1.5, score / 2.5)
-      })
-      .attr('d', d3.linkRadial()
-        .angle(d => d.x)
-        .radius(d => d.y)
-      )
+      .attr('d', d3.linkHorizontal().x(d => d.y).y(d => d.x))
 
-    // Nodes
-    const allNodes = root.descendants()
-    const nodeGroup = g.selectAll('.node')
-      .data(allNodes)
+    // ---------- nodes ----------
+    const nodeLayer = zoomLayer.append('g').attr('class', 'node-layer')
+
+    const nodeSel = nodeLayer.selectAll('g')
+      .data(root.descendants(), d => d.data.id)
       .join('g')
-      .attr('class', 'node')
-      .attr('transform', d => `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`)
-      .style('cursor', 'pointer')
+      .attr('class', d => nodeClass(d))
+      .attr('transform', d => `translate(${d.y},${d.x})`)
       .on('click', (event, d) => {
         event.stopPropagation()
-        $selectedNode = d.data
-        hideTooltip()
-      })
-      .on('mouseenter', (event, d) => {
-        showTooltip(event, d)
-        highlightPath(d, allNodes, links)
-        d3.select(event.currentTarget).select('.main-circle')
-          .transition().duration(150)
-          .attr('r', getNodeRadius(d) + 3)
-      })
-      .on('mousemove', (event, d) => {
-        showTooltip(event, d)
-      })
-      .on('mouseleave', (event, d) => {
-        hideTooltip()
-        resetHighlight()
-        d3.select(event.currentTarget).select('.main-circle')
-          .transition().duration(150)
-          .attr('r', getNodeRadius(d))
+        selectedNode.set(d.data)
       })
 
-    // --- Render single nodes ---
-    const singleNodes = nodeGroup.filter(d => !d.data.isGroup)
+    // Diamond — synthetic leader orchestrator
+    nodeSel.filter(d => d.data._isLeaderOrchestrator)
+      .append('polygon')
+      .attr('points', '0,-14 14,0 0,14 -14,0')
+      .attr('fill', d => colorFor(d.data))
 
-    singleNodes.append('circle')
-      .attr('class', 'main-circle')
-      .attr('r', d => getNodeRadius(d))
-      .attr('fill', d => getGroupColor(d))
-      .attr('fill-opacity', 0.85)
+    // Square — leader verdict
+    nodeSel.filter(d => isLeaderVerdict(d.data))
+      .append('rect')
+      .attr('x', -14).attr('y', -14)
+      .attr('width', 28).attr('height', 28).attr('rx', 3)
+      .attr('fill', d => colorFor(d.data))
 
-    // --- Render group nodes with ring segments ---
-    const groupNodes = nodeGroup.filter(d => d.data.isGroup)
+    // Circle — everything else
+    nodeSel.filter(d => !d.data._isLeaderOrchestrator && !isLeaderVerdict(d.data))
+      .append('circle')
+      .attr('r', d => isFrontier(d.data) ? 11 : 14)
+      .attr('fill', d => colorFor(d.data))
 
-    // Base circle (best status color)
-    groupNodes.append('circle')
-      .attr('class', 'main-circle')
-      .attr('r', d => getNodeRadius(d))
-      .attr('fill', d => getGroupColor(d))
-      .attr('fill-opacity', 0.85)
-
-    // Ring segments showing each attempt
-    groupNodes.each(function(d) {
-      const g = d3.select(this)
-      const r = getNodeRadius(d) + 4
-      const attempts = d.data.attempts
-      const n = attempts.length
-      const arcGen = d3.arc()
-        .innerRadius(r)
-        .outerRadius(r + 3)
-
-      attempts.forEach((attempt, i) => {
-        const startAngle = (i / n) * 2 * Math.PI
-        const endAngle = ((i + 1) / n) * 2 * Math.PI - 0.08 // small gap
-        const color = STATUS_COLORS[attempt.status] || STATUS_COLORS.alive
-
-        g.append('path')
-          .attr('d', arcGen({ startAngle, endAngle }))
-          .attr('fill', color)
-          .attr('fill-opacity', 0.9)
-      })
-    })
-
-    // Attempt count badge on groups
-    groupNodes.filter(d => d.data.attemptCount > 1)
-      .append('text')
-      .attr('dy', '0.35em')
+    // Primary label below
+    nodeSel.append('text')
+      .attr('y', 30)
       .attr('text-anchor', 'middle')
-      .attr('fill', '#000')
-      .attr('font-size', '8px')
-      .attr('font-weight', '700')
-      .attr('pointer-events', 'none')
-      .text(d => `${d.data.bestScore}`)
+      .text(d => shortLabel(d.data))
 
-    // Score labels on high-score single nodes
-    singleNodes.filter(d => d.data.score >= 5 && d.data.id !== 'root')
+    // Sequence number above leader's direct children
+    nodeSel.filter(d => typeof d.data._seqNum === 'number')
       .append('text')
-      .attr('dy', '0.35em')
+      .attr('class', 'seq-num')
+      .attr('y', -20)
       .attr('text-anchor', 'middle')
-      .attr('fill', '#000')
-      .attr('font-size', '9px')
-      .attr('font-weight', '700')
-      .attr('pointer-events', 'none')
-      .text(d => d.data.score)
+      .text(d => `#${d.data._seqNum}`)
 
-    // --- Active-module pulse (run in progress) ---
-    // Highlight every node whose module (or any grouped attempt's module) is in
-    // the active stack. Pulsing cyan outer ring + inner glow.
-    const activeSet = activeSetRef
-    const isNodeActive = (d) => {
-      if (!activeSet || activeSet.size === 0) return false
-      if (d.data.id === 'root') return false
-      if (d.data.status === 'dead') return false
-      if (activeSet.has(d.data.module)) return true
-      // Group nodes: check their attempts
-      if (d.data.isGroup && Array.isArray(d.data.attempts)) {
-        return d.data.attempts.some(a => activeSet.has(a.module))
-      }
-      return false
-    }
+    // Human-source badge (hint nodes)
+    nodeSel.filter(d => d.data.source === 'human')
+      .append('text')
+      .attr('class', 'human-badge')
+      .attr('x', 0).attr('y', -22)
+      .attr('text-anchor', 'middle')
+      .text('★')
 
-    const activeNodes = nodeGroup.filter(d => isNodeActive(d))
-
-    // Outer pulsing ring
-    const pulseRing = activeNodes.append('circle')
-      .attr('class', 'active-pulse')
-      .attr('fill', 'none')
-      .attr('stroke', ACTIVE_COLOR)
-      .attr('stroke-width', 2)
-      .attr('r', d => getNodeRadius(d) + 6)
-      .style('pointer-events', 'none')
-
-    pulseRing.append('animate')
-      .attr('attributeName', 'r')
-      .attr('values', d => {
-        const r = getNodeRadius(d)
-        return `${r + 4};${r + 14};${r + 4}`
-      })
-      .attr('dur', '1.3s')
-      .attr('repeatCount', 'indefinite')
-
-    pulseRing.append('animate')
-      .attr('attributeName', 'stroke-opacity')
-      .attr('values', '0.9;0.1;0.9')
-      .attr('dur', '1.3s')
-      .attr('repeatCount', 'indefinite')
-
-    // Inner glow via a slightly brighter overlay
-    activeNodes.append('circle')
-      .attr('class', 'active-glow')
-      .attr('fill', ACTIVE_COLOR)
-      .attr('fill-opacity', 0.15)
-      .attr('r', d => getNodeRadius(d) + 1)
-      .style('pointer-events', 'none')
-
-    // --- Path highlighting ---
-    function highlightPath(hoveredNode, allNodes, links) {
-      const ancestors = new Set(getAncestors(hoveredNode))
-
-      // Dim everything
-      nodeGroup.select('.main-circle')
-        .transition().duration(200)
-        .attr('fill-opacity', d => ancestors.has(d) ? 0.95 : 0.15)
-
-      links
-        .transition().duration(200)
-        .attr('stroke-opacity', d => (ancestors.has(d.source) && ancestors.has(d.target)) ? 0.7 : 0.07)
-    }
-
-    function resetHighlight() {
-      nodeGroup.select('.main-circle')
-        .transition().duration(200)
-        .attr('fill-opacity', 0.85)
-
-      links
-        .transition().duration(200)
-        .attr('stroke-opacity', 0.35)
-    }
+    // Collapsed indicator — "+" if we're hiding children. Skip the leader
+    // root (whether real verdict or synthetic stub): its _childIds vs
+    // children mismatch is intentional since it gets a curated child list
+    // (attempts only) regardless of what's stored.
+    nodeSel.filter(d =>
+      !d.data._isLeaderRoot
+      && (d.data._childIds || []).length > (d.data.children || []).length
+    )
+      .append('text')
+      .attr('class', 'collapsed-mark')
+      .attr('x', 18).attr('y', 6)
+      .attr('text-anchor', 'start')
+      .text('+')
   }
 
+  /* ---------- lifecycle ---------- */
+
   onMount(() => {
-    const resizeObserver = new ResizeObserver(entries => {
+    const ro = new ResizeObserver(entries => {
       for (const entry of entries) {
         width = entry.contentRect.width
         height = entry.contentRect.height
-        if ($graphData) render($graphData)
       }
+      render()
     })
-    resizeObserver.observe(containerEl)
-    return () => resizeObserver.disconnect()
+    ro.observe(containerEl)
+    return () => ro.disconnect()
   })
 
-  // Re-render whenever the graph OR the active-module set changes.
-  // Keep activeSetRef in sync FIRST so render() reads the latest value.
+  // Refs read inside render() — assignments must happen before the render
+  // block fires (Svelte processes reactive declarations in source order).
   $: activeSetRef = $activeModuleSet
+  $: activeTopRef = $activeModuleTop
+  $: selectedIdRef = $selectedNode?.id ?? null
   $: {
-    // eslint-disable-next-line no-unused-expressions
-    $activeModuleSet  // track dep for reactivity on active pulse
-    if (svgEl) {
-      if ($graphData) {
-        render($graphData)
-      } else {
-        // Graph reset (new run starting) — clear any leftover D3 render so
-        // the empty-state overlay isn't stacked on stale nodes.
-        d3.select(svgEl).selectAll('*').remove()
-      }
-    }
+    const s = ($scenarios || []).find(s => s.path === $selectedScenario)
+    scenarioMetaRef = s ? { leaderModule: s.module, objective: '' } : null
+  }
+
+  // Full re-render when graph structure / scenario / active set / run
+  // selection changes. NOT triggered by selection changes — that would
+  // tear down the SVG and break d3.zoom (the handler closes over a
+  // deleted layer).
+  $: {
+    void $graphData
+    void $activeModuleSet
+    void scenarioMetaRef
+    void $selectedRunId
+    if (svgEl) render()
+  }
+
+  // Selection updates just toggle the .selected class on the existing
+  // nodes — no re-render, so pan/zoom state and behavior stay intact.
+  $: if (svgEl) {
+    d3.select(svgEl).selectAll('g.node')
+      .classed('selected', d => d?.data?.id === selectedIdRef)
   }
 </script>
 
 <div class="graph-container" bind:this={containerEl}>
+  <div class="graph-chrome">
+    <span class="chrome-dot live" aria-hidden="true"></span>
+    <span class="chrome-dot" aria-hidden="true"></span>
+    <span class="chrome-dot" aria-hidden="true"></span>
+    <span class="chrome-label">attack graph ▸ live</span>
+  </div>
+
   {#if !$graphData}
     <div class="empty-graph">
       <div class="empty-icon">&#x1f578;</div>
@@ -384,31 +307,26 @@
       <p class="sub">Run an attack or load a saved graph</p>
     </div>
   {/if}
+
   <svg bind:this={svgEl} {width} {height}></svg>
 
-  {#if $isRunning}
-    <div class="running-ribbon">
-      <span class="ribbon-pulse"></span>
-      <span class="ribbon-text">
-        RUNNING
-        {#if $activeModuleTop}
-          <span class="ribbon-sep">·</span>
-          <span class="ribbon-module">{$activeModuleTop}</span>
-        {/if}
-      </span>
-    </div>
-  {/if}
+  <!-- Run picker (top-right). Subsumes the old running-ribbon: the
+       currently-running run's chip pulses in cyan and shows the active
+       module name as a sibling tag. -->
+  <div class="run-picker-host">
+    <RunPicker />
+  </div>
 
-  <div class="tooltip" bind:this={tooltipEl}></div>
+  <div class="toolbar">
+    <button on:click={fit}>Fit</button>
+    <button on:click={expandAll}>Expand all</button>
+    <button on:click={collapseAll}>Collapse</button>
+  </div>
 
   <div class="legend">
-    <span class="legend-item"><span class="dot" style="background: {STATUS_COLORS.promising}"></span> Promising</span>
-    <span class="legend-item"><span class="dot" style="background: {STATUS_COLORS.dead}"></span> Dead</span>
-    <span class="legend-item"><span class="dot" style="background: {STATUS_COLORS.alive}"></span> Alive</span>
-    <span class="legend-item"><span class="dot-ring"></span> Group (multi-attempt)</span>
-    {#if $isRunning}
-      <span class="legend-item"><span class="dot-active"></span> Active</span>
-    {/if}
+    <span class="li"><span class="status-dot worked"></span>Worked</span>
+    <span class="li"><span class="status-dot dead"></span>Dead end</span>
+    <span class="li"><span class="frontier-dot"></span>Up next</span>
   </div>
 </div>
 
@@ -420,7 +338,48 @@
     background: var(--bg-primary);
   }
 
-  svg { width: 100%; height: 100%; }
+  svg { width: 100%; height: 100%; display: block; }
+
+  .graph-chrome {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: linear-gradient(to bottom, hsla(144 12% 10% / 0.85), hsla(144 12% 10% / 0));
+    pointer-events: none;
+  }
+
+  .chrome-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: hsla(140 7% 45% / 0.5);
+  }
+
+  .chrome-dot.live {
+    background: var(--phosphor);
+    box-shadow: var(--phosphor-glow-tight);
+    animation: phosphor-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes phosphor-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+
+  .chrome-label {
+    margin-left: 4px;
+    font-family: var(--font-pixel);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+  }
 
   .empty-graph {
     position: absolute;
@@ -432,115 +391,171 @@
     color: var(--text-muted);
     pointer-events: none;
   }
-
   .empty-icon { font-size: 3rem; margin-bottom: 12px; opacity: 0.3; }
   .empty-graph p { margin: 0; font-size: 0.9rem; }
   .empty-graph .sub { font-size: 0.75rem; margin-top: 4px; opacity: 0.6; }
 
-  /* Tooltip */
-  .tooltip {
-    display: none;
-    position: absolute;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 14px;
-    max-width: 360px;
-    pointer-events: none;
-    z-index: 100;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  /* ---------- nodes ---------- */
+  .graph-container :global(.node) { cursor: pointer; }
+  .graph-container :global(.node circle),
+  .graph-container :global(.node rect),
+  .graph-container :global(.node polygon) {
+    stroke: rgba(255, 255, 255, 0.25);
+    stroke-width: 1.5px;
+    transition: r 120ms;
+  }
+  .graph-container :global(.node:hover circle) { r: 16; }
+
+  .graph-container :global(.node.frontier circle) {
+    fill-opacity: 0.35;
+    stroke-dasharray: 4 3;
+    stroke-opacity: 0.7;
+  }
+  .graph-container :global(.node.frontier text) { opacity: 0.65; }
+
+  .graph-container :global(.node.dead circle) {
+    stroke-dasharray: 3 2;
+    opacity: 0.7;
   }
 
-  .tooltip :global(.tt-header) { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-  .tooltip :global(.tt-status) { padding: 1px 6px; border-radius: 3px; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.06em; background: var(--bg-secondary); color: var(--text-muted); }
-  .tooltip :global(.tt-dead) { color: var(--red); background: #ef44441a; }
-  .tooltip :global(.tt-promising) { color: var(--green); background: #22c55e1a; }
-  .tooltip :global(.tt-alive) { color: var(--text-muted); }
-  .tooltip :global(.tt-human) { color: var(--amber); background: #f59e0b1a; }
-  .tooltip :global(.tt-score) { font-weight: 700; font-size: 0.85rem; color: var(--green); }
-  .tooltip :global(.tt-module) { font-weight: 600; font-size: 0.82rem; color: var(--text); margin-bottom: 4px; }
-  .tooltip :global(.tt-approach) { font-size: 0.75rem; color: var(--text-muted); line-height: 1.4; margin-bottom: 4px; }
-  .tooltip :global(.tt-leaked) { font-size: 0.72rem; color: var(--green); border-left: 2px solid var(--green); padding-left: 6px; margin-bottom: 4px; }
-  .tooltip :global(.tt-meta) { font-size: 0.65rem; color: var(--text-muted); }
-  .tooltip :global(.tt-attempts) { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
-  .tooltip :global(.tt-attempt) { font-size: 0.7rem; color: var(--text-muted); display: flex; align-items: baseline; gap: 5px; margin-bottom: 2px; }
-  .tooltip :global(.tt-attempt-dot) { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 2px; }
+  .graph-container :global(.node.selected circle),
+  .graph-container :global(.node.selected rect),
+  .graph-container :global(.node.selected polygon) {
+    stroke: var(--accent);
+    stroke-width: 3.5px;
+    filter: drop-shadow(0 0 8px var(--accent));
+  }
 
-  /* Legend */
+  .graph-container :global(.node .human-badge) {
+    fill: var(--amber);
+    font-size: 12px;
+    font-weight: 700;
+    pointer-events: none;
+  }
+  .graph-container :global(.node .collapsed-mark) {
+    fill: var(--text-muted);
+    font-size: 14px;
+    font-weight: 700;
+    pointer-events: none;
+  }
+
+  .graph-container :global(.node text) {
+    fill: var(--text);
+    font-size: 11px;
+    font-family: var(--mono);
+    pointer-events: none;
+  }
+  .graph-container :global(.node .seq-num) {
+    fill: var(--text-muted);
+    font-size: 9px;
+    font-family: var(--mono);
+    pointer-events: none;
+  }
+
+  /* Synthetic leader (diamond) */
+  .graph-container :global(.node.leader-orchestrator polygon) {
+    fill: var(--accent);
+    fill-opacity: 0.18;
+    stroke: var(--accent);
+    stroke-width: 2px;
+  }
+  .graph-container :global(.node.leader-orchestrator text) {
+    fill: var(--accent);
+    font-weight: 600;
+  }
+
+  /* Leader verdict (square) */
+  .graph-container :global(.node.leader-verdict rect) {
+    filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.3));
+  }
+
+  /* Active-module pulse — live-only signal not in bench. Phosphor stroke +
+     glow on whichever node's module the agent is currently inside. */
+  .graph-container :global(.node.active circle),
+  .graph-container :global(.node.active rect),
+  .graph-container :global(.node.active polygon) {
+    stroke: var(--phosphor);
+    stroke-width: 2.5px;
+    animation: nodePulse 1.4s ease-in-out infinite;
+  }
+  @keyframes nodePulse {
+    0%, 100% { filter: drop-shadow(0 0 2px var(--phosphor)); }
+    50%      { filter: drop-shadow(0 0 10px var(--phosphor)); }
+  }
+
+  /* ---------- links ---------- */
+  .graph-container :global(.link) {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 1.2px;
+  }
+
+  /* ---------- toolbar ---------- */
+  .toolbar {
+    position: absolute;
+    top: 38px;
+    left: 12px;
+    display: flex;
+    gap: 6px;
+    z-index: 10;
+  }
+  .toolbar button {
+    padding: 4px 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: border-color 100ms, color 100ms, box-shadow 100ms;
+  }
+  .toolbar button:hover {
+    border-color: var(--phosphor);
+    color: var(--phosphor);
+    box-shadow: var(--phosphor-glow-tight);
+  }
+
+  /* ---------- legend ---------- */
   .legend {
     position: absolute;
     bottom: 12px;
     right: 12px;
     display: flex;
-    gap: 12px;
-    font-size: 0.7rem;
+    gap: 14px;
+    align-items: center;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     color: var(--text-muted);
     background: var(--bg-secondary);
-    padding: 6px 10px;
-    border-radius: 6px;
+    padding: 6px 12px;
+    border-radius: 4px;
     border: 1px solid var(--border);
   }
-
-  .legend-item { display: flex; align-items: center; gap: 4px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-  .dot-ring {
-    width: 10px; height: 10px; border-radius: 50%;
-    border: 2px solid var(--text-muted);
+  .legend .li { display: inline-flex; align-items: center; gap: 5px; }
+  .status-dot {
+    width: 9px; height: 9px; border-radius: 50%;
     display: inline-block;
   }
-  .dot-active {
-    width: 10px; height: 10px; border-radius: 50%;
-    border: 2px solid #06b6d4;
-    background: #06b6d422;
+  .status-dot.worked { background: var(--phosphor); box-shadow: var(--phosphor-glow-tight); }
+  .status-dot.dead { background: var(--red); }
+  .frontier-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    border: 1.5px dashed var(--text-muted);
+    background: transparent;
     display: inline-block;
+    opacity: 0.7;
   }
 
-  /* Running ribbon */
-  .running-ribbon {
+  /* ---------- run picker host ---------- */
+  .run-picker-host {
     position: absolute;
-    top: 12px;
+    top: 38px;
     right: 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    background: #06b6d41a;
-    border: 1px solid #06b6d4;
-    border-radius: 20px;
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    color: #06b6d4;
-    z-index: 50;
-    animation: ribbonFadeIn 0.2s ease-out;
-  }
-
-  .ribbon-pulse {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #06b6d4;
-    box-shadow: 0 0 0 0 #06b6d4;
-    animation: ribbonPulse 1.3s infinite;
-  }
-
-  .ribbon-text { display: flex; align-items: center; gap: 6px; }
-  .ribbon-sep { opacity: 0.5; }
-  .ribbon-module {
-    font-family: monospace;
-    font-weight: 600;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-
-  @keyframes ribbonFadeIn {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  @keyframes ribbonPulse {
-    0%   { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.7); }
-    70%  { box-shadow: 0 0 0 8px rgba(6, 182, 212, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0); }
+    z-index: 10;
   }
 </style>

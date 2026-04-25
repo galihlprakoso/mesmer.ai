@@ -110,7 +110,18 @@ export function eventToRow(evt) {
     case 'send_error':
       return { kind: 'error', time: evt.timestamp, icon: '✗', color: 'var(--red)',
                title: 'Send failed', body: shorten(d, 200) }
-    // Silent: llm_call, llm_error, reasoning, tool_calls, graph_update, module_start
+    case 'llm_error':
+      return { kind: 'error', time: evt.timestamp, icon: '✗', color: 'var(--red)',
+               title: 'LLM error', body: shorten(d, 600) }
+    case 'rate_limit_wall':
+      return { kind: 'error', time: evt.timestamp, icon: '⛔', color: 'var(--red)',
+               title: 'Rate-limit wall — all keys cooled', body: shorten(d, 200) }
+    case 'module_start': {
+      const m = d.match(/^(\S+)/)
+      return { kind: 'module-start', time: evt.timestamp, icon: '▸', color: 'var(--text-muted)',
+               title: m ? `Started ${m[1]}` : 'Module started' }
+    }
+    // Silent: llm_call, reasoning, tool_calls, graph_update
     default:
       return null
   }

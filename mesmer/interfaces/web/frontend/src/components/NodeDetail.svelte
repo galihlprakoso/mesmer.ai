@@ -1,161 +1,212 @@
 <script>
-  import { selectedNode } from '../lib/stores.js'
+  import { selectedNode, moduleTiers, isRunning } from '../lib/stores.js'
+
+  // Cache full module configs fetched from /api/modules/{name}.
+  const moduleCache = new Map()
+  let moduleConfig = null
+  let lastFetchedName = null
 
   function close() {
-    $selectedNode = null
+    selectedNode.set(null)
   }
 
-  function statusClass(status) {
-    return status === 'dead' ? 'dead' : status === 'promising' ? 'promising' : status === 'frontier' ? 'frontier' : ''
+  function tierOf(name) {
+    return $moduleTiers[name] ?? 2
+  }
+
+  function isFrontier(node) {
+    return node?.status === 'frontier'
+  }
+
+  async function fetchModuleConfig(name) {
+    if (!name || name === 'leader' || name === 'root' || name === 'synthetic') return null
+    if (moduleCache.has(name)) return moduleCache.get(name)
+    try {
+      const res = await fetch(`/api/modules/${encodeURIComponent(name)}`)
+      if (!res.ok) return null
+      const cfg = await res.json()
+      if (cfg.error) return null
+      moduleCache.set(name, cfg)
+      return cfg
+    } catch {
+      return null
+    }
+  }
+
+  // Reactively reload config whenever the selected node's module changes.
+  $: if ($selectedNode && $selectedNode.module && $selectedNode.module !== lastFetchedName) {
+    lastFetchedName = $selectedNode.module
+    moduleConfig = null
+    fetchModuleConfig($selectedNode.module).then(cfg => {
+      // Make sure the user hasn't navigated away while we were fetching.
+      if ($selectedNode?.module === lastFetchedName) moduleConfig = cfg
+    })
+  } else if (!$selectedNode) {
+    lastFetchedName = null
+    moduleConfig = null
+  }
+
+  $: node = $selectedNode
+  $: pairs = node && (node.messages_sent?.length || node.target_responses?.length)
+    ? Array.from(
+        { length: Math.max(node.messages_sent?.length ?? 0, node.target_responses?.length ?? 0) },
+        (_, i) => ({ sent: node.messages_sent?.[i], got: node.target_responses?.[i] }),
+      )
+    : []
+
+  // Tab list — derived from what data is actually present on this node.
+  // Order matters: it's the default-pick precedence too (first tab wins).
+  function computeTabs(n, p, cfg) {
+    if (!n) return []
+    const out = []
+    if (n._isLeaderOrchestrator) {
+      if (n._scenarioObjective) out.push({ key: 'objective', label: 'Objective' })
+      if (cfg) out.push({ key: 'config', label: 'Config' })
+      return out
+    }
+    if (n.approach) out.push({ key: 'approach', label: 'Approach' })
+    if (p.length) out.push({ key: 'exchange', label: 'Exchange' })
+    if (n.leaked_info && !isFrontier(n)) out.push({ key: 'leaks', label: 'Leaks' })
+    if (n.reflection && !isFrontier(n)) out.push({ key: 'reflection', label: 'Reflection' })
+    if (n.module_output && !isFrontier(n)) out.push({ key: 'output', label: 'Output' })
+    if (cfg) out.push({ key: 'config', label: 'Config' })
+    return out
+  }
+
+  let activeTab = null
+  $: tabs = computeTabs(node, pairs, moduleConfig)
+  // Default-pick / repair: when the tab list changes (different node, or
+  // moduleConfig finished loading) and the current activeTab isn't in
+  // the new list, jump to the first available.
+  $: if (tabs.length > 0 && !tabs.find(t => t.key === activeTab)) {
+    activeTab = tabs[0].key
   }
 </script>
 
-{#if $selectedNode}
+{#if node}
   <aside class="right-sidebar">
     <div class="header">
-      <div class="title-row">
-        {#if $selectedNode.isGroup}
-          <span class="status-badge {statusClass($selectedNode.bestStatus)}">
-            {$selectedNode.bestStatus?.toUpperCase()} &middot; {$selectedNode.attemptCount} attempts
-          </span>
-          <span class="score">{$selectedNode.bestScore}/10</span>
-        {:else}
-          <span class="status-badge {statusClass($selectedNode.status)}" class:human={$selectedNode.source === 'human'}>
-            {$selectedNode.source === 'human' ? 'HUMAN' : $selectedNode.status?.toUpperCase()}
-          </span>
-          {#if $selectedNode.score}
-            <span class="score">{$selectedNode.score}/10</span>
-          {/if}
-        {/if}
-      </div>
-      <button class="close-btn" on:click={close}>&times;</button>
-    </div>
-
-    <h3 class="module-name">{$selectedNode.module || $selectedNode.id}</h3>
-
-    <div class="scroll-area">
-      {#if $selectedNode.isGroup}
-        <!-- GROUP NODE: show all attempts -->
-        <div class="field">
-          <span class="field-label">Scores</span>
-          <div class="score-pills">
-            {#each $selectedNode.attempts as attempt, i}
-              <span class="score-pill {statusClass(attempt.status)}">{attempt.score}/10</span>
-            {/each}
-          </div>
-        </div>
-
-        {#if $selectedNode.leaked_info}
-          <div class="field highlight">
-            <span class="field-label">Best Leaked Info</span>
-            <p>{$selectedNode.leaked_info}</p>
-          </div>
-        {/if}
-
-        {#each $selectedNode.attempts as attempt, i}
-          <div class="attempt-card">
-            <div class="attempt-header">
-              <span class="attempt-num">Attempt {i + 1}</span>
-              <span class="attempt-score {statusClass(attempt.status)}">{attempt.score}/10 {attempt.status}</span>
-            </div>
-            {#if attempt.approach}
-              <p class="attempt-approach">{attempt.approach}</p>
-            {/if}
-            {#if attempt.leaked_info}
-              <p class="attempt-leaked">{attempt.leaked_info}</p>
-            {/if}
-            {#if attempt.reflection}
-              <p class="attempt-reflection">{attempt.reflection}</p>
-            {/if}
-            {#if attempt.messages_sent?.length}
-              <div class="messages">
-                {#each attempt.messages_sent as msg, j}
-                  <div class="msg sent">
-                    <span class="msg-label">SENT</span>
-                    <p>{msg}</p>
-                  </div>
-                  {#if attempt.target_responses?.[j]}
-                    <div class="msg recv">
-                      <span class="msg-label">RECV</span>
-                      <p>{attempt.target_responses[j]}</p>
-                    </div>
-                  {/if}
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/each}
-
+      {#if node._isLeaderOrchestrator}
+        <h2 class="title leader">{node.module || 'leader'} <span class="leader-tag">· leader</span></h2>
       {:else}
-        <!-- SINGLE NODE -->
-        {#if $selectedNode.approach}
-          <div class="field">
-            <span class="field-label">Approach</span>
-            <p>{$selectedNode.approach}</p>
-          </div>
-        {/if}
-
-        {#if $selectedNode.leaked_info}
-          <div class="field highlight">
-            <span class="field-label">Leaked Info</span>
-            <p>{$selectedNode.leaked_info}</p>
-          </div>
-        {/if}
-
-        {#if $selectedNode.reflection}
-          <div class="field">
-            <span class="field-label">Reflection</span>
-            <p>{$selectedNode.reflection}</p>
-          </div>
-        {/if}
-
-        {#if $selectedNode.messages_sent?.length}
-          <div class="field">
-            <span class="field-label">Messages ({$selectedNode.messages_sent.length})</span>
-            <div class="messages">
-              {#each $selectedNode.messages_sent as msg, i}
-                <div class="msg sent">
-                  <span class="msg-label">SENT</span>
-                  <p>{msg}</p>
-                </div>
-                {#if $selectedNode.target_responses?.[i]}
-                  <div class="msg recv">
-                    <span class="msg-label">RECV</span>
-                    <p>{$selectedNode.target_responses[i]}</p>
-                  </div>
-                {/if}
-              {/each}
-            </div>
-          </div>
+        <h2 class="title">{node.module || node.id}</h2>
+        {#if typeof node._seqNum === 'number'}
+          <span class="seq-pill">#{node._seqNum}</span>
         {/if}
       {/if}
+      <button class="close-btn" on:click={close} aria-label="Close">&times;</button>
+    </div>
 
-      <div class="meta">
-        {#if $selectedNode.isGroup}
-          <span>{$selectedNode.attemptCount} attempts</span>
-        {:else}
-          <span>ID: {$selectedNode.id?.slice(0, 12)}</span>
-          <span>Depth: {$selectedNode.depth ?? '?'}</span>
-          {#if $selectedNode.run_id}
-            <span>Run: {$selectedNode.run_id}</span>
+    <!-- Always-visible context: banners + status badge live ABOVE tabs
+         because they're frame-of-reference, not content. -->
+    <div class="banners">
+      {#if node._isLeaderOrchestrator}
+        <div class="leader-banner" class:running={$isRunning}>
+          <b>{$isRunning ? 'LEADER · RUNNING' : 'LEADER · IDLE'}</b>
+          The orchestrator module that picks which sub-module to delegate to
+          and decides when the objective is met.
+        </div>
+      {:else if isFrontier(node)}
+        <div class="frontier-banner">
+          <b>FRONTIER · PROPOSED</b>
+          A frontier proposal — suggested as a next move but not yet executed.
+        </div>
+      {/if}
+
+      {#if !node._isLeaderOrchestrator && node.status}
+        <div class="status-row">
+          <span class="status-badge {node.status}">{node.status}</span>
+        </div>
+      {/if}
+    </div>
+
+    {#if tabs.length > 0}
+      <div class="tab-strip" role="tablist" aria-label="Node detail sections">
+        {#each tabs as t (t.key)}
+          <button
+            class="tab"
+            class:active={activeTab === t.key}
+            role="tab"
+            aria-selected={activeTab === t.key}
+            on:click={() => activeTab = t.key}
+          >{t.label}</button>
+        {/each}
+      </div>
+
+      <div class="tab-content">
+        {#if activeTab === 'objective'}
+          <pre>{node._scenarioObjective}</pre>
+
+        {:else if activeTab === 'approach'}
+          <pre>{node.approach}</pre>
+
+        {:else if activeTab === 'exchange'}
+          {#each pairs as p, i}
+            {#if p.sent}
+              <div class="msg me">
+                <span class="lbl">attacker → target · turn {i + 1}</span>
+                {p.sent}
+              </div>
+            {/if}
+            {#if p.got}
+              <div class="msg them">
+                <span class="lbl">target → attacker</span>
+                {p.got}
+              </div>
+            {/if}
+          {/each}
+
+        {:else if activeTab === 'leaks'}
+          <div class="leaked">{node.leaked_info}</div>
+
+        {:else if activeTab === 'reflection'}
+          <pre>{node.reflection}</pre>
+
+        {:else if activeTab === 'output'}
+          <pre>{node.module_output}</pre>
+
+        {:else if activeTab === 'config' && moduleConfig}
+          <div class="config-tag">
+            {moduleConfig.name} · T{moduleConfig.tier ?? tierOf(moduleConfig.name)}
+          </div>
+          <details open>
+            <summary>description</summary>
+            <pre>{moduleConfig.description}</pre>
+          </details>
+          {#if moduleConfig.theory}
+            <details>
+              <summary>theory</summary>
+              <pre>{moduleConfig.theory}</pre>
+            </details>
+          {/if}
+          {#if moduleConfig.system_prompt}
+            <details>
+              <summary>system_prompt ({moduleConfig.system_prompt.length} chars)</summary>
+              <pre>{moduleConfig.system_prompt}</pre>
+            </details>
+          {/if}
+          {#if moduleConfig.sub_modules?.length}
+            <div class="sub-modules-row">
+              <span class="sub-modules-key">sub_modules</span>
+              <span class="sub-modules-val">{moduleConfig.sub_modules.join(', ')}</span>
+            </div>
           {/if}
         {/if}
       </div>
-    </div>
+    {/if}
   </aside>
 {/if}
 
 <style>
   .right-sidebar {
-    width: 340px;
-    min-width: 340px;
+    width: 380px;
+    min-width: 380px;
     background: var(--bg-secondary);
     border-left: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     animation: slideIn 0.2s ease-out;
   }
-
   @keyframes slideIn {
     from { transform: translateX(40px); opacity: 0; }
     to { transform: translateX(0); opacity: 1; }
@@ -163,103 +214,304 @@
 
   .header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 14px 16px 0;
+    gap: 8px;
+    padding: 14px 16px 8px;
+    border-bottom: 1px solid var(--border);
   }
-
-  .title-row { display: flex; align-items: center; gap: 8px; }
-
-  .module-name {
-    margin: 6px 16px 12px;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text);
+  .title {
+    margin: 0;
+    font-size: 14px;
+    font-family: var(--font-mono);
+    color: var(--phosphor);
+    text-shadow: var(--phosphor-glow);
+    flex: 1;
+    word-break: break-word;
   }
-
-  .status-badge {
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 0.65rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
+  .title.leader { color: var(--phosphor); font-style: italic; }
+  .seq-pill {
     background: var(--bg-tertiary);
     color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 8px;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
-
-  .status-badge.dead { background: #ef44441a; color: var(--red); }
-  .status-badge.promising { background: #22c55e1a; color: var(--green); }
-  .status-badge.frontier { background: #3b82f61a; color: var(--blue); }
-  .status-badge.human { background: #f59e0b1a; color: var(--amber); }
-
-  .score { font-weight: 700; font-size: 1.1rem; color: var(--green); }
-
   .close-btn {
-    background: none; border: none; color: var(--text-muted);
-    font-size: 1.4rem; cursor: pointer; padding: 0 4px; line-height: 1;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.4rem;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
   }
   .close-btn:hover { color: var(--text); }
 
-  .scroll-area { flex: 1; overflow-y: auto; padding: 0 16px 16px; }
+  /* ---------- banners + status (above tabs) ---------- */
+  .banners {
+    padding: 10px 16px 0;
+    flex-shrink: 0;
+  }
+  .status-row { margin: 4px 0 0 0; }
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 11px;
+    border-radius: 3px;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+  }
+  .status-badge.promising {
+    background: hsla(155 100% 42% / 0.12);
+    border-color: var(--phosphor);
+    color: var(--phosphor);
+    text-shadow: var(--phosphor-glow);
+  }
+  .status-badge.dead {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: var(--red);
+    color: var(--red);
+  }
+  .status-badge.alive {
+    background: rgba(168, 162, 158, 0.10);
+    border-color: var(--text-muted);
+    color: var(--text);
+  }
+  .status-badge.frontier {
+    background: transparent;
+    border: 1px dashed var(--text-muted);
+    color: var(--text-muted);
+  }
 
-  .field { margin-bottom: 14px; }
-  .field-label {
-    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--text-muted); display: block; margin-bottom: 4px;
+  /* ---------- tab strip ---------- */
+  .tab-strip {
+    flex-shrink: 0;
+    display: flex;
+    gap: 2px;
+    margin: 12px 16px 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    scrollbar-width: none;
   }
-  .field p { margin: 0; font-size: 0.82rem; color: var(--text); line-height: 1.5; }
-  .field.highlight {
-    background: #22c55e08; border-left: 3px solid var(--green);
-    padding: 8px 12px; border-radius: 0 6px 6px 0;
+  .tab-strip::-webkit-scrollbar { display: none; }
+  .tab {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    font-weight: 400;
+    padding: 6px 11px;
+    cursor: pointer;
+    border-radius: 3px 3px 0 0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 120ms, border-color 120ms;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    color: var(--phosphor);
+    border-bottom-color: var(--phosphor);
+    text-shadow: var(--phosphor-glow);
   }
 
-  /* Score pills for groups */
-  .score-pills { display: flex; gap: 4px; flex-wrap: wrap; }
-  .score-pill {
-    padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700;
-    background: var(--bg-tertiary); color: var(--text-muted);
+  /* ---------- tab content ---------- */
+  .tab-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px 24px;
+    font-size: 12px;
   }
-  .score-pill.dead { color: var(--red); }
-  .score-pill.promising { color: var(--green); }
 
-  /* Attempt cards for groups */
-  .attempt-card {
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px 12px; margin-bottom: 8px;
+  pre {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0 0 8px 0;
+    color: var(--text);
+    line-height: 1.55;
   }
-  .attempt-header {
-    display: flex; justify-content: space-between; align-items: center;
+
+  /* ---------- nested config <details> (still useful inside Config tab) */
+  details {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
     margin-bottom: 6px;
   }
-  .attempt-num { font-size: 0.7rem; font-weight: 600; color: var(--text-muted); }
-  .attempt-score {
-    font-size: 0.68rem; font-weight: 700; color: var(--text-muted);
-    padding: 1px 6px; border-radius: 3px; background: var(--bg-tertiary);
+  details > summary {
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 2px 0;
+    list-style: none;
   }
-  .attempt-score.dead { color: var(--red); }
-  .attempt-score.promising { color: var(--green); }
-
-  .attempt-approach { font-size: 0.78rem; color: var(--text); margin: 0 0 4px; line-height: 1.4; }
-  .attempt-leaked {
-    font-size: 0.75rem; color: var(--green);
-    border-left: 2px solid var(--green); padding-left: 6px;
-    margin: 4px 0;
+  details > summary::marker { display: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before {
+    content: '▸ ';
+    display: inline-block;
+    transition: transform 120ms;
   }
-  .attempt-reflection { font-size: 0.72rem; color: var(--text-muted); margin: 4px 0; font-style: italic; }
+  details[open] > summary::before { content: '▾ '; }
+  details > summary:hover { color: var(--accent); }
+  details[open] > summary { color: var(--text); }
+  details > pre {
+    margin-top: 6px;
+    border: none;
+    padding: 0;
+    background: transparent;
+    max-height: 360px;
+    overflow-y: auto;
+  }
 
-  /* Messages */
-  .messages { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-  .msg { padding: 8px 10px; border-radius: 6px; font-size: 0.78rem; }
-  .msg-label { font-size: 0.55rem; font-weight: 700; letter-spacing: 0.1em; display: block; margin-bottom: 3px; }
-  .msg.sent { background: var(--bg-tertiary); border-left: 2px solid var(--cyan); }
-  .msg.sent .msg-label { color: var(--cyan); }
-  .msg.recv { background: var(--bg-tertiary); border-left: 2px solid var(--amber); }
-  .msg.recv .msg-label { color: var(--amber); }
-  .msg p { margin: 0; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+  /* ---------- config tab content ---------- */
+  .config-tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 6px;
+    margin-bottom: 8px;
+    letter-spacing: 0.04em;
+  }
+  .sub-modules-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 6px;
+    padding: 6px 0 0 0;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .sub-modules-key {
+    font-family: var(--mono);
+  }
+  .sub-modules-val {
+    color: var(--text);
+    font-family: var(--mono);
+    max-width: 60%;
+    text-align: right;
+    word-break: break-all;
+  }
 
-  .meta {
-    display: flex; flex-wrap: wrap; gap: 12px;
-    font-size: 0.65rem; color: var(--text-muted);
-    padding-top: 10px; border-top: 1px solid var(--border); font-family: monospace;
+  /* ---------- exchange messages ---------- */
+  .msg {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 7px 9px;
+    font-family: var(--mono);
+    font-size: 11px;
+    margin-bottom: 6px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .msg.me { border-left: 2px solid var(--cyan); }
+  .msg.them { border-left: 2px solid #a78bfa; }
+  .msg .lbl {
+    display: block;
+    color: var(--text-muted);
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  /* ---------- leaked highlight ---------- */
+  .leaked {
+    background: hsla(155 100% 42% / 0.08);
+    border: 1px solid var(--phosphor);
+    color: var(--phosphor);
+    text-shadow: var(--phosphor-glow);
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    word-break: break-word;
+    white-space: pre-wrap;
+    line-height: 1.55;
+    box-shadow: var(--phosphor-glow-tight);
+  }
+
+  /* ---------- banners ---------- */
+  .frontier-banner {
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid var(--amber);
+    color: #fde68a;
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1.55;
+  }
+  .frontier-banner b {
+    display: block;
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    color: var(--amber);
+    margin-bottom: 4px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 400;
+  }
+  .leader-banner {
+    background: hsla(155 100% 42% / 0.08);
+    border: 1px solid hsla(155 100% 42% / 0.5);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1.55;
+  }
+  .leader-banner.running {
+    background: hsla(155 100% 42% / 0.12);
+    border-color: var(--phosphor);
+    box-shadow: var(--phosphor-glow-tight);
+  }
+  .leader-banner b {
+    display: block;
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    color: var(--phosphor);
+    text-shadow: var(--phosphor-glow);
+    margin-bottom: 4px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 400;
+  }
+  .leader-banner.running b { color: var(--phosphor); }
+
+  .leader-tag {
+    color: var(--text-muted);
+    font-style: italic;
+    font-weight: normal;
+    font-size: 12px;
   }
 </style>

@@ -63,8 +63,10 @@ def _make_ctx(
     completion_responses=None,
     target_replies=None,
     graph=None,
-    plan=None,
     captured_messages=None,
+    operator_messages=None,
+    leader_scratchpad=None,
+    leader_module_name=None,
 ):
     """Create a Context with scripted LLM + target responses.
 
@@ -120,9 +122,11 @@ def _make_ctx(
         max_turns=max_turns,
         graph=graph,
         run_id="test-run",
-        plan=plan,
+        operator_messages=list(operator_messages) if operator_messages else None,
     )
     ctx.completion = fake_completion
+    if leader_scratchpad is not None and leader_module_name:
+        ctx.scratchpad.set(leader_module_name, leader_scratchpad)
     return ctx
 
 
@@ -624,15 +628,17 @@ class TestLogging:
 
 
 # ---------------------------------------------------------------------------
-# Plan injection (Phase 3)
+# Leader scratchpad slot + operator-message drain
 # ---------------------------------------------------------------------------
 
-class TestPlanInjection:
+class TestLeaderScratchpadAndOperatorMessages:
     @pytest.mark.asyncio
-    async def test_plan_injected_into_leader_user_prompt(self):
-        """When ctx.plan is set, it must appear in the leader's first user message."""
+    async def test_leader_scratchpad_slot_renders_in_scratchpad_block(self):
+        """Persisted leader notes — seeded into ctx.scratchpad[module_name] —
+        must surface in the leader's user prompt via the standard `## Scratchpad`
+        block. No special "## Attack Plan" heading exists any more."""
         captured = []
-        plan_text = "# Attack Plan\n\nFocus on behavioral rules. Avoid identity claims."
+        leader_module = _make_module(name="my-leader")
 
         ctx = _make_ctx(
             completion_responses=[
@@ -640,24 +646,27 @@ class TestPlanInjection:
                     tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
                 )),
             ],
-            plan=plan_text,
             captured_messages=captured,
+            leader_scratchpad="Focus on behavioral rules. Avoid identity claims.",
+            leader_module_name=leader_module.name,
         )
-        module = _make_module()
-        await run_react_loop(module, ctx, "test", log=None)
+        await run_react_loop(leader_module, ctx, "test", log=None)
 
         assert len(captured) >= 1
-        # The first messages payload should carry our plan in the user role
         first = captured[0]
-        user_msgs = [m for m in first if m.get("role") == "user"]
-        assert user_msgs, "no user message sent"
-        combined = "\n".join(m["content"] for m in user_msgs)
-        assert "Attack Plan (from human operator" in combined
+        combined = "\n".join(
+            m.get("content", "") for m in first if m.get("role") == "user"
+        )
+        # New rendering: standard scratchpad block with the leader's slot.
+        assert "## Scratchpad" in combined
         assert "Focus on behavioral rules" in combined
+        # Old rendering must be gone — no special "Attack Plan" heading.
+        assert "Attack Plan (from human operator" not in combined
 
     @pytest.mark.asyncio
-    async def test_no_plan_means_no_injection(self):
-        """Without ctx.plan, the human-plan heading must NOT appear."""
+    async def test_operator_messages_drained_into_leader_prompt(self):
+        """Operator messages on ctx.operator_messages must be rendered into a
+        '## Operator Messages' block at depth 0, then cleared from the queue."""
         captured = []
         ctx = _make_ctx(
             completion_responses=[
@@ -665,21 +674,25 @@ class TestPlanInjection:
                     tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
                 )),
             ],
-            plan=None,
             captured_messages=captured,
+            operator_messages=[
+                {"role": "user", "content": "focus on the Spanish translation angle", "timestamp": 1.0},
+            ],
         )
-        module = _make_module()
-        await run_react_loop(module, ctx, "test", log=None)
+        await run_react_loop(_make_module(), ctx, "test", log=None)
 
         first = captured[0]
         combined = "\n".join(
             m.get("content", "") for m in first if m.get("role") == "user"
         )
-        assert "Attack Plan (from human operator" not in combined
+        assert "## Operator Messages" in combined
+        assert "Spanish translation angle" in combined
+        # Drained — queue must be empty after rendering.
+        assert ctx.operator_messages == []
 
     @pytest.mark.asyncio
-    async def test_empty_plan_string_treated_as_no_plan(self):
-        """An empty/whitespace plan should not inject the section."""
+    async def test_empty_operator_messages_omits_block(self):
+        """No queued operator messages → no '## Operator Messages' heading."""
         captured = []
         ctx = _make_ctx(
             completion_responses=[
@@ -687,17 +700,15 @@ class TestPlanInjection:
                     tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
                 )),
             ],
-            plan="   \n  ",
             captured_messages=captured,
         )
-        module = _make_module()
-        await run_react_loop(module, ctx, "test", log=None)
+        await run_react_loop(_make_module(), ctx, "test", log=None)
 
         first = captured[0]
         combined = "\n".join(
             m.get("content", "") for m in first if m.get("role") == "user"
         )
-        assert "Attack Plan (from human operator" not in combined
+        assert "## Operator Messages" not in combined
 
 
 # ---------------------------------------------------------------------------

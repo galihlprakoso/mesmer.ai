@@ -142,7 +142,27 @@ mesmer/                          # repo root
 │       ├── cli.py               # Click CLI: run, graph, hint, debrief, stats, bench
 │       └── web/
 │           ├── backend/         # FastAPI + SSE (server.py) + events schema
-│           └── frontend/        # Svelte 5 + D3 attack-graph viewer
+│           │                    #   Scenario CRUD lives here too — POST/PUT
+│           │                    #   /api/scenarios writes to scenarios/private/
+│           │                    #   and round-trips through load_scenario for
+│           │                    #   path-traversal-guarded validation.
+│           └── frontend/        # Svelte 5 SPA, hash router, three views
+│               # src/main.js → router.init() before mount
+│               # src/lib/router.js — #/ #/scenarios/new
+│               #     #/scenarios/{path}/edit  #/scenarios/{path}
+│               # src/lib/api.js — typed fetch helpers (createScenario,
+│               #     updateScenario, validateScenario, editorChat, …)
+│               # src/pages/ScenarioList.svelte    — default landing
+│               # src/pages/ScenarioEditor.svelte  — form/YAML + AI chat
+│               # src/components/AttackGraph.svelte — graph view (existing)
+│               # src/components/ScenarioForm.svelte
+│               #     — Form/YAML tabs, leader picker grouped by registry
+│               #       category via <optgroup>, lints via /api/scenarios/validate
+│               # src/components/EditorChat.svelte — vibe-code chat panel
+│               #     auto-applies updated_yaml with a 20-deep undo stack
+│               # src/components/ModuleBrowser.svelte
+│               #     — leader-rooted tree (each leader + its sub_modules)
+│               # Dependency: js-yaml for form↔YAML conversion (no Monaco)
 │
 ├── modules/                     # built-in attack modules (sibling of the package)
 │   ├── attacks/                 # leader modules that orchestrate sub-modules
@@ -581,9 +601,33 @@ The bench `--verbose` CLI flag does two things: (1) writes every event to `event
 ### Interfaces
 
 - `interfaces/cli.py` — Click-based CLI, the primary entry point (`mesmer` console script → `cli:cli`). Commands: `run`, `graph`, `hint`, `debrief`, `stats`, `modules`, `serve`, `bench`, `bench-viz`.
-- `interfaces/web/backend/server.py` — FastAPI + SSE server that streams `log`, `graph_update`, and `key_status` events to the Svelte 5 + D3 frontend in `frontend/`.
+- `interfaces/web/backend/server.py` — FastAPI + WebSocket server that streams `log`, `graph_update`, and `key_status` events to the Svelte 5 frontend in `frontend/`. Also owns scenario CRUD (`POST/PUT /api/scenarios`, `POST /api/scenarios/validate`) and the editor's vibe-code chat (`POST /api/scenario-editor-chat`).
 
 Both interfaces go through `core/runner.execute_run(RunConfig, ...)`. When adding run-level behavior, change `runner.py` so CLI and web stay in sync; the logging protocol is `LogFn = Callable[[str, str], None]` (event name from `LogEvent`, detail string).
+
+**Web UI is multi-page, hash-routed.** Three top-level views switched by `currentRoute` (`src/lib/router.js`):
+
+| Hash | View | Purpose |
+|---|---|---|
+| `#/` (default) | `pages/ScenarioList.svelte` | Card grid, "+ New scenario" button, click-card → graph view |
+| `#/scenarios/new` | `pages/ScenarioEditor.svelte` (blank) | Form/YAML tabs + AI vibe-code chat |
+| `#/scenarios/{path}/edit` | `pages/ScenarioEditor.svelte` (loaded) | Same editor, populated from `GET /api/scenarios/{path}` |
+| `#/scenarios/{path}` | Existing graph layout | Sidebar + AttackGraph + NodeDetail + ActivityPanel |
+
+`App.svelte` switches on `$currentRoute.view`. The graph layout block is the original UI — untouched aside from the sidebar (dropdown removed; "← Scenarios" + edit-pencil added). Run controls (max turns, hints, fresh, mode, Run Attack) stay in the graph-view sidebar; the editor focuses on config + chat.
+
+`selectedScenario` is auto-derived from the route: when `view === 'graph'` it tracks `route.scenarioPath`; otherwise it's null and `graphData`/`graphStats` clear so a stale graph doesn't bleed into the list/editor pages.
+
+**Scenario editor data flow** (`pages/ScenarioEditor.svelte`):
+
+- Form tab two-way binds to YAML via `js-yaml` in `components/ScenarioForm.svelte::yamlToForm` / `formToYaml`. Form mutations regenerate the YAML; YAML edits parse back into the form (latest write wins).
+- Validation badge calls `POST /api/scenarios/validate` debounced 500ms; the endpoint runs `core.scenario.load_scenario` against a temp file and surfaces the loader's exception text verbatim. **Don't add a parallel YAML validator on the frontend** — the loader is the source of truth.
+- AI chat (`components/EditorChat.svelte`) calls `POST /api/scenario-editor-chat` with current YAML + message + history. Backend returns `{reply, updated_yaml}` parsed via `parse_llm_json`. When `updated_yaml` is non-null the editor pushes the prior YAML onto a 20-deep undo stack and replaces the current value. Undo button pops the stack. The chat is decoupled from the scenario's `agent.model` — it reads `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) directly from env so blank scenarios still work.
+- Save: existing scenario → `PUT /api/scenarios/{path}`. New scenario → `POST /api/scenarios` with `{name, yaml_content}`; backend slugifies and writes to `scenarios/private/{slug}.yaml`. After first save the editor calls `history.replaceState` to update the URL to `#/scenarios/{path}/edit`.
+
+**Module picker grouping** (`components/ScenarioForm.svelte`): the leader dropdown groups by `Registry.categories` (top-level subdir under `modules/`: `attacks`, `planners`, `profilers`, `techniques`) using `<optgroup>`. Tier is intentionally NOT shown for the leader picker — leader's own tier doesn't drive runtime. Categories live on the Registry, not on `ModuleConfig`; populated during `auto_discover` and exposed via `Registry.category_of(name)` + the `category` field in `Registry.list_modules()`.
+
+**Module browser** (`components/ModuleBrowser.svelte`) is leader-rooted: each leader (any module with non-empty `sub_modules`) renders as a parent row with its sub-modules nested beneath; modules referenced by no leader fall into a "Standalone" group. A sub-module referenced by multiple leaders appears under each — that's intentional so the tree truthfully reflects the registry. Don't dedupe.
 
 ### Human-in-the-loop
 

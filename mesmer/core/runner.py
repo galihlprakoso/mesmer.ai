@@ -81,6 +81,7 @@ async def execute_run(
     log: LogFn | None = None,
     on_graph_update: Callable[[AttackGraph], None] | None = None,
     on_pool_ready: Callable[[object], None] | None = None,
+    on_ctx_ready: Callable[[Context], None] | None = None,
 ) -> RunResult:
     """
     Execute an attack run. This is the core orchestration shared by CLI and web.
@@ -91,6 +92,10 @@ async def execute_run(
         on_graph_update: Optional callback when graph changes (for web UI)
         on_pool_ready: Optional callback receiving the agent's KeyPool once
             configured, so the web UI can broadcast key_status events.
+        on_ctx_ready: Optional callback fired right after the top-level
+            ``Context`` is constructed and seeded. The web backend uses this
+            to grab a handle on the running ctx so operator chat messages
+            can be queued onto ``ctx.operator_messages`` mid-run.
 
     Returns:
         RunResult with all run data
@@ -170,7 +175,6 @@ async def execute_run(
 
     # Create context
     max_turns = config.max_turns_override or scenario.objective.max_turns
-    plan_md = memory.load_plan()  # None if no plan.md for this target
     # CLI override wins over YAML (mirrors model_override / max_turns_override).
     effective_scenario_mode = (
         config.scenario_mode_override
@@ -200,7 +204,7 @@ async def execute_run(
         run_id=run_id,
         mode=config.mode,
         human_broker=config.human_broker,
-        plan=plan_md,
+        target_memory=memory,
         judge_rubric_additions=scenario.judge_rubric_additions,
         scenario_mode=effective_scenario_mode,
         _turns=seeded_turns,
@@ -223,6 +227,21 @@ async def execute_run(
         output = (node.module_output or "").strip()
         if output:
             ctx.scratchpad.set(node.module, output)
+
+    # Persistent leader-scratchpad slot. The leader's slot is the only one
+    # the framework leaves empty after the conversation_history loop above
+    # (leader-verdict nodes are excluded at source), so the on-disk
+    # scratchpad.md content is the canonical contents — overwrite cleanly.
+    # Edited via the leader's update_scratchpad tool and via the operator
+    # through the web UI's leader-chat.
+    scratchpad_md = memory.load_scratchpad()
+    if scratchpad_md is not None:
+        ctx.scratchpad.set(scenario.module, scratchpad_md)
+
+    # Fire ctx-ready hook AFTER seeding so the web backend's hold-onto-ctx
+    # grab gets a fully populated context (operator_messages queue ready).
+    if on_ctx_ready is not None:
+        on_ctx_ready(ctx)
 
     # Wrap log_fn to also emit graph snapshots
     # on_graph_update fires BEFORE log so the graph ref is set before broadcast

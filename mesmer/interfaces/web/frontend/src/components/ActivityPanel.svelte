@@ -2,7 +2,7 @@
   import { derived } from 'svelte/store'
   import { afterUpdate } from 'svelte'
   import {
-    events, activeModules, activeModuleTop, isRunning,
+    events, activeModules, activeModuleTop, isRunning, runStatus,
     visibleStats, runMeta, keyStatus,
   } from '../lib/stores.js'
   import { eventsToActivity } from '../lib/activity-transform.js'
@@ -29,9 +29,9 @@
 <aside class="activity-panel">
   <div class="header">
     <div class="header-top">
-      <div class="live-indicator">
+      <div class="live-indicator" class:running={$isRunning} class:error={$runStatus === 'error'}>
         <span class="live-dot"></span>
-        <span class="live-label">LIVE</span>
+        <span class="live-label">{$isRunning ? 'LIVE' : ($runStatus === 'error' ? 'ERROR' : $runStatus.toUpperCase() || 'IDLE')}</span>
       </div>
       {#if $keyStatus && $keyStatus.total > 0}
         <span
@@ -99,19 +99,12 @@
 
 <style>
   .activity-panel {
-    width: 340px;
-    min-width: 340px;
+    flex: 1;
+    min-height: 0;
     background: var(--bg-secondary);
-    border-left: 1px solid var(--border);
     display: flex;
     flex-direction: column;
-    animation: slideIn 0.18s ease-out;
     position: relative;
-  }
-
-  @keyframes slideIn {
-    from { transform: translateX(20px); opacity: 0; }
-    to { transform: translateX(0); opacity: 1; }
   }
 
   .header {
@@ -135,15 +128,16 @@
   }
 
   .keys-pill {
-    font-size: 0.62rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     padding: 1px 7px;
-    border-radius: 10px;
+    border-radius: 3px;
     background: var(--bg-tertiary);
     color: var(--text-muted);
     border: 1px solid var(--border);
-    font-family: 'JetBrains Mono', monospace;
     cursor: help;
   }
   .keys-pill.degraded {
@@ -159,21 +153,31 @@
 
   .live-dot {
     width: 8px; height: 8px; border-radius: 50%;
-    background: #06b6d4;
+    background: var(--text-muted);
+  }
+  .live-indicator.running .live-dot {
+    background: var(--phosphor);
+    box-shadow: var(--phosphor-glow-tight);
     animation: livePulse 1.3s infinite;
+  }
+  .live-indicator.error .live-dot {
+    background: var(--red);
   }
 
   @keyframes livePulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.7); }
-    70%      { box-shadow: 0 0 0 6px rgba(6, 182, 212, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 hsla(155, 100%, 42%, 0.7); }
+    70%      { box-shadow: 0 0 0 6px hsla(155, 100%, 42%, 0); }
   }
 
   .live-label {
-    font-size: 0.62rem;
-    font-weight: 700;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    font-weight: 400;
     letter-spacing: 0.1em;
-    color: #06b6d4;
+    color: var(--text-muted);
   }
+  .live-indicator.running .live-label { color: var(--phosphor); text-shadow: var(--phosphor-glow); }
+  .live-indicator.error   .live-label { color: var(--red); }
 
   .current-module {
     display: flex;
@@ -182,7 +186,7 @@
   }
 
   .module-name {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.9rem;
     font-weight: 600;
     color: var(--text);
@@ -195,9 +199,11 @@
   }
 
   .stack-depth {
-    font-size: 0.65rem;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     color: var(--text-muted);
-    font-family: monospace;
   }
 
   .stats-strip {
@@ -217,21 +223,22 @@
   }
 
   .stat-label {
-    font-size: 0.58rem;
+    font-family: var(--font-pixel);
+    font-size: 0.5625rem;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.08em;
     color: var(--text-muted);
   }
 
   .stat-value {
+    font-family: var(--font-mono);
     font-size: 0.95rem;
     font-weight: 700;
     color: var(--text);
-    font-family: monospace;
   }
 
-  .stat-value.best      { color: var(--green); }
-  .stat-value.promising { color: var(--green); }
+  .stat-value.best      { color: var(--phosphor); text-shadow: var(--phosphor-glow); }
+  .stat-value.promising { color: var(--phosphor); }
   .stat-value.dead      { color: var(--red); }
 
   .feed {
@@ -253,7 +260,7 @@
   .spinner {
     width: 12px; height: 12px;
     border: 2px solid var(--border);
-    border-top-color: #06b6d4;
+    border-top-color: var(--phosphor);
     border-radius: 50%;
     animation: spin 0.9s linear infinite;
   }
@@ -270,11 +277,13 @@
     background: var(--accent);
     color: #000;
     border: none;
-    border-radius: 20px;
-    font-size: 0.7rem;
-    font-weight: 600;
+    border-radius: 4px;
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    box-shadow: var(--button-glow);
   }
-  .jump-btn:hover { background: var(--accent-hover); }
+  .jump-btn:hover { filter: brightness(1.1); }
 </style>

@@ -16,14 +16,26 @@ class Registry:
 
     def __init__(self):
         self.modules: dict[str, ModuleConfig] = {}
+        # Module-name → category folder it lives in (e.g. "attacks",
+        # "planners", "profilers", "techniques"). Populated during
+        # ``auto_discover`` from the top-level subdirectory under the
+        # discover root. Surfaced through :meth:`list_modules` for UI
+        # grouping; not consulted at attack runtime.
+        self.categories: dict[str, str] = {}
 
-    def register(self, config: ModuleConfig):
-        """Register a single module."""
+    def register(self, config: ModuleConfig, category: str = ""):
+        """Register a single module, optionally tagged with a category."""
         self.modules[config.name] = config
+        if category:
+            self.categories[config.name] = category
 
     def get(self, name: str) -> ModuleConfig | None:
         """Get a module by name."""
         return self.modules.get(name)
+
+    def category_of(self, name: str) -> str:
+        """Category folder this module was discovered in, or ``""`` if unknown."""
+        return self.categories.get(name, "")
 
     def __contains__(self, name: str) -> bool:
         return name in self.modules
@@ -35,23 +47,42 @@ class Registry:
         """
         Scan directories for modules. Each subdirectory containing
         module.yaml is loaded as a module.
-        Recurses into subdirectories to support nested organization.
+
+        Modules are tagged with the **top-level subdirectory** they live
+        in relative to the discover root — that's the category. So under
+        ``modules/`` the children ``attacks/`` ``planners/`` ``profilers/``
+        ``techniques/`` become category labels for everything below them.
+        Modules loaded from a path that *is* itself a module (no nested
+        walk) take that path's directory name as the category.
         """
         for base_path in paths:
             base = Path(base_path)
             if not base.exists():
                 continue
 
-            # Check if this directory itself is a module
+            # Path itself is a module — use its dir name as the category.
             config = load_module_config(base)
             if config:
                 self.modules[config.name] = config
+                self.categories[config.name] = base.name
                 continue
 
-            # Recurse into subdirectories
+            # Recurse into subdirectories — each top-level child names a
+            # category that propagates to every module discovered below it.
             for child in sorted(base.iterdir()):
                 if child.is_dir() and not child.name.startswith("_"):
-                    self.auto_discover(child)
+                    self._discover_in_category(child, child.name)
+
+    def _discover_in_category(self, path: Path, category: str):
+        """Recurse under ``path``, tagging every module found with ``category``."""
+        config = load_module_config(path)
+        if config:
+            self.modules[config.name] = config
+            self.categories[config.name] = category
+            return
+        for child in sorted(path.iterdir()):
+            if child.is_dir() and not child.name.startswith("_"):
+                self._discover_in_category(child, category)
 
     def tier_of(self, name: str) -> int:
         """Return the attack-cost tier for a module, or the default.
@@ -127,6 +158,8 @@ class Registry:
             {
                 "name": mod.name,
                 "description": mod.description[:100],
+                "tier": mod.tier,
+                "category": self.categories.get(mod.name, ""),
                 "sub_modules": mod.sub_module_names,
             }
             for mod in self.modules.values()

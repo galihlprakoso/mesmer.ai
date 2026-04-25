@@ -185,11 +185,27 @@ async def run_react_loop(
     if ctx.objective:
         user_content_parts.append(f"Overall objective: {ctx.objective}")
 
-    # Plan mode artifact — human-authored guidance for this attack
-    if ctx.plan and ctx.plan.strip():
-        user_content_parts.append(
-            "## Attack Plan (from human operator — follow this guidance)\n" + ctx.plan.strip()
-        )
+    # Operator messages — drained mid-run only at the leader level. The web
+    # UI pushes messages onto ``ctx.operator_messages`` while a run is
+    # active; the leader sees them in its very next iteration and the queue
+    # empties so they don't replay. Sub-modules don't drain (they inherit
+    # the same list reference but the leader is the operator's counterpart,
+    # not the sub-modules).
+    if ctx.depth == 0 and ctx.operator_messages:
+        rendered = []
+        for m in ctx.operator_messages:
+            content = (m.get("content") or "").strip()
+            if content:
+                rendered.append(f"- {content}")
+        ctx.operator_messages.clear()
+        if rendered:
+            user_content_parts.append(
+                "## Operator Messages (mid-run, unconsumed)\n"
+                "The human operator sent you these messages while you were "
+                "running. Read them, weigh them against the plan, and decide "
+                "whether to adjust. You may reply via the talk_to_operator "
+                "tool if useful.\n\n" + "\n".join(rendered)
+            )
 
     # Scratchpad — CURRENT STATE (KV snapshot). Populated at run start
     # from the graph's latest per-module outputs; auto-updated after

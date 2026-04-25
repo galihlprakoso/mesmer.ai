@@ -43,6 +43,7 @@ def is_target_error(reply: str) -> bool:
     return any(marker in lowered for marker in TARGET_ERROR_MARKERS)
 
 if TYPE_CHECKING:
+    from mesmer.core.agent.memory import TargetMemory
     from mesmer.core.graph import AttackGraph
     from mesmer.core.registry import Registry
     from mesmer.core.scenario import AgentConfig
@@ -258,7 +259,8 @@ class Context:
         run_id: str = "",
         mode: str = ContextMode.AUTONOMOUS.value,
         human_broker: HumanQuestionBroker | None = None,
-        plan: str | None = None,
+        target_memory: "TargetMemory | None" = None,
+        operator_messages: list[dict] | None = None,
         judge_rubric_additions: str = "",
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
@@ -283,7 +285,18 @@ class Context:
         self._last_key_used: str = ""
         self.mode = mode
         self.human_broker = human_broker
-        self.plan = plan  # Optional plan.md content (human-authored guidance)
+        # TargetMemory handle — bound on the top-level context only, propagated
+        # via child() so leader-only tools (update_scratchpad) can persist
+        # without re-deriving the target hash. ``None`` for tests / direct
+        # invocations that don't go through execute_run.
+        self.target_memory = target_memory
+        # Operator <> leader chat queue. Mutable, *shared* across parent and
+        # child (same list reference) so the WS handler can push from the web
+        # backend regardless of which sub-module the leader has currently
+        # delegated to. Drained ONLY by the leader's iteration in engine.py.
+        self.operator_messages: list[dict] = (
+            operator_messages if operator_messages is not None else []
+        )
         # Scenario-specific rubric text appended to JUDGE_SYSTEM. Keeps the
         # judge calibrated to the particular attack (e.g. profiling ≠ extraction).
         self.judge_rubric_additions = judge_rubric_additions
@@ -624,7 +637,14 @@ class Context:
             run_id=self.run_id,
             mode=self.mode,                 # mode inherited
             human_broker=self.human_broker, # broker shared
-            plan=self.plan,                 # plan shared
+            target_memory=self.target_memory,  # handle shared (sub-modules
+                                               # don't write to it, but the
+                                               # leader's tools need it after
+                                               # delegation returns)
+            operator_messages=self.operator_messages,  # SAME list — WS pushes
+                                                       # land here regardless
+                                                       # of which sub-module
+                                                       # is currently running
             judge_rubric_additions=self.judge_rubric_additions,  # shared
             target_fresh_session=target_fresh_session,
             attacker_model_override=attacker_model_override or self.attacker_model_override,

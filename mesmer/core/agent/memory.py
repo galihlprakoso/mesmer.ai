@@ -4,11 +4,16 @@ Storage layout:
     ~/.mesmer/
     └── targets/
     │   └── {target-hash}/
-    │       ├── graph.json      # the full attack graph (attempt history
-    │       │                   # AND canonical source of module outputs —
-    │       │                   # every AttackNode carries module_output)
-    │       ├── profile.md      # optional free-form human notes
-    │       ├── plan.md         # optional human-authored plan
+    │       ├── graph.json       # the full attack graph (attempt history
+    │       │                    # AND canonical source of module outputs —
+    │       │                    # every AttackNode carries module_output)
+    │       ├── profile.md       # optional free-form human notes
+    │       ├── scratchpad.md    # the leader's persistent working notes —
+    │       │                    # seeded into ctx.scratchpad[scenario.module]
+    │       │                    # at run start; the leader can rewrite it
+    │       │                    # via the update_scratchpad tool. Migrated
+    │       │                    # from the old plan.md on first init.
+    │       ├── chat.jsonl       # append-only operator <> leader chat log
     │       ├── conversation.json  # CONTINUOUS-mode rolling transcript
     │       └── runs/
     │           └── {run-id}.jsonl
@@ -75,6 +80,22 @@ class TargetMemory:
             model=target_config.model,
         )
         self.base_dir = MESMER_HOME / "targets" / self.target_hash
+        self._migrate_legacy_plan_to_scratchpad()
+
+    def _migrate_legacy_plan_to_scratchpad(self) -> None:
+        """One-shot rename of the old `plan.md` to `scratchpad.md`.
+
+        The persistent doc was renamed when we collapsed plan / hints / ideas
+        into a single leader-scratchpad concept. Existing targets keep their
+        notes — no special migration tooling needed beyond this rename.
+        """
+        legacy = self.base_dir / "plan.md"
+        new = self.base_dir / "scratchpad.md"
+        if legacy.exists() and not new.exists():
+            try:
+                legacy.rename(new)
+            except OSError:
+                pass  # leave both in place; next save_scratchpad cleans up
 
     @property
     def graph_path(self) -> Path:
@@ -85,8 +106,21 @@ class TargetMemory:
         return self.base_dir / "profile.md"
 
     @property
-    def plan_path(self) -> Path:
-        return self.base_dir / "plan.md"
+    def scratchpad_path(self) -> Path:
+        """Persisted leader-scratchpad doc.
+
+        Loaded into ``ctx.scratchpad[scenario.module]`` at run start;
+        rewritten by the leader's ``update_scratchpad`` tool and by the
+        operator via the web UI's leader-chat. No magic — it's just one
+        slot of the per-run scratchpad with file-backed persistence.
+        """
+        return self.base_dir / "scratchpad.md"
+
+    @property
+    def chat_path(self) -> Path:
+        """Append-only operator <> leader chat log (JSONL, one row per
+        message, ``{role, content, timestamp}``)."""
+        return self.base_dir / "chat.jsonl"
 
     @property
     def conversation_path(self) -> Path:
@@ -129,20 +163,58 @@ class TargetMemory:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.profile_path, profile)
 
-    def load_plan(self) -> str | None:
-        """Load the plan.md for this target, if any."""
-        if self.plan_path.exists():
-            return self.plan_path.read_text()
+    def load_scratchpad(self) -> str | None:
+        """Load scratchpad.md for this target, if any."""
+        if self.scratchpad_path.exists():
+            return self.scratchpad_path.read_text()
         return None
 
-    def save_plan(self, plan: str) -> None:
-        """Save plan.md. Pass empty string to clear."""
+    def save_scratchpad(self, content: str) -> None:
+        """Save scratchpad.md. Pass empty string to clear."""
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.plan_path.write_text(plan)
+        self.scratchpad_path.write_text(content)
 
-    def delete_plan(self) -> None:
-        if self.plan_path.exists():
-            self.plan_path.unlink()
+    def delete_scratchpad(self) -> None:
+        if self.scratchpad_path.exists():
+            self.scratchpad_path.unlink()
+
+    # --- Chat log (operator <> leader) -----------------------------------
+
+    def append_chat(self, role: str, content: str, timestamp: float) -> None:
+        """Append one chat row to chat.jsonl.
+
+        Role is ``"user"`` or ``"assistant"`` (mirroring OpenAI's chat
+        roles). The file is JSONL — one JSON object per line — so reads
+        are bounded-cost via tail.
+        """
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        row = {"role": role, "content": content, "timestamp": timestamp}
+        with open(self.chat_path, "a") as f:
+            f.write(json.dumps(row) + "\n")
+
+    def load_chat(self, limit: int = 20) -> list[dict]:
+        """Return the last ``limit`` chat rows, oldest-first.
+
+        Silently skips malformed rows — a single corrupt line shouldn't
+        sink the whole history.
+        """
+        if not self.chat_path.exists():
+            return []
+        rows: list[dict] = []
+        with open(self.chat_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return rows[-limit:] if limit and len(rows) > limit else rows
+
+    def clear_chat(self) -> None:
+        if self.chat_path.exists():
+            self.chat_path.unlink()
 
     def save_run_log(self, run_id: str, turns: list[Turn]) -> None:
         runs_dir = self.base_dir / "runs"

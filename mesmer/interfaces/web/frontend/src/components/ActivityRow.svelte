@@ -42,8 +42,12 @@
     color: var(--text-muted);
     font-size: 0.65rem;
     opacity: 0.6;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     padding-top: 2px;
+  }
+
+  .body {
+    font-family: var(--font-mono);
   }
 
   .icon {

@@ -30,8 +30,9 @@
 <style>
   .msg {
     padding: 8px 12px;
-    border-radius: 8px;
-    font-size: 0.82rem;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
@@ -76,8 +77,11 @@
   }
 
   .label {
-    font-weight: 700;
-    letter-spacing: 0.06em;
+    font-family: var(--font-pixel);
+    font-weight: 400;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     color: var(--text-muted);
   }
 

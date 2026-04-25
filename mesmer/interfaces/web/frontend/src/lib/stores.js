@@ -5,6 +5,7 @@
 import { writable, derived } from 'svelte/store'
 import { buildChatMessages } from './chat-transform.js'
 import { nextActiveStack } from './module-tracker.js'
+import { currentRoute } from './router.js'
 
 /** WebSocket connection status */
 export const wsStatus = writable('disconnected')
@@ -33,17 +34,20 @@ export const scenarios = writable([])
 /** Available modules */
 export const modules = writable([])
 
+/** Map of module name → tier (0–3); falls back to DEFAULT_TIER (2). */
+export const moduleTiers = derived(modules, $mods =>
+  Object.fromEntries(($mods ?? []).map(m => [m.name, m.tier ?? 2]))
+)
+
 /** Selected scenario path */
 export const selectedScenario = writable(null)
 
 /** Selected graph node (for detail panel) */
 export const selectedNode = writable(null)
 
-/** Co-pilot mode: 'autonomous' | 'co-op' | 'plan'. */
+/** Co-pilot mode: 'autonomous' | 'co-op'.
+ *  ('plan' was removed — the leader-chat works in both states now.) */
 export const mode = writable('autonomous')
-
-/** Whether the Trace (raw events) overlay is shown inside the chat panel. */
-export const showTrace = writable(false)
 
 /** Whether the Modules drawer is open (toggled from Sidebar). */
 export const modulesDrawerOpen = writable(false)
@@ -54,17 +58,22 @@ export const modulesDrawerOpen = writable(false)
  */
 export const pendingQuestion = writable(null)
 
-/** Current plan.md content (string, possibly empty). */
-export const planDoc = writable('')
+/** Current scratchpad.md content (the leader's persistent notes for the
+ *  selected scenario's target). */
+export const scratchpadDoc = writable('')
 
-/** Whether plan.md exists on disk for this target. */
-export const planExists = writable(false)
+/** Whether scratchpad.md exists on disk for this target. */
+export const scratchpadExists = writable(false)
 
 /**
- * Plan-mode chat — separate from the attack chat. In-memory only (resets
- * when switching scenarios). Array of { role: 'user' | 'assistant', content, timestamp }.
+ * Persisted operator <> leader chat for the selected scenario. Loaded from
+ * /api/chat on scenario switch; appended to as the user types and as
+ * operator_reply WS events arrive. Array of {role, content, timestamp}.
  */
-export const planChatMessages = writable([])
+export const chatHistory = writable([])
+
+/** Whether the scratchpad drawer is open. */
+export const scratchpadDrawerOpen = writable(false)
 
 /** Derived: is a run in progress? */
 export const isRunning = derived(runStatus, $s => $s === 'running')
@@ -91,9 +100,65 @@ export const activeModuleTop = derived(activeModules, $stack =>
   $stack.length > 0 ? $stack[$stack.length - 1] : null
 )
 
-/** Derived: chronological chat messages for the Co-pilot panel. */
-export const chatMessages = derived([graphData, events], ([$g, $evts]) =>
-  buildChatMessages($g, $evts)
+/** Currently-selected run for graph filtering. `null` means "All runs"
+ *  (the cumulative cross-run view). */
+export const selectedRunId = writable(null)
+
+/** Derived: list of unique runs in the graph, oldest-first.
+ *
+ *  Each entry: { runId, seq, timestamp, verdict }
+ *    - seq: 1-based ordinal by timestamp (oldest = #1, newest = #N)
+ *    - timestamp: earliest node ts in the run (when it started)
+ *    - verdict: 'met' | 'not_met' | 'pending'
+ *               (read from the run's leader-verdict node, or pending if none)
+ *
+ *  RunPicker reads this to render its chip strip. The "is currently
+ *  running" flag is derived component-side from `runStatus` + the
+ *  newest run's id (the live run is always the newest). */
+export const runs = derived(graphData, $g => {
+  if (!$g || !$g.nodes) return []
+  // Map runId -> { earliestTs, verdict }
+  const byRun = new Map()
+  for (const node of Object.values($g.nodes)) {
+    const rid = node.run_id
+    if (!rid) continue  // root node has no run_id
+    let entry = byRun.get(rid)
+    if (!entry) {
+      entry = { runId: rid, timestamp: node.timestamp || 0, verdict: 'pending' }
+      byRun.set(rid, entry)
+    } else if ((node.timestamp || 0) < entry.timestamp || entry.timestamp === 0) {
+      entry.timestamp = node.timestamp || entry.timestamp
+    }
+    if (node.source === 'leader') {
+      entry.verdict = node.status === 'promising' ? 'met' : 'not_met'
+    }
+  }
+  const list = Array.from(byRun.values())
+  list.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+  list.forEach((r, i) => { r.seq = i + 1 })
+  return list
+})
+
+/** Derived: chronological chat messages for the Co-pilot panel.
+ *
+ * Combines the persisted operator <> leader chat (warm-loaded from
+ * /api/chat) with conversational events from the live event stream
+ * (ask_human, human_answer + legacy human-source frontier hints).
+ * Per-attempt outcomes do NOT appear here — those live in the graph. */
+export const chatMessages = derived(
+  [graphData, events, chatHistory],
+  ([$g, $evts, $hist]) => {
+    const conv = buildChatMessages($g, $evts)
+    const persisted = ($hist || []).map(row => ({
+      kind: row.role === 'user' ? 'human' : 'agent-status',
+      sender: row.role === 'user' ? 'human' : 'agent',
+      timestamp: row.timestamp || 0,
+      text: row.content || '',
+    }))
+    const merged = [...persisted, ...conv]
+    merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+    return merged
+  }
 )
 
 /** Derived: frontier nodes extracted from graph data */
@@ -198,6 +263,22 @@ export function handleMessage(msg) {
       })
       // Track active-module stack incrementally
       activeModules.update(stack => nextActiveStack(stack, msg))
+
+      // Operator <> leader chat events (mid-run): the running leader called
+      // talk_to_operator → the reply lands in the chat panel. The user
+      // message echo is already optimistically appended client-side, so we
+      // drop OPERATOR_MESSAGE here to avoid duplicates.
+      if (msg.event === 'operator_reply') {
+        chatHistory.update(h => [
+          ...h,
+          { role: 'assistant', content: msg.detail || '', timestamp: msg.timestamp || Date.now() / 1000 },
+        ])
+      }
+      // Scratchpad mutated mid-run by the leader's update_scratchpad tool.
+      // The drawer auto-refreshes on its own via this signal.
+      if (msg.event === 'scratchpad_updated') {
+        scratchpadExists.set(true)
+      }
       break
 
     case 'graph':
@@ -225,18 +306,33 @@ export function resetForNewRun() {
   keyStatus.set(null)
 }
 
-/** Reset plan-mode state (e.g., on scenario change). */
-export function resetPlanState() {
-  planChatMessages.set([])
-  planDoc.set('')
-  planExists.set(false)
+/** Reset scratchpad + chat-history stores (e.g., on scenario change). */
+export function resetScratchpadState() {
+  chatHistory.set([])
+  scratchpadDoc.set('')
+  scratchpadExists.set(false)
 }
 
-// Clear plan chat when the scenario changes (so hints/plan don't cross-pollute)
+// Clear chat + scratchpad when the scenario changes so per-target context
+// doesn't bleed across scenarios. CoPilotChat refetches /api/chat and
+// /api/scratchpad after the reset.
 let _lastScenario = null
 selectedScenario.subscribe(path => {
   if (path !== _lastScenario) {
     _lastScenario = path
-    planChatMessages.set([])
+    resetScratchpadState()
+  }
+})
+
+// Drive `selectedScenario` from the route. The graph view loads the
+// scenario; the list and editor views clear it so leftover graph data
+// doesn't bleed across views. The route is the single source of truth.
+currentRoute.subscribe(route => {
+  if (route.view === 'graph' && route.scenarioPath) {
+    selectedScenario.set(route.scenarioPath)
+  } else {
+    selectedScenario.set(null)
+    graphData.set(null)
+    graphStats.set(null)
   }
 })

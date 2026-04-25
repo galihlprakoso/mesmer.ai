@@ -1,13 +1,15 @@
 <script>
-  import { scenarios, selectedScenario, isRunning, runStatus, graphStats, graphData, modules, visibleStats, modulesDrawerOpen, mode } from '../lib/stores.js'
+  import { scenarios, selectedScenario, isRunning, runStatus, graphStats, graphData, modules, modulesDrawerOpen, mode } from '../lib/stores.js'
   import { resetForNewRun } from '../lib/stores.js'
+  import { navigate } from '../lib/router.js'
 
   let maxTurns = null
   let hints = ''
   let fresh = false
   let loading = false
 
-  // Fetch scenarios on mount
+  // Fetch scenarios on mount — used for the "scenario card meta" lookup
+  // (target_adapter/module label below the title) and module count.
   async function loadScenarios() {
     try {
       const res = await fetch('/api/scenarios')
@@ -26,7 +28,7 @@
     }
   }
 
-  // Load saved graph when scenario is selected
+  // Load saved graph when scenario is selected (driven by route → store).
   async function loadScenarioGraph(scenarioPath) {
     if (!scenarioPath) {
       $graphData = null
@@ -34,10 +36,7 @@
       return
     }
     try {
-      // Extract relative path from the scenario list
-      const relPath = $scenarios.find(s => s.path === scenarioPath)
-      const name = relPath ? scenarioPath : scenarioPath
-      const res = await fetch(`/api/scenarios/${encodeURIComponent(name)}`)
+      const res = await fetch(`/api/scenarios/${encodeURIComponent(scenarioPath)}`)
       if (res.ok) {
         const data = await res.json()
         if (data.graph) {
@@ -53,7 +52,6 @@
     }
   }
 
-  // React to scenario selection changes
   $: loadScenarioGraph($selectedScenario)
 
   import { onMount } from 'svelte'
@@ -61,6 +59,14 @@
     loadScenarios()
     loadModules()
   })
+
+  function backToList() {
+    navigate('list')
+  }
+
+  function editScenario() {
+    if ($selectedScenario) navigate('editor', $selectedScenario)
+  }
 
   async function startRun() {
     if (!$selectedScenario) return
@@ -115,28 +121,57 @@
 </script>
 
 <aside class="sidebar">
-  <div class="logo">
-    <h1>mesmer</h1>
-    <span class="tagline">cognitive hacking toolkit</span>
+  <div class="header">
+    <button class="back-link" type="button" on:click={backToList} title="Back to scenarios">
+      ← Scenarios
+    </button>
+    <button
+      class="logo-btn"
+      type="button"
+      on:click={backToList}
+      title="Back to scenarios"
+      aria-label="Back to scenarios"
+    >
+      <h1>mesmer</h1>
+      <span class="tagline">cognitive hacking toolkit</span>
+    </button>
   </div>
 
   <section>
-    <h3>Scenario</h3>
-    <select bind:value={$selectedScenario} disabled={$isRunning}>
-      <option value={null}>Select a scenario...</option>
-      {#each $scenarios as s}
-        <option value={s.path}>{s.name}</option>
-      {/each}
-    </select>
-
+    <div class="section-head">
+      <h3>Scenario</h3>
+      <button
+        class="edit-pencil"
+        type="button"
+        on:click={editScenario}
+        disabled={!$selectedScenario || $isRunning}
+        title="Edit scenario"
+        aria-label="Edit scenario"
+      >
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path
+            d="M11.5 1.5l3 3-9 9-3.5.5.5-3.5 9-9z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+    </div>
     {#if $selectedScenario}
       {@const info = $scenarios.find(s => s.path === $selectedScenario)}
       {#if info}
+        <div class="scenario-name">{info.name}</div>
         <div class="scenario-info">
           <span class="badge">{info.target_adapter}</span>
           <span class="module-name">{info.module}</span>
         </div>
+      {:else}
+        <div class="scenario-name">{$selectedScenario}</div>
       {/if}
+    {:else}
+      <div class="muted">No scenario loaded.</div>
     {/if}
   </section>
 
@@ -164,44 +199,11 @@
     {/if}
   </section>
 
-  {#if $visibleStats}
-    <section>
-      <h3>Graph Stats</h3>
-      <div class="stats">
-        <div class="stat">
-          <span class="stat-value">{$visibleStats.attempts}</span>
-          <span class="stat-label">attempts</span>
-        </div>
-        <div class="stat">
-          <span class="stat-value">{$visibleStats.techniques}</span>
-          <span class="stat-label">techniques</span>
-        </div>
-        <div class="stat">
-          <span class="stat-value">{$visibleStats.bestScore}</span>
-          <span class="stat-label">best score</span>
-        </div>
-        <div class="stat promising">
-          <span class="stat-value">{$visibleStats.promising}</span>
-          <span class="stat-label">promising</span>
-        </div>
-        <div class="stat dead">
-          <span class="stat-value">{$visibleStats.dead}</span>
-          <span class="stat-label">dead</span>
-        </div>
-        <div class="stat alive">
-          <span class="stat-value">{$visibleStats.alive}</span>
-          <span class="stat-label">alive</span>
-        </div>
-      </div>
-    </section>
-  {/if}
-
-  <section>
-    <h3>Reference</h3>
-    <button class="btn btn-ghost" on:click={() => $modulesDrawerOpen = true}>
-      📚 Browse modules ({$modules.length})
-    </button>
-  </section>
+  <button class="modules-link" type="button" on:click={() => $modulesDrawerOpen = true} title="Browse module library">
+    <span class="modules-icon">📚</span>
+    <span>Modules</span>
+    <span class="modules-count">{$modules.length}</span>
+  </button>
 
   <div class="status-bar">
     <span class="status-dot" class:running={$isRunning} class:idle={$runStatus === 'idle'} class:error={$runStatus === 'error'}></span>
@@ -222,37 +224,100 @@
     overflow-y: auto;
   }
 
-  .logo h1 {
-    font-size: 1.5rem;
-    font-weight: 700;
+  .header {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .back-link {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 0;
+    text-align: left;
+    align-self: flex-start;
+  }
+  .back-link:hover { color: var(--text); }
+
+  .logo-btn {
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .logo-btn h1 {
+    font-family: var(--font-pixel);
+    font-size: 1.4rem;
+    font-weight: 400;
     margin: 0;
-    color: var(--accent);
-    letter-spacing: -0.02em;
+    color: var(--phosphor);
+    letter-spacing: 0.04em;
+    text-shadow: var(--phosphor-glow);
+    text-transform: lowercase;
   }
 
   .tagline {
-    font-size: 0.7rem;
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.1em;
   }
 
   section h3 {
-    font-size: 0.75rem;
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-muted);
-    margin: 0 0 8px 0;
+    margin: 0;
+    font-weight: 400;
   }
 
-  select {
-    width: 100%;
-    padding: 8px;
-    background: var(--bg-tertiary);
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
+  .edit-pencil {
+    background: transparent;
     border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
+    color: var(--text-muted);
+    border-radius: 4px;
+    padding: 4px 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    transition: color 0.12s, border-color 0.12s;
+  }
+  .edit-pencil:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .edit-pencil:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .scenario-name {
     font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .muted {
+    font-size: 0.8rem;
+    color: var(--text-muted);
   }
 
   .scenario-info {
@@ -266,14 +331,19 @@
   .badge {
     background: var(--accent-dim);
     color: var(--accent);
+    border: 1px solid hsla(155 100% 42% / 0.4);
     padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    font-weight: 600;
+    border-radius: 3px;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
 
   .module-name {
     color: var(--text-muted);
+    font-family: var(--font-mono);
   }
 
   .controls {
@@ -301,28 +371,38 @@
     padding: 6px 8px;
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: 3px;
     color: var(--text);
+    font-family: var(--font-mono);
     width: 100%;
+  }
+  .controls input[type="number"]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: var(--phosphor-glow-tight);
   }
 
   .btn {
     width: 100%;
     padding: 10px;
     border: none;
-    border-radius: 6px;
-    font-weight: 600;
-    font-size: 0.85rem;
+    border-radius: 4px;
+    font-family: var(--font-pixel);
+    font-weight: 400;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 0.15s, box-shadow 0.15s, filter 0.15s;
   }
 
   .btn-primary {
     background: var(--accent);
     color: #000;
+    box-shadow: var(--button-glow);
   }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 
   .btn-danger {
     background: var(--red);
@@ -347,51 +427,48 @@
     50%      { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
   }
 
-  .btn-ghost {
-    background: transparent;
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    text-align: left;
-    padding: 8px 10px;
-    font-size: 0.8rem;
-  }
-  .btn-ghost:hover { background: var(--bg-tertiary); color: var(--text); }
-
-  .stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+  .modules-link {
+    display: inline-flex;
+    align-items: center;
     gap: 6px;
+    padding: 5px 10px;
+    align-self: flex-start;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: color 120ms, border-color 120ms, box-shadow 120ms;
   }
-
-  .stat {
+  .modules-link:hover {
+    color: var(--phosphor);
+    border-color: hsla(155 100% 42% / 0.5);
+    box-shadow: var(--phosphor-glow-tight);
+  }
+  .modules-icon { font-size: 0.85rem; line-height: 1; }
+  .modules-count {
+    padding: 1px 6px;
     background: var(--bg-tertiary);
-    border-radius: 6px;
-    padding: 8px;
-    text-align: center;
-  }
-
-  .stat-value {
-    display: block;
-    font-size: 1.2rem;
-    font-weight: 700;
-    color: var(--text);
-  }
-
-  .stat-label {
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-family: var(--font-mono);
     font-size: 0.65rem;
     color: var(--text-muted);
-    text-transform: uppercase;
   }
-
-  .stat.dead .stat-value { color: var(--red); }
-  .stat.promising .stat-value { color: var(--green); }
 
   .status-bar {
     margin-top: auto;
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 0.75rem;
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     color: var(--text-muted);
   }
 
@@ -403,7 +480,8 @@
   }
 
   .status-dot.running {
-    background: var(--green);
+    background: var(--phosphor);
+    box-shadow: var(--phosphor-glow-tight);
     animation: pulse 1.5s infinite;
   }
 

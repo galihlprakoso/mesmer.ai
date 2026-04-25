@@ -102,19 +102,22 @@
   }
 
   .q-badge {
-    font-size: 0.62rem;
-    font-weight: 700;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    font-weight: 400;
     letter-spacing: 0.08em;
-    color: var(--accent);
+    text-transform: uppercase;
+    color: var(--phosphor);
     background: var(--bg-primary);
+    border: 1px solid hsla(155 100% 42% / 0.4);
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: 3px;
   }
 
   .q-module {
     font-size: 0.7rem;
     color: var(--text-muted);
-    font-family: monospace;
+    font-family: var(--font-mono);
   }
 
   .q-text {

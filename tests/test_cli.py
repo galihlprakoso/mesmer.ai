@@ -1,7 +1,5 @@
 """Tests for mesmer.cli — Click commands (no LLM calls)."""
 
-import json
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest

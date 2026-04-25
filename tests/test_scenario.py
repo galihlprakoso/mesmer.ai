@@ -1,7 +1,6 @@
 """Tests for mesmer.core.scenario — YAML parsing (focused on the
 scenario-level judge.rubric_additions field) and AgentConfig ensemble."""
 
-import pytest
 
 from mesmer.core.constants import ScenarioMode
 from mesmer.core.scenario import AgentConfig, load_scenario

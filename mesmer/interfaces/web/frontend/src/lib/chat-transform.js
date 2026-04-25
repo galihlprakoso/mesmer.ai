@@ -1,47 +1,27 @@
 /**
  * Transform graph + events into a chat message stream for the Co-pilot panel.
  *
- * Chat messages are derived (not persisted in Phase 1):
- *   - human messages  ← graph frontier nodes with source === "human"
- *   - agent outcomes  ← non-root explored graph nodes (score + status + leaked_info)
- *   - agent status    ← distilled from event stream (module_start / conclude)
- *   - system          ← status events (started / completed / error / stopped)
+ * Chat is the conversation only. Per-attempt outcomes are visible as graph
+ * nodes (click to inspect via NodeDetail) — surfacing them here too just
+ * floods the conversation. System narrative (run lifecycle, module starts,
+ * llm errors, judge verdicts) lives in the Activity column.
+ *
+ * Chat messages here are:
+ *   - human hints      ← legacy graph frontier nodes (source=human) for
+ *                        targets that have them on disk; new hints go
+ *                        through /api/leader-chat instead.
+ *   - agent questions  ← ask_human events
+ *   - human answers    ← human_answer events
  *
  * Ordering: by timestamp ascending (oldest first).
  */
 
-/** Distill one chat message from an explored graph node. */
-function nodeToAgentMessage(node) {
-  const status = node.status
-  const icon = status === 'promising' ? '\u2605' : status === 'dead' ? '\u2717' : '\u00b7'
-  let text = `${icon} Ran ${node.module}`
-  if (node.approach) text += ` — ${node.approach}`
-  text += ` (scored ${node.score}/10, ${status})`
-  if (node.leaked_info) text += `\nLeaked: ${node.leaked_info}`
-  return {
-    kind: 'agent-outcome',
-    sender: 'agent',
-    timestamp: node.timestamp || 0,
-    text,
-    status,
-    score: node.score,
-    nodeId: node.id,
-  }
-}
-
-/** Build messages from graph nodes (persistent, load-on-boot). */
+/** Build messages from graph nodes (persistent, load-on-boot).
+ *  Only legacy human hints surface — explored attempt outcomes do NOT. */
 export function messagesFromGraph(graph) {
   if (!graph || !graph.nodes) return []
   const msgs = []
 
-  for (const node of Object.values(graph.nodes)) {
-    // Skip root and frontier
-    if (node.module === 'root' || node.status === 'frontier') continue
-    // Human hints are frontier so they don't land here; agent outcomes only.
-    msgs.push(nodeToAgentMessage(node))
-  }
-
-  // Human hints (still frontier, but we surface them as sent messages)
   for (const node of Object.values(graph.nodes)) {
     if (node.status === 'frontier' && node.source === 'human') {
       msgs.push({
@@ -58,40 +38,17 @@ export function messagesFromGraph(graph) {
   return msgs
 }
 
-/** Distill messages from the transient event stream (this session only). */
+/** Distill messages from the transient event stream (this session only).
+ *  Only true conversational turns land here — status, errors, lifecycle, and
+ *  module_start/conclude/judge events all go to the Activity column. */
 export function messagesFromEvents(events) {
   if (!events || events.length === 0) return []
   const msgs = []
 
   for (const evt of events) {
-    if (evt.type === 'status') {
-      msgs.push({
-        kind: 'system',
-        sender: 'system',
-        timestamp: evt.timestamp || 0,
-        text: statusText(evt),
-      })
-      continue
-    }
-
     if (evt.type !== 'event') continue
 
-    // Module-level narrative events only. Leave the noisy ones for Trace.
-    if (evt.event === 'module_start') {
-      msgs.push({
-        kind: 'agent-status',
-        sender: 'agent',
-        timestamp: evt.timestamp || 0,
-        text: `Started: ${shortDetail(evt.detail)}`,
-      })
-    } else if (evt.event === 'conclude') {
-      msgs.push({
-        kind: 'agent-status',
-        sender: 'agent',
-        timestamp: evt.timestamp || 0,
-        text: `Concluded: ${shortDetail(evt.detail)}`,
-      })
-    } else if (evt.event === 'ask_human') {
+    if (evt.event === 'ask_human') {
       msgs.push({
         kind: 'agent-status',
         sender: 'agent',
@@ -105,28 +62,10 @@ export function messagesFromEvents(events) {
         timestamp: evt.timestamp || 0,
         text: shortDetail(evt.detail),
       })
-    } else if (evt.event === 'hard_stop' || evt.event === 'circuit_break') {
-      msgs.push({
-        kind: 'system',
-        sender: 'system',
-        timestamp: evt.timestamp || 0,
-        text: shortDetail(evt.detail),
-      })
     }
   }
 
   return msgs
-}
-
-function statusText(evt) {
-  switch (evt.status) {
-    case 'running':   return `Attack running: ${evt.scenario || ''}`
-    case 'started':   return `Attack started: ${evt.scenario || ''}`  // legacy alias
-    case 'completed': return `Attack completed — ${evt.result || ''}`
-    case 'stopped':   return 'Attack stopped'
-    case 'error':     return `Error: ${evt.error || 'unknown'}`
-    default:          return evt.status || ''
-  }
 }
 
 function shortDetail(detail) {

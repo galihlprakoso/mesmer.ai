@@ -1,13 +1,12 @@
 """Tests for mesmer.core.agent.memory — TargetMemory and GlobalMemory."""
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from mesmer.core.graph import AttackGraph
-from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id, MESMER_HOME
+from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id
 from mesmer.core.scenario import TargetConfig
 from mesmer.core.agent.context import Turn
 
@@ -98,25 +97,75 @@ class TestTargetMemory:
                      if p.name.startswith("profile.md.")]
         assert leftovers == []
 
-    def test_save_and_load_plan(self, memory):
-        plan = "# Attack Plan\n\nFocus on behavioral rules. Avoid identity claims."
-        memory.save_plan(plan)
-        assert memory.load_plan() == plan
+    def test_save_and_load_scratchpad(self, memory):
+        notes = "# Working notes\n\nFocus on behavioral rules. Avoid identity claims."
+        memory.save_scratchpad(notes)
+        assert memory.load_scratchpad() == notes
 
-    def test_load_plan_no_file(self, memory):
-        assert memory.load_plan() is None
+    def test_load_scratchpad_no_file(self, memory):
+        assert memory.load_scratchpad() is None
 
-    def test_delete_plan(self, memory):
-        memory.save_plan("# temp")
-        assert memory.plan_path.exists()
-        memory.delete_plan()
-        assert not memory.plan_path.exists()
-        assert memory.load_plan() is None
+    def test_delete_scratchpad(self, memory):
+        memory.save_scratchpad("# temp")
+        assert memory.scratchpad_path.exists()
+        memory.delete_scratchpad()
+        assert not memory.scratchpad_path.exists()
+        assert memory.load_scratchpad() is None
 
-    def test_delete_plan_idempotent(self, memory):
-        # Deleting a non-existent plan should not raise
-        memory.delete_plan()
-        assert memory.load_plan() is None
+    def test_delete_scratchpad_idempotent(self, memory):
+        # Deleting a non-existent scratchpad should not raise.
+        memory.delete_scratchpad()
+        assert memory.load_scratchpad() is None
+
+    def test_legacy_plan_md_migrates_to_scratchpad_md(self, target_config, tmp_path):
+        """Old plan.md files should auto-rename to scratchpad.md on init."""
+        with patch("mesmer.core.agent.memory.MESMER_HOME", tmp_path / ".mesmer"):
+            # Plant a legacy plan.md (manually, bypassing init's migration).
+            m1 = TargetMemory(target_config)
+            m1.base_dir = tmp_path / ".mesmer" / "targets" / m1.target_hash
+            m1.base_dir.mkdir(parents=True, exist_ok=True)
+            legacy = m1.base_dir / "plan.md"
+            legacy.write_text("# legacy plan content")
+            # Rebuild — __init__ should perform the rename.
+            m2 = TargetMemory(target_config)
+            m2.base_dir = tmp_path / ".mesmer" / "targets" / m2.target_hash
+            # Re-run migration on the rebuilt instance (its __init__ ran
+            # before we adjusted base_dir).
+            m2._migrate_legacy_plan_to_scratchpad()
+            assert not legacy.exists()
+            assert m2.scratchpad_path.exists()
+            assert m2.load_scratchpad() == "# legacy plan content"
+
+    # --- Chat log -------------------------------------------------------
+
+    def test_chat_append_and_load(self, memory):
+        memory.append_chat("user", "what should we try?", 1.0)
+        memory.append_chat("assistant", "let's run target-profiler first", 2.0)
+        rows = memory.load_chat()
+        assert len(rows) == 2
+        assert rows[0]["role"] == "user"
+        assert rows[0]["content"] == "what should we try?"
+        assert rows[1]["role"] == "assistant"
+
+    def test_chat_load_no_file(self, memory):
+        assert memory.load_chat() == []
+
+    def test_chat_load_respects_limit(self, memory):
+        for i in range(30):
+            memory.append_chat("user", f"msg{i}", float(i))
+        rows = memory.load_chat(limit=5)
+        assert len(rows) == 5
+        # Oldest-first within the limit window — last 5 of 30.
+        assert [r["content"] for r in rows] == ["msg25", "msg26", "msg27", "msg28", "msg29"]
+
+    def test_chat_skips_malformed_rows(self, memory):
+        memory.append_chat("user", "good", 1.0)
+        # Inject a corrupt line.
+        with open(memory.chat_path, "a") as f:
+            f.write("{not valid json\n")
+        memory.append_chat("assistant", "still good", 2.0)
+        rows = memory.load_chat()
+        assert [r["content"] for r in rows] == ["good", "still good"]
 
     def test_save_run_log(self, memory):
         turns = [

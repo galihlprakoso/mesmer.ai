@@ -1,16 +1,14 @@
 <script>
-  import { afterUpdate, tick } from 'svelte'
+  import { afterUpdate, onMount, tick } from 'svelte'
   import {
-    mode, showTrace, chatMessages, events, selectedScenario,
-    isRunning, runStatus, pendingQuestion,
-    planChatMessages, planDoc, planExists,
+    chatMessages, selectedScenario,
+    isRunning, pendingQuestion,
+    chatHistory, scratchpadDoc, scratchpadExists,
+    scratchpadDrawerOpen,
   } from '../lib/stores.js'
-  import { send } from '../lib/ws.js'
-  import { planChat } from '../lib/plan-client.js'
+  import { fetchChat, fetchScratchpad, sendLeaderChat } from '../lib/scratchpad-client.js'
   import ChatMessage from './ChatMessage.svelte'
-  import IdeasSection from './IdeasSection.svelte'
   import HumanQuestion from './HumanQuestion.svelte'
-  import PlanEditor from './PlanEditor.svelte'
 
   let messageText = ''
   let sending = false
@@ -18,19 +16,33 @@
   let feedbackTimer
   let scrollEl
   let autoScroll = true
+  let toolTrace = []  // tool-call markers from the most recent reply
 
-  $: modeDescription = {
-    'plan':       'Draft the attack plan with the agent before running.',
-    'co-op':      'Agent pauses to ask you questions during the run.',
-    'autonomous': 'Agent runs without pausing. Your messages are added as hints.',
-  }[$mode]
+  $: inputEnabled = !!$selectedScenario
 
-  $: modeReady = true   // all three modes are wired up
-  $: inPlanMode = $mode === 'plan'
-  $: inputEnabled = modeReady && $selectedScenario
-  $: visibleMessages = inPlanMode ? $planChatMessages : $chatMessages
+  // Warm-load chat + scratchpad when the scenario changes.
+  async function loadForScenario() {
+    if (!$selectedScenario) {
+      chatHistory.set([])
+      scratchpadDoc.set('')
+      scratchpadExists.set(false)
+      return
+    }
+    try {
+      const [chat, sp] = await Promise.all([
+        fetchChat($selectedScenario, 20),
+        fetchScratchpad($selectedScenario),
+      ])
+      chatHistory.set(chat.items || [])
+      scratchpadDoc.set(sp.content || '')
+      scratchpadExists.set(!!sp.exists)
+    } catch (e) {
+      console.error('Failed to warm-load chat/scratchpad:', e)
+    }
+  }
+  $: if ($selectedScenario) { loadForScenario() }
+  onMount(loadForScenario)
 
-  // Auto-scroll to bottom when new messages arrive, unless user scrolled up
   afterUpdate(() => {
     if (autoScroll && scrollEl) {
       scrollEl.scrollTop = scrollEl.scrollHeight
@@ -53,56 +65,30 @@
     const text = messageText.trim()
     if (!text || !inputEnabled) return
     sending = true
+    toolTrace = []
+
+    // Optimistic append so the user sees their message immediately. The
+    // server appends to chat.jsonl too; on next scenario reload we
+    // dedupe via timestamp ordering.
+    const ts = Date.now() / 1000
+    chatHistory.update(h => [...h, { role: 'user', content: text, timestamp: ts }])
+    messageText = ''
+    await tick()
+    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight
 
     try {
-      if (inPlanMode) {
-        // Plan mode: chat with the planner LLM about plan.md
-        const now = Date.now() / 1000
-        const userMsg = {
-          role: 'user', content: text, timestamp: now,
-          // fields consumed by ChatMessage.svelte
-          sender: 'human', kind: 'human', text,
-        }
-        $planChatMessages = [...$planChatMessages, userMsg]
-        messageText = ''
-        await tick()
-        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight
-
-        // Strip ChatMessage-only fields before sending
-        const payload = $planChatMessages.map(m => ({ role: m.role, content: m.content }))
-        try {
-          const res = await planChat($selectedScenario, payload)
-          const reply = {
-            role: 'assistant', content: res.reply || '', timestamp: Date.now() / 1000,
-            sender: 'agent', kind: 'agent-status', text: res.reply || '',
-          }
-          $planChatMessages = [...$planChatMessages, reply]
-          if (res.updated_plan !== undefined && res.updated_plan !== null) {
-            $planDoc = res.updated_plan
-            $planExists = !!res.updated_plan.trim()
-            showFeedback('ok', 'Plan updated')
-          }
-        } catch (e) {
-          showFeedback('err', e.message)
-        }
-      } else if ($isRunning) {
-        send({ type: 'hint', text, scenario_path: $selectedScenario })
-        messageText = ''
-        showFeedback('ok', 'Injected')
-      } else {
-        const res = await fetch('/api/hint', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scenario_path: $selectedScenario, text }),
-        })
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}))
-          showFeedback('err', data.error || `HTTP ${res.status}`)
-        } else {
-          messageText = ''
-          showFeedback('ok', 'Saved')
-          await tick()
-          if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight
+      const res = await sendLeaderChat($selectedScenario, text)
+      if (res.queued) {
+        showFeedback('ok', 'Queued for the live leader')
+      } else if (res.reply) {
+        chatHistory.update(h => [...h, {
+          role: 'assistant', content: res.reply, timestamp: Date.now() / 1000,
+        }])
+        toolTrace = res.tool_trace || []
+        if (res.updated_scratchpad !== undefined && res.updated_scratchpad !== null) {
+          scratchpadDoc.set(res.updated_scratchpad)
+          scratchpadExists.set(true)
+          showFeedback('ok', 'Scratchpad updated')
         }
       }
     } catch (e) {
@@ -122,80 +108,68 @@
 
 <div class="chat-panel">
   <div class="top-bar">
-    <div class="mode-selector">
-      {#each ['plan', 'co-op', 'autonomous'] as m}
-        <button
-          class="mode-btn"
-          class:active={$mode === m}
-          on:click={() => $mode = m}
-        >{m === 'co-op' ? 'Co-op' : m.charAt(0).toUpperCase() + m.slice(1)}</button>
-      {/each}
+    <div class="title">
+      <span class="ico">💬</span>
+      <span>Talk to the leader</span>
     </div>
-
-    <div class="top-actions">
-      <button class="trace-btn" class:active={$showTrace} on:click={() => $showTrace = !$showTrace}>
-        {$showTrace ? 'Hide trace' : 'Show trace'}
-      </button>
-      <span class="status-dot" class:running={$isRunning} class:error={$runStatus === 'error'}></span>
-      <span class="status-text">{$runStatus}</span>
-    </div>
+    <button
+      class="scratchpad-btn"
+      class:has-content={$scratchpadExists}
+      on:click={() => $scratchpadDrawerOpen = true}
+      title="Open scratchpad"
+      aria-label="Open scratchpad"
+    >
+      <span class="ico">📝</span>
+      <span class="lbl">Scratchpad</span>
+    </button>
   </div>
 
-  {#if inPlanMode}
-    <PlanEditor />
-  {/if}
-
   <div class="messages" bind:this={scrollEl} on:scroll={onScroll}>
-    {#if visibleMessages.length === 0}
+    {#if $chatMessages.length === 0}
       <div class="empty">
         {#if !$selectedScenario}
           Select a scenario to begin.
-        {:else if inPlanMode}
-          Chat with the planner to draft your attack plan. Ask questions, propose angles, review prior runs.
         {:else}
-          No messages yet. Start an attack or add a hint to begin the conversation.
+          No messages yet. Ask the leader anything — it can search the graph,
+          past runs, leaked info, and rewrite the scratchpad.
         {/if}
       </div>
     {:else}
-      {#each visibleMessages as m, i (i)}
+      {#each $chatMessages as m, i (i)}
         <ChatMessage message={m} />
       {/each}
     {/if}
 
-    {#if $showTrace && $events.length > 0 && !inPlanMode}
-      <div class="trace">
-        <div class="trace-header">Trace (raw events)</div>
-        {#each $events as evt}
-          <div class="trace-row">
-            <span class="trace-event">{evt.event || evt.status}</span>
-            <span class="trace-detail">{evt.detail || evt.result || ''}</span>
-          </div>
+    {#if toolTrace.length > 0}
+      <div class="tool-trace">
+        {#each toolTrace as call}
+          <span class="trace-chip" title={call.result_preview || ''}>
+            🔍 {call.name}
+          </span>
         {/each}
       </div>
     {/if}
   </div>
 
-  {#if !inPlanMode}
-    <IdeasSection />
-
-    {#if $pendingQuestion}
-      <HumanQuestion question={$pendingQuestion} />
-    {/if}
+  {#if $pendingQuestion}
+    <HumanQuestion question={$pendingQuestion} />
   {/if}
 
   <div class="input-area" class:disabled={!inputEnabled}>
-    <div class="mode-hint">
-      <span class="hint-icon">{modeReady ? '💡' : '🚧'}</span>
-      <span>
-        {modeDescription}
-        {#if !modeReady}<em>&nbsp;— not yet wired up.</em>{/if}
-      </span>
-    </div>
+    {#if $isRunning}
+      <div class="mode-hint">
+        <span class="running-tag">RUN ACTIVE — your message is queued for the live leader</span>
+      </div>
+    {/if}
     <div class="input-row">
       <textarea
         bind:value={messageText}
         on:keydown={onKeydown}
-        placeholder={inputEnabled ? 'Type a message to the agent... (Enter to send, Shift+Enter for newline)' : (modeReady ? 'Select a scenario first' : 'Coming soon')}
+        placeholder={inputEnabled
+          ? ($isRunning
+              ? 'Send a steer to the live leader... (Enter to send)'
+              : 'Ask the leader about this target... (Enter to send)')
+          : 'Select a scenario first'}
         disabled={!inputEnabled || sending}
         rows="2"
       ></textarea>
@@ -223,79 +197,44 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-primary);
   }
 
-  .mode-selector {
-    display: flex;
-    gap: 2px;
-    background: var(--bg-tertiary);
-    border-radius: 6px;
-    padding: 2px;
+  .title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
+  .title .ico { font-size: 0.85rem; }
 
-  .mode-btn {
-    padding: 5px 12px;
-    background: transparent;
-    border: none;
+  .scratchpad-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
     color: var(--text-muted);
     font-size: 0.72rem;
     font-weight: 600;
-    border-radius: 4px;
     cursor: pointer;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    transition: background 0.15s, color 0.15s;
+    transition: color 100ms, border-color 100ms;
   }
-
-  .mode-btn:hover { color: var(--text); }
-  .mode-btn.active {
-    background: var(--accent);
-    color: #000;
-  }
-
-  .top-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .trace-btn {
-    padding: 4px 10px;
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-size: 0.68rem;
-    cursor: pointer;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .trace-btn:hover { color: var(--text); }
-  .trace-btn.active { color: var(--accent); border-color: var(--accent); }
-
-  .status-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--text-muted);
-  }
-  .status-dot.running {
-    background: var(--green);
-    animation: pulse 1.5s infinite;
-  }
-  .status-dot.error { background: var(--red); }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-
-  .status-text {
-    font-size: 0.7rem;
-    color: var(--text-muted);
-    font-family: monospace;
-  }
+  .scratchpad-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .scratchpad-btn.has-content { color: var(--text); }
+  .scratchpad-btn .ico { font-size: 0.85rem; }
 
   .messages {
     flex: 1;
@@ -314,42 +253,25 @@
     color: var(--text-muted);
     font-size: 0.85rem;
     font-style: italic;
+    text-align: center;
+    padding: 0 16px;
+    line-height: 1.55;
   }
 
-  .trace {
-    margin-top: 16px;
-    padding: 8px 12px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 0.7rem;
-  }
-
-  .trace-header {
-    font-weight: 700;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 6px;
-    font-size: 0.65rem;
-  }
-
-  .trace-row {
+  .tool-trace {
     display: flex;
-    gap: 8px;
-    line-height: 1.5;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding-top: 4px;
   }
-
-  .trace-event {
-    color: var(--blue);
-    min-width: 100px;
-    font-weight: 600;
-  }
-
-  .trace-detail {
+  .trace-chip {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
     color: var(--text-muted);
-    word-break: break-all;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    padding: 2px 6px;
+    border-radius: 3px;
   }
 
   .input-area {
@@ -367,9 +289,24 @@
     font-size: 0.68rem;
     color: var(--text-muted);
     margin-bottom: 6px;
+    flex-wrap: wrap;
   }
 
   .hint-icon { font-size: 0.8rem; }
+
+  .running-tag {
+    background: hsla(155 100% 42% / 0.12);
+    border: 1px solid hsla(155 100% 42% / 0.5);
+    color: var(--phosphor);
+    text-shadow: var(--phosphor-glow);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
 
   .input-row {
     display: flex;

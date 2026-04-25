@@ -1,8 +1,5 @@
 """Tests for mesmer.core.graph — AttackGraph and AttackNode."""
 
-import json
-import tempfile
-from pathlib import Path
 
 import pytest
 

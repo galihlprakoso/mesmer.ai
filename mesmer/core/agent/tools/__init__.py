@@ -20,7 +20,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mesmer.core.agent.tools import ask_human, conclude, send_message, sub_module
+from mesmer.core.agent.tools import (
+    ask_human,
+    conclude,
+    send_message,
+    sub_module,
+    talk_to_operator,
+    update_scratchpad,
+)
 from mesmer.core.agent.tools.base import tool_result
 from mesmer.core.constants import ContextMode, ToolName
 
@@ -37,6 +44,8 @@ if TYPE_CHECKING:
 _BUILTIN_HANDLERS = {
     ToolName.SEND_MESSAGE: send_message.handle,
     ToolName.ASK_HUMAN: ask_human.handle,
+    ToolName.UPDATE_SCRATCHPAD: update_scratchpad.handle,
+    ToolName.TALK_TO_OPERATOR: talk_to_operator.handle,
 }
 
 
@@ -54,6 +63,12 @@ def build_tool_list(module: ModuleConfig, ctx: Context) -> list[dict]:
     tools.append(conclude.SCHEMA)
     if ctx.mode == ContextMode.CO_OP and ctx.human_broker is not None:
         tools.append(ask_human.SCHEMA)
+    # Leader-only persistent-notes + operator-chat tools. Gated on depth==0
+    # because sub-module slots are auto-managed (no manual writes) and the
+    # operator counterpart is the leader, not the techniques it delegates to.
+    if ctx.depth == 0:
+        tools.append(update_scratchpad.SCHEMA)
+        tools.append(talk_to_operator.SCHEMA)
     return tools
 
 

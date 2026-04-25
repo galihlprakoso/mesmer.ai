@@ -52,8 +52,37 @@ describe('eventToRow', () => {
     expect(row.body).toBe('extracted prompt')
   })
 
-  it('skips noisy events: llm_call, reasoning, tool_calls, module_start, graph_update', () => {
-    for (const e of ['llm_call', 'reasoning', 'tool_calls', 'module_start', 'graph_update']) {
+  it('renders llm_error as a red error row (the failure mode chat used to swallow)', () => {
+    const row = eventToRow({
+      type: 'event', event: 'llm_error',
+      detail: 'Non-transient: litellm.AuthenticationError: API key not valid',
+      timestamp: 1,
+    })
+    expect(row.kind).toBe('error')
+    expect(row.title).toBe('LLM error')
+    expect(row.color).toBe('var(--red)')
+    expect(row.body).toContain('AuthenticationError')
+  })
+
+  it('renders rate_limit_wall as a red wall row', () => {
+    const row = eventToRow({ type: 'event', event: 'rate_limit_wall', detail: 'all 3 keys cooled', timestamp: 1 })
+    expect(row.kind).toBe('error')
+    expect(row.color).toBe('var(--red)')
+    expect(row.title).toContain('Rate-limit wall')
+  })
+
+  it('renders module_start as a muted start marker with module name', () => {
+    const row = eventToRow({
+      type: 'event', event: 'module_start',
+      detail: 'foot-in-door — tools: send_message, conclude',
+      timestamp: 1,
+    })
+    expect(row.kind).toBe('module-start')
+    expect(row.title).toBe('Started foot-in-door')
+  })
+
+  it('skips truly noisy events: llm_call, reasoning, tool_calls, graph_update', () => {
+    for (const e of ['llm_call', 'reasoning', 'tool_calls', 'graph_update']) {
       expect(eventToRow({ type: 'event', event: e, detail: 'x' })).toBeNull()
     }
   })
@@ -65,17 +94,17 @@ describe('eventToRow', () => {
 })
 
 describe('eventsToActivity', () => {
-  it('preserves order and filters noise', () => {
+  it('preserves order and filters only true noise (llm_call, reasoning)', () => {
     const events = [
-      { type: 'event', event: 'llm_call', timestamp: 1 },           // filtered
-      { type: 'event', event: 'module_start', detail: 'x', timestamp: 2 },  // filtered
+      { type: 'event', event: 'llm_call', timestamp: 1 },              // filtered
+      { type: 'event', event: 'module_start', detail: 'x', timestamp: 2 },
       { type: 'event', event: 'send', detail: '[x] → hi', timestamp: 3 },
       { type: 'event', event: 'recv', detail: '← hello', timestamp: 4 },
       { type: 'event', event: 'judge_score', detail: 'Score: 5/10 — ok', timestamp: 5 },
+      { type: 'event', event: 'llm_error', detail: '401 unauthorized', timestamp: 6 },
     ]
     const rows = eventsToActivity(events)
-    expect(rows).toHaveLength(3)
-    expect(rows.map(r => r.kind)).toEqual(['send', 'recv', 'judge'])
+    expect(rows.map(r => r.kind)).toEqual(['module-start', 'send', 'recv', 'judge', 'error'])
   })
 
   it('handles empty input', () => {

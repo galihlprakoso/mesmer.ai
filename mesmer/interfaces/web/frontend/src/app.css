@@ -1,24 +1,63 @@
+@font-face {
+  font-family: "Departure Mono";
+  src: url("/fonts/departure-mono.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  --bg-primary: #0a0a0f;
-  --bg-secondary: #12121a;
-  --bg-tertiary: #1a1a26;
-  --border: #2a2a3a;
-  --text: #e4e4ef;
-  --text-muted: #6b6b80;
-  --accent: #a855f7;
-  --accent-hover: #9333ea;
-  --accent-dim: #a855f71a;
+  /* Phosphor-CRT palette — mirrors docs/app/global.css */
+  --bg-primary: hsl(144 17% 5%);
+  --bg-secondary: hsl(144 12% 10%);
+  --bg-tertiary: hsl(144 14% 13%);
+  --border: hsla(140 10% 30% / 0.3);
+  --border-strong: hsla(140 10% 35% / 0.55);
+  --text: hsl(140 12% 91%);
+  --text-muted: hsl(140 7% 45%);
+
+  --accent: hsl(155 100% 42%);
+  --accent-hover: hsl(155 100% 50%);
+  --accent-dim: hsla(155 100% 42% / 0.12);
+
+  --phosphor: hsl(155 100% 42%);
+  --phosphor-faint: hsla(155 100% 42% / 0.10);
+  --phosphor-glow: 0 0 12px hsla(155 100% 42% / 0.35);
+  --phosphor-glow-tight: 0 0 8px hsla(155 100% 42% / 0.6);
+  --card-glow: 0 0 80px -20px hsla(155 100% 42% / 0.35);
+  --button-glow: 0 0 20px -8px hsl(155 100% 42%);
+  --ring: hsl(155 100% 42%);
+
+  /* Status colors — semantic, not theme. Kept stable. */
   --red: #ef4444;
   --green: #22c55e;
   --blue: #3b82f6;
   --cyan: #06b6d4;
   --amber: #f59e0b;
 
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* TAPER tier palette. T0 lifted to phosphor for theme cohesion;
+     T1/T2/T3 stay semantic per mesmer/bench/viz_template.html. */
+  --t0: hsl(155 100% 42%);
+  --t1: #f59e0b;
+  --t2: #ef4444;
+  --t3: #8b5cf6;
+  --t-baseline: #64748b;
+  --t-unknown: #6b7280;
+
+  --font-pixel: "Departure Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  /* Backwards-compat alias — components reference var(--mono) */
+  --mono: var(--font-mono);
+
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
   color: var(--text);
   background: var(--bg-primary);
   font-size: 14px;
   line-height: 1.5;
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
@@ -33,24 +72,107 @@ html, body, #app {
   overflow: hidden;
 }
 
+#app {
+  position: relative;
+  z-index: 1;
+}
+
+/* Phosphor grid — copied from docs/app/global.css. Subtle 56px grid that
+   fades from top, evokes a CRT graticule without dominating the UI. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(hsla(155, 100%, 42%, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, hsla(155, 100%, 42%, 0.06) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(ellipse at top, black 0%, transparent 70%);
+  mask-image: radial-gradient(ellipse at top, black 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--bg-primary);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
+  background: hsla(140 10% 30% / 0.4);
+  border-radius: 2px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: hsla(140 10% 30% / 0.6);
 }
 
 input, select, textarea, button {
   font-family: inherit;
+  color-scheme: dark;
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--phosphor);
+}
+
+/* ─── utilities ────────────────────────────────────────────────────── */
+
+.text-phosphor {
+  color: var(--phosphor);
+  text-shadow: var(--phosphor-glow);
+}
+
+.pixel-label {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.terminal-chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.terminal-chrome .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: hsla(140 7% 45% / 0.5);
+}
+
+.terminal-chrome .dot.live {
+  background: var(--phosphor);
+  box-shadow: var(--phosphor-glow-tight);
+  animation: phosphor-pulse 2s ease-in-out infinite;
+}
+
+.terminal-chrome .label {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+@keyframes phosphor-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+@keyframes phosphor-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
 }
