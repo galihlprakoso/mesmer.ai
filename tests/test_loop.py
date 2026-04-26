@@ -1152,6 +1152,26 @@ class TestUpdateGraphParentSelection:
         # And parent-edge preserved
         assert result.parent_id == graph.root_id
 
+    def test_artifact_only_node_is_completed_not_alive_score_three(self):
+        """Pure reasoning outputs should not masquerade as judged attacks."""
+        ctx = _make_ctx()
+
+        node = _update_graph(
+            ctx,
+            "attack-planner",
+            "make a plan",
+            None,
+            log=lambda *a, **kw: None,
+            messages_sent=[],
+            target_responses=[],
+            module_output="## Strategy\nUse the highest-signal probe first.",
+            frontier_id=None,
+        )
+
+        assert node is not None
+        assert node.status == "completed"
+        assert node.score == 0
+
 
 # ---------------------------------------------------------------------------
 # Frontier preference — nudge when leader freelances past a matching frontier

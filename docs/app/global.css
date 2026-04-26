@@ -198,20 +198,50 @@ body > * {
 
 @keyframes graph-demo-path-sweep {
   0% {
-    stroke-dasharray: 6 200;
-    stroke-dashoffset: 200;
+    stroke-dasharray: 0.08 0.92;
+    stroke-dashoffset: 1;
   }
   60% {
     stroke-dashoffset: 0;
   }
   100% {
-    stroke-dasharray: 6 200;
-    stroke-dashoffset: -50;
+    stroke-dasharray: 0.08 0.92;
+    stroke-dashoffset: -1;
   }
 }
 
 .graph-demo-winning-path {
   animation: graph-demo-path-sweep 5.5s ease-in-out infinite;
+}
+
+@keyframes graph-demo-node-ring {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.72);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
+.graph-demo-node-ring {
+  animation: graph-demo-node-ring 2.1s ease-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes graph-demo-belief-pulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 2px hsla(155, 100%, 42%, 0.45));
+  }
+  50% {
+    filter: drop-shadow(0 0 8px hsla(155, 100%, 42%, 0.75));
+  }
+}
+
+.graph-demo-belief-pulse {
+  animation: graph-demo-belief-pulse 2s ease-in-out infinite;
 }
 
 /* Mermaid clean-up — keep it visually consistent in the phosphor theme */

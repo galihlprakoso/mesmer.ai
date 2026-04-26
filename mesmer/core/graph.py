@@ -161,6 +161,10 @@ class AttackNode:
         return self.status == NodeStatus.PROMISING
 
     @property
+    def is_completed(self) -> bool:
+        return self.status == NodeStatus.COMPLETED
+
+    @property
     def is_leader_verdict(self) -> bool:
         """True iff this node is the leader's own execution node (written
         once per run by ``execute_run`` after the leader's ReAct loop).
@@ -616,6 +620,7 @@ class AttackGraph:
         """All non-frontier, non-root nodes."""
         explored_statuses = {
             NodeStatus.ALIVE,
+            NodeStatus.COMPLETED,
             NodeStatus.PROMISING,
             NodeStatus.DEAD,
         }
@@ -687,6 +692,7 @@ class AttackGraph:
             f"Attack graph: {s['total']} nodes "
             f"({s['by_status'].get(NodeStatus.DEAD.value, 0)} dead, "
             f"{s['by_status'].get(NodeStatus.PROMISING.value, 0)} promising, "
+            f"{s['by_status'].get(NodeStatus.COMPLETED.value, 0)} completed, "
             f"{s['by_status'].get(NodeStatus.FRONTIER.value, 0)} frontier) — "
             f"best score: {s['best_score']}/10"
         )
@@ -858,6 +864,8 @@ class AttackGraph:
         by_mod: dict[str, list[int]] = {}
         for n in self.iter_nodes():
             if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+                continue
+            if n.status == NodeStatus.COMPLETED.value:
                 continue
             by_mod.setdefault(n.module, []).append(n.score)
         return sorted(

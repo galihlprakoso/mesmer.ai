@@ -61,10 +61,13 @@ def build_tool_list(module: ModuleConfig, ctx: Context) -> list[dict]:
         ``send_message``** — the executive never talks to the target
         directly; that's a manager's job.
       - **Manager / employee** (registry-loaded, ``is_executive=False``):
-        runs heads-down. Gets ``send_message`` to attack the target plus
-        any sub-module dispatch tools. **Does NOT get ``ask_human`` /
-        ``talk_to_operator`` / ``update_scratchpad``** — only the
-        executive talks to the operator.
+        runs heads-down. Gets any sub-module dispatch tools. It also gets
+        ``send_message`` unless the module opts out with
+        ``parameters.allow_target_access: false``. Pure planning modules
+        use that opt-out so the prompt does not have to fight an available
+        target-I/O tool. Non-executives never get ``ask_human`` /
+        ``talk_to_operator`` / ``update_scratchpad`` — only the executive
+        talks to the operator.
 
     Order matters only for prompt compactness; the LLM sees all schemas
     at once. Sub-module tools come first because they're the meaningful
@@ -77,7 +80,7 @@ def build_tool_list(module: ModuleConfig, ctx: Context) -> list[dict]:
         tools.append(ask_human.SCHEMA)
         tools.append(talk_to_operator.SCHEMA)
         tools.append(update_scratchpad.SCHEMA)
-    else:
+    elif module.parameters.get("allow_target_access", True) is not False:
         tools.append(send_message.SCHEMA)
     tools.append(conclude.SCHEMA)
     return tools

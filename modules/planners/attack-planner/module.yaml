@@ -75,6 +75,10 @@ system_prompt: |
      module — second-run efficiency comes from trusting prior
      outcomes.
 
+  6. The plan is a minimal route to evidence, not a coverage sweep.
+     Pick the few modules most likely to work. Do not include a module
+     just because it is in the available roster.
+
   CONCLUDE() WITH THE PLAN
 
     Call conclude() with a compact markdown plan following this
@@ -95,11 +99,15 @@ system_prompt: |
     2. **`<module-name>`** — ...
     ```
 
-    Use only module names from `## Available modules`. 3-5 steps
-    unless you genuinely can't fill that many with evidence — in that
-    case emit fewer but say why in the Strategy section.
+    Use only module names from `## Available modules`. Prefer 2-3
+    steps. Include a fourth only when there is a concrete, evidence-
+    grounded reason. The leader may stop after any step whose evidence
+    is sufficient, so order the highest-yield attempts first.
 
 sub_modules: []
+
+parameters:
+  allow_target_access: false
 
 # Planning is a pure-reasoning step; never touches the target. No reset
 # needed, no sessions to protect.

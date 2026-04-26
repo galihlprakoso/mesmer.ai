@@ -175,12 +175,25 @@ async def execute_run(
     # against the same target.
     scenario_stem = Path(config.scenario_path).stem if config.scenario_path else "scenario"
     executive_name = f"{scenario_stem}:executive"
+    ordered_artifact_requirements = {}
+    if (
+        scenario.leader_prompt
+        and "exploit-analysis" in scenario.modules
+        and "exploit-executor" in scenario.modules
+    ):
+        ordered_artifact_requirements["exploit-analysis"] = ["## Findings"]
+
     entry = ModuleConfig(
         name=executive_name,
         description=f"Scenario-scoped executive for {scenario.name}.",
         theory="Coordinates manager modules and converses with the operator.",
         system_prompt=scenario.leader_prompt or _DEFAULT_EXECUTIVE_PROMPT,
         sub_modules=[SubModuleEntry(name=n) for n in scenario.modules],
+        parameters={
+            "suppress_belief_context": bool(scenario.leader_prompt),
+            "ordered_modules": list(scenario.modules) if scenario.leader_prompt else [],
+            "ordered_artifact_requirements": ordered_artifact_requirements,
+        },
         judge_rubric="",
         reset_target=False,
         tier=0,
@@ -270,11 +283,12 @@ async def execute_run(
     )
 
     # Seed the scratchpad from the graph's conversation history. Walk
-    # oldest → newest so the latest-wins semantic falls out naturally:
-    # if ``target-profiler`` ran twice, the newer dossier overwrites
-    # the older slot. Empty outputs are skipped so a module that only
-    # produced target messages (no authored conclude text) doesn't
-    # clutter the pad.
+    # oldest → newest so ordinary modules keep latest-wins semantics.
+    # Structured phase artifacts are slightly stricter: a later thin
+    # retry summary should not overwrite an earlier valid deliverable
+    # that carries the expected markers. Empty outputs are skipped so a
+    # module that only produced target messages (no authored conclude
+    # text) doesn't clutter the pad.
     #
     # This is how the scratchpad carries cross-run knowledge forward:
     # a second run against a known target starts with the latest
@@ -285,6 +299,13 @@ async def execute_run(
     for node in graph.conversation_history():
         output = (node.module_output or "").strip()
         if output:
+            markers = ordered_artifact_requirements.get(node.module) or []
+            if markers:
+                prior = ctx.scratchpad.get(node.module)
+                prior_has_artifact = all(marker in prior for marker in markers)
+                output_has_artifact = all(marker in output for marker in markers)
+                if prior_has_artifact and not output_has_artifact:
+                    continue
             ctx.scratchpad.set(node.module, output)
 
     # Persistent executive-scratchpad slot. The executive's slot is the only
@@ -293,7 +314,7 @@ async def execute_run(
     # scratchpad.md content is canonical — overwrite cleanly. Edited via
     # the executive's ``update_scratchpad`` tool and via the operator
     # through the web UI's leader-chat.
-    scratchpad_md = memory.load_scratchpad()
+    scratchpad_md = None if config.fresh else memory.load_scratchpad()
     if scratchpad_md is not None:
         ctx.scratchpad.set(executive_name, scratchpad_md)
 

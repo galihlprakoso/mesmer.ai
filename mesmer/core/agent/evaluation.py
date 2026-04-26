@@ -116,20 +116,20 @@ async def _judge_module_result(
     ``prior_transcript_summary`` so it can score this move on DELTA leaks
     (new evidence) instead of absolute visible information.
     """
+    # Look up the judged module's own rubric (if any) so the judge scores
+    # the attempt with technique-aware criteria, not just extraction floor.
+    module = ctx.registry.get(module_name) if ctx.registry else None
+    module_rubric = module.judge_rubric if module else ""
     turns = exchanges or []
+    artifact_only = not turns and bool(module_result.strip())
 
-    if not turns:
+    if not turns and not (artifact_only and module_rubric.strip()):
         log(LogEvent.JUDGE.value, f"Skipping judge — no messages exchanged in {module_name}")
         return None
 
     # Lazy import so ``patch("mesmer.core.agent.judge.evaluate_attempt", ...)``
     # in tests takes effect when we call it below.
     from mesmer.core.agent.judge import evaluate_attempt
-
-    # Look up the judged module's own rubric (if any) so the judge scores
-    # the attempt with technique-aware criteria, not just extraction floor.
-    module = ctx.registry.get(module_name) if ctx.registry else None
-    module_rubric = module.judge_rubric if module else ""
 
     # CONTINUOUS: build a compact baseline transcript of what was visible
     # BEFORE this move started. ctx.turns currently ends with ``turns``
@@ -144,6 +144,7 @@ async def _judge_module_result(
         LogEvent.JUDGE.value,
         f"Evaluating {module_name} ({len(turns)} messages"
         + (f", {err_count} pipeline errors" if err_count else "")
+        + (", artifact-only" if artifact_only else "")
         + ")...",
     )
 
@@ -242,7 +243,8 @@ def _update_graph(
     msgs = messages_sent or []
     resps = target_responses or []
 
-    score = judge_result.score if judge_result else 3
+    artifact_only = judge_result is None and bool((module_output or "").strip()) and not msgs and not resps
+    score = judge_result.score if judge_result else (0 if artifact_only else 3)
     leaked = judge_result.leaked_info if judge_result else ""
     reflection = ""
     if judge_result:
@@ -251,6 +253,7 @@ def _update_graph(
             f"Promising: {judge_result.promising_angle}. "
             f"Dead end: {judge_result.dead_end}."
         )
+    status = NodeStatus.COMPLETED.value if artifact_only else NodeStatus.ALIVE.value
 
     node = None
 
@@ -273,6 +276,8 @@ def _update_graph(
                 run_id=ctx.run_id,
                 module=module_name,
             )
+            if node and artifact_only:
+                node.status = NodeStatus.COMPLETED.value
         else:
             log(
                 LogEvent.GRAPH_UPDATE.value,
@@ -299,12 +304,14 @@ def _update_graph(
             leaked_info=leaked,
             module_output=module_output,
             reflection=reflection,
+            status=status,
             run_id=ctx.run_id,
         )
 
     status_icon = {
         NodeStatus.DEAD.value: "✗",
         NodeStatus.PROMISING.value: "★",
+        NodeStatus.COMPLETED.value: "✓",
         NodeStatus.ALIVE.value: "·",
     }.get(node.status, "·")
     log(

@@ -31,6 +31,7 @@ class NodeStatus(str, Enum):
 
     FRONTIER = "frontier"
     ALIVE = "alive"
+    COMPLETED = "completed"
     PROMISING = "promising"
     DEAD = "dead"
 

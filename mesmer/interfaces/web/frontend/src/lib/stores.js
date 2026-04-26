@@ -208,7 +208,7 @@ export const visibleStats = derived(graphData, $g => {
   // Explored = everything except frontier and root
   const explored = nodes.filter(n => n.status !== 'frontier' && n.module !== 'root')
 
-  const byStatus = { dead: 0, promising: 0, alive: 0 }
+  const byStatus = { dead: 0, promising: 0, alive: 0, completed: 0 }
   const uniqueModules = new Set()
   let bestScore = 0
   let totalFrontier = 0
@@ -228,6 +228,7 @@ export const visibleStats = derived(graphData, $g => {
     dead: byStatus.dead,
     promising: byStatus.promising,
     alive: byStatus.alive,
+    completed: byStatus.completed,
     frontier: totalFrontier,
   }
 })

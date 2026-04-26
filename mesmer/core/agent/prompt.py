@@ -175,20 +175,20 @@ def _belief_role_for(module: "ModuleConfig", ctx: "Context") -> BeliefRole:
 
     - ``module.is_executive`` (depth 0, synthesised by the runner) →
       LEADER. Always.
-    - Orchestrator modules with their own sub-modules and no active
-      experiment also get LEADER context, because they need the ranked
-      experiment queue for their own callable tools.
     - Modules dispatched with ``ctx.active_experiment_id`` → MANAGER.
     - ``ctx.depth >= 2`` → EMPLOYEE. Sub-modules of managers (techniques,
       profilers, planners).
 
-    The depth check is a structural proxy that works without having to
-    examine the call tree explicitly — anything depth ≥ 2 is operating
-    on behalf of a manager.
+    Registry-loaded managers may themselves own sub-modules, but they should
+    not receive the top-level "pick one recommended experiment" brief unless
+    the scenario executive explicitly dispatched a belief experiment to them.
+    Their authored system prompts own their local phase order (for example,
+    system-prompt-extraction's target-profiler → attack-planner → execute
+    flow). The depth check is a structural proxy that works without having to
+    examine the call tree explicitly — anything depth ≥ 2 is operating on
+    behalf of a manager.
     """
     if module.is_executive:
-        return BeliefRole.LEADER
-    if module.sub_modules and ctx.active_experiment_id is None:
         return BeliefRole.LEADER
     if ctx.depth <= 1:
         return BeliefRole.MANAGER
@@ -210,6 +210,8 @@ def _build_belief_context(ctx: "Context", module: "ModuleConfig") -> str:
     FRONTIER / DEAD ENDS / summary content.
     """
     if ctx.belief_graph is None:
+        return ""
+    if module.parameters.get("suppress_belief_context"):
         return ""
     if not list(ctx.belief_graph.iter_nodes()):  # pragma: no cover — defensive
         return ""

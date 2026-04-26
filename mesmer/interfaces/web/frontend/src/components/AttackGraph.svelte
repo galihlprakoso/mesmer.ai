@@ -19,6 +19,7 @@
   const STATUS_COLOR = {
     promising: 'var(--phosphor)',
     dead:      'var(--red)',
+    completed: 'var(--blue)',
     alive:     'var(--text-muted)',
   }
 
@@ -132,7 +133,13 @@
 
     if (!$graphData) return
 
-    const tree = buildLeaderTimeline($graphData, collapsed, scenarioMetaRef, $selectedRunId)
+    const tree = buildLeaderTimeline(
+      $graphData,
+      collapsed,
+      scenarioMetaRef,
+      $selectedRunId,
+      activeTopRef,
+    )
     if (!tree) return
 
     const root = d3.hierarchy(tree)
@@ -293,7 +300,7 @@
           || ''
       }
     }
-    scenarioMetaRef = s ? { leaderModule, objective: '' } : null
+    scenarioMetaRef = s ? { leaderModule, modules: Array.isArray(s.modules) ? s.modules : [], objective: '' } : null
   }
 
   // Full re-render when graph structure / scenario / active set / run
@@ -303,6 +310,7 @@
   $: {
     void $graphData
     void $activeModuleSet
+    void $activeModuleTop
     void scenarioMetaRef
     void $selectedRunId
     if (svgEl) render()
@@ -349,6 +357,7 @@
 
   <div class="legend">
     <span class="li"><span class="status-dot worked"></span>Worked</span>
+    <span class="li"><span class="status-dot output"></span>Output</span>
     <span class="li"><span class="status-dot dead"></span>Dead end</span>
     <span class="li"><span class="frontier-dot"></span>Up next</span>
   </div>
@@ -566,6 +575,7 @@
     display: inline-block;
   }
   .status-dot.worked { background: var(--phosphor); box-shadow: var(--phosphor-glow-tight); }
+  .status-dot.output { background: var(--blue); }
   .status-dot.dead { background: var(--red); }
   .frontier-dot {
     width: 9px; height: 9px; border-radius: 50%;

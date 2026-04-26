@@ -378,14 +378,14 @@ async def run_react_loop(
                     LogEvent.CIRCUIT_BREAK.value,
                     f"Model not using tools ({consecutive_reasoning} turns) — nudging toward action",
                 )
+                available = ", ".join(f"`{name}`" for name in tool_names) or "your available tools"
                 messages.append(
                     {
                         "role": "user",
                         "content": (
                             f"You've reasoned in text for {consecutive_reasoning} turns without "
-                            "calling a tool. To make progress, please pick one of your tools — "
-                            "send_message to interact with the target, delegate to a sub-module, "
-                            "or conclude() with your findings so far. If you genuinely can't "
+                            "calling a tool. To make progress, please pick one of your available "
+                            f"tools: {available}. If you genuinely can't "
                             "proceed (e.g. you decline the engagement), call conclude() with a "
                             "short explanation so the run can finish cleanly."
                         ),

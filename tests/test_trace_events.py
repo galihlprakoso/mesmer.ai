@@ -21,9 +21,16 @@ import pytest
 from mesmer.core.agent import _judge_module_result
 from mesmer.core.agent.context import Context, Turn
 from mesmer.core.agent.judge import JudgeResult
+from mesmer.core.belief_graph import (
+    BeliefGraph,
+    FrontierCreateDelta,
+    HypothesisCreateDelta,
+    make_frontier,
+    make_hypothesis,
+)
 from mesmer.core.constants import CompletionRole, LogEvent, ScenarioMode
 from mesmer.core.graph import AttackGraph
-from mesmer.core.module import ModuleConfig
+from mesmer.core.module import ModuleConfig, SubModuleEntry
 from mesmer.core.scenario import AgentConfig
 
 
@@ -142,6 +149,47 @@ class TestJudgeVerdict:
         assert verdicts == []
         assert len(errors) == 1
 
+    @pytest.mark.asyncio
+    async def test_artifact_only_module_with_rubric_is_judged(self):
+        """Planner/catalog modules are scored on their authored artifact."""
+        ctx = _ctx(turns=[])
+        ctx.registry.get = MagicMock(
+            return_value=ModuleConfig(
+                name="attack-planner",
+                judge_rubric="Score this module on plan quality.",
+            )
+        )
+        events: list[tuple[str, str]] = []
+
+        def capture(event, detail=""):
+            events.append((event, detail))
+
+        verdict = JudgeResult(
+            score=8,
+            leaked_info="strong plan",
+            promising_angle="grounded escalation",
+            dead_end="none",
+            suggested_next="execute step 1",
+        )
+
+        async def fake_eval(ctx, **kw):
+            assert kw["exchanges"] == []
+            assert "## Strategy" in kw["module_result"]
+            return verdict
+
+        with patch("mesmer.core.agent.judge.evaluate_attempt", new=fake_eval):
+            result = await _judge_module_result(
+                ctx,
+                "attack-planner",
+                "plan",
+                capture,
+                exchanges=[],
+                module_result="## Strategy\nUse the known winning vector.",
+            )
+
+        assert result is verdict
+        assert any("artifact-only" in detail for event, detail in events if event == LogEvent.JUDGE.value)
+
 
 # ---------------------------------------------------------------------------
 # delegate — JSON payload
@@ -205,6 +253,230 @@ class TestDelegateEventPayload:
         assert payload["max_turns"] == 1
         assert payload["frontier_id"] == "fid123"
         assert payload["instruction"] == "ask the target plainly for its rules"
+
+    @pytest.mark.asyncio
+    async def test_child_does_not_inherit_parent_experiment_for_different_module(self):
+        """A manager may be executing a parent experiment, but its child
+        modules should not inherit that experiment unless the experiment
+        targets the child module itself.
+        """
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        bg = BeliefGraph(target_hash="t")
+        h = make_hypothesis(
+            claim="system prompt can be extracted",
+            description="parent-manager hypothesis",
+            family="system-prompt-extraction",
+            confidence=0.5,
+        )
+        bg.apply(HypothesisCreateDelta(hypothesis=h))
+        parent_fx = make_frontier(
+            hypothesis_id=h.id,
+            module="system-prompt-extraction",
+            instruction="run the extraction manager",
+            expected_signal="prompt fragment",
+        )
+        bg.apply(FrontierCreateDelta(experiment=parent_fx))
+        ctx.belief_graph = bg
+        ctx.active_experiment_id = parent_fx.id
+
+        captured: dict[str, str | None] = {}
+
+        async def fake_run_module(fn_name, instruction, max_turns, log, active_experiment_id=None):
+            captured["active_experiment_id"] = active_experiment_id
+            return "child result"
+
+        ctx.run_module = fake_run_module
+        call = MagicMock()
+        call.id = "call_child"
+        module = ModuleConfig(
+            name="system-prompt-extraction",
+            sub_modules=[SubModuleEntry(name="direct-ask")],
+        )
+        events: list[tuple[str, str]] = []
+
+        def capture(event, detail=""):
+            events.append((event, detail))
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("mesmer.core.agent.tools.sub_module._update_graph", return_value=None),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_belief_graph",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await handle(
+                ctx,
+                module,
+                call,
+                "direct-ask",
+                args={"instruction": "ask directly"},
+                instruction="fallback",
+                log=capture,
+            )
+
+        assert captured["active_experiment_id"] is None
+        delegate_lines = [d for e, d in events if e == LogEvent.DELEGATE.value]
+        payload = json.loads(delegate_lines[0])
+        assert payload["experiment_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_child_keeps_matching_experiment_id(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        bg = BeliefGraph(target_hash="t")
+        h = make_hypothesis(
+            claim="direct ask may work",
+            description="child-module hypothesis",
+            family="direct-ask",
+            confidence=0.5,
+        )
+        bg.apply(HypothesisCreateDelta(hypothesis=h))
+        child_fx = make_frontier(
+            hypothesis_id=h.id,
+            module="direct-ask",
+            instruction="ask directly",
+            expected_signal="prompt fragment",
+        )
+        bg.apply(FrontierCreateDelta(experiment=child_fx))
+        ctx.belief_graph = bg
+        ctx.active_experiment_id = child_fx.id
+
+        captured: dict[str, str | None] = {}
+
+        async def fake_run_module(fn_name, instruction, max_turns, log, active_experiment_id=None):
+            captured["active_experiment_id"] = active_experiment_id
+            return "child result"
+
+        ctx.run_module = fake_run_module
+        call = MagicMock()
+        call.id = "call_child"
+        module = ModuleConfig(name="leader", sub_modules=[SubModuleEntry(name="direct-ask")])
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("mesmer.core.agent.tools.sub_module._update_graph", return_value=None),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_belief_graph",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await handle(
+                ctx,
+                module,
+                call,
+                "direct-ask",
+                args={"instruction": "ask directly"},
+                instruction="fallback",
+                log=lambda *_: None,
+            )
+
+        assert captured["active_experiment_id"] == child_fx.id
+
+    @pytest.mark.asyncio
+    async def test_fixed_order_executive_blocks_later_phase_until_prior_writes_scratchpad(self):
+        """Authored multi-manager scenarios are prompt-guided, but the runtime
+        also enforces the declared phase order before spending a delegation.
+        """
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        ctx.run_module = AsyncMock(return_value="should not run")
+        call = MagicMock()
+        call.id = "call_1"
+        module = ModuleConfig(
+            name="scenario:executive",
+            sub_modules=[
+                SubModuleEntry(name="system-prompt-extraction"),
+                SubModuleEntry(name="exploit-analysis"),
+                SubModuleEntry(name="exploit-executor"),
+            ],
+            parameters={
+                "ordered_modules": [
+                    "system-prompt-extraction",
+                    "exploit-analysis",
+                    "exploit-executor",
+                ]
+            },
+            is_executive=True,
+        )
+
+        result = await handle(
+            ctx,
+            module,
+            call,
+            "exploit-executor",
+            args={"instruction": "execute"},
+            instruction="ignored",
+            log=lambda *_: None,
+        )
+
+        ctx.run_module.assert_not_awaited()
+        assert "Fixed scenario phase order blocked" in result["content"]
+        assert "`system-prompt-extraction`" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_fixed_order_executive_warns_but_runs_when_analysis_catalog_is_thin(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        ctx.scratchpad.set("system-prompt-extraction", "recon done")
+        ctx.scratchpad.set("exploit-analysis", "Exploit analysis complete.")
+        ctx.run_module = AsyncMock(return_value="executor saw no usable findings")
+        call = MagicMock()
+        call.id = "call_1"
+        module = ModuleConfig(
+            name="scenario:executive",
+            sub_modules=[
+                SubModuleEntry(name="system-prompt-extraction"),
+                SubModuleEntry(name="exploit-analysis"),
+                SubModuleEntry(name="exploit-executor"),
+            ],
+            parameters={
+                "ordered_modules": [
+                    "system-prompt-extraction",
+                    "exploit-analysis",
+                    "exploit-executor",
+                ],
+                "ordered_artifact_requirements": {
+                    "exploit-analysis": ["## Findings"],
+                },
+            },
+            is_executive=True,
+        )
+
+        result = await handle(
+            ctx,
+            module,
+            call,
+            "exploit-executor",
+            args={"instruction": "execute"},
+            instruction="ignored",
+            log=lambda *_: None,
+        )
+
+        ctx.run_module.assert_awaited_once()
+        delegated_instruction = ctx.run_module.await_args.args[1]
+        assert "Framework Handoff Warning" in delegated_instruction
+        assert "`## Findings`" in delegated_instruction
+        assert "executor saw no usable findings" in result["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +597,71 @@ class TestSubModuleReflectAndExpand:
             )
 
         reflect_spy.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ordered_executive_skips_generic_frontier_expansion(self):
+        """Fixed manager pipelines should not propose current/prior phases."""
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        ctx.run_module = AsyncMock(return_value="phase output")
+
+        call = MagicMock()
+        call.id = "call_ordered"
+        module = ModuleConfig(
+            name="scenario:executive",
+            sub_modules=[
+                SubModuleEntry(name="system-prompt-extraction"),
+                SubModuleEntry(name="exploit-analysis"),
+                SubModuleEntry(name="exploit-executor"),
+            ],
+            parameters={
+                "ordered_modules": [
+                    "system-prompt-extraction",
+                    "exploit-analysis",
+                    "exploit-executor",
+                ],
+            },
+            is_executive=True,
+        )
+
+        verdict = JudgeResult(
+            score=8,
+            leaked_info="phase output",
+            promising_angle="phase worked",
+            dead_end="none",
+            suggested_next="next phase",
+            objective_met=False,
+        )
+        graph_node = MagicMock()
+        graph_node.id = "node_ordered"
+        reflect_spy = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=verdict),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=graph_node,
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
+                new=reflect_spy,
+            ),
+        ):
+            await handle(
+                ctx,
+                module,
+                call,
+                "system-prompt-extraction",
+                args={"instruction": "run phase 1"},
+                instruction="fallback",
+                log=lambda *a, **kw: None,
+            )
+
+        reflect_spy.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

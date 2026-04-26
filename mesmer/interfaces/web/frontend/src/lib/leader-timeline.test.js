@@ -67,6 +67,184 @@ describe('buildLeaderTimeline', () => {
     expect(tree.children.map(c => c.module)).toEqual(['foo', 'bar'])
   })
 
+  it('nests known manager sub-module attempts under the manager attempt', () => {
+    const g = makeGraph('root',
+      makeNode('root'),
+      makeNode('profiler', {
+        parent_id: 'root',
+        module: 'target-profiler',
+        timestamp: 100,
+      }),
+      makeNode('planner', {
+        parent_id: 'root',
+        module: 'attack-planner',
+        timestamp: 110,
+      }),
+      makeNode('manager', {
+        parent_id: 'root',
+        module: 'system-prompt-extraction',
+        timestamp: 120,
+      }),
+      makeNode('analysis', {
+        parent_id: 'root',
+        module: 'exploit-analysis',
+        timestamp: 200,
+      }),
+    )
+
+    const tree = buildLeaderTimeline(g)
+
+    expect(tree.children.map(c => c.module)).toEqual([
+      'system-prompt-extraction',
+      'exploit-analysis',
+    ])
+    expect(tree.children[0].children.map(c => c.module)).toEqual([
+      'target-profiler',
+      'attack-planner',
+    ])
+  })
+
+  it('synthesizes a missing fixed-order manager while its child attempts are live', () => {
+    const g = makeGraph('root',
+      makeNode('root'),
+      makeNode('recital', {
+        parent_id: 'root',
+        module: 'instruction-recital',
+        timestamp: 100,
+      }),
+      makeNode('planner', {
+        parent_id: 'root',
+        module: 'attack-planner',
+        timestamp: 110,
+      }),
+    )
+
+    const tree = buildLeaderTimeline(
+      g,
+      new Set(),
+      {
+        leaderModule: 'full-redteam-with-execution:executive',
+        modules: ['system-prompt-extraction', 'exploit-analysis', 'exploit-executor'],
+      },
+      null,
+      'system-prompt-extraction',
+    )
+
+    expect(tree.children).toHaveLength(1)
+    expect(tree.children[0].id).toBe('__manager__system-prompt-extraction')
+    expect(tree.children[0].module).toBe('system-prompt-extraction')
+    expect(tree.children[0]._isSyntheticManager).toBe(true)
+    expect(tree.children[0].children.map(c => c.module)).toEqual([
+      'instruction-recital',
+      'attack-planner',
+    ])
+  })
+
+  it('does not synthesize missing managers when no manager is active', () => {
+    const g = makeGraph('root',
+      makeNode('root'),
+      makeNode('recital', {
+        parent_id: 'root',
+        module: 'instruction-recital',
+        timestamp: 100,
+      }),
+      makeNode('planner', {
+        parent_id: 'root',
+        module: 'attack-planner',
+        timestamp: 110,
+      }),
+    )
+
+    const tree = buildLeaderTimeline(
+      g,
+      new Set(),
+      {
+        leaderModule: 'full-redteam-with-execution:executive',
+        modules: ['system-prompt-extraction', 'exploit-analysis', 'exploit-executor'],
+      },
+    )
+
+    expect(tree.children.map(c => c.module)).toEqual([
+      'instruction-recital',
+      'attack-planner',
+    ])
+    expect(tree.children.every(c => c.children.length === 0)).toBe(true)
+  })
+
+  it('post-run does not show a ghost synthetic executor manager', () => {
+    const g = makeGraph('root',
+      makeNode('root'),
+      makeNode('analysis', {
+        parent_id: 'root',
+        module: 'exploit-analysis',
+        timestamp: 100,
+      }),
+      makeNode('probe', {
+        parent_id: 'root',
+        module: 'foot-in-door',
+        timestamp: 90,
+      }),
+      makeNode('verdict', {
+        parent_id: 'analysis',
+        source: 'leader',
+        status: 'dead',
+        module: 'full-redteam-with-execution:executive',
+        timestamp: 120,
+      }),
+    )
+
+    const tree = buildLeaderTimeline(
+      g,
+      new Set(),
+      {
+        leaderModule: 'full-redteam-with-execution:executive',
+        modules: ['system-prompt-extraction', 'exploit-analysis', 'exploit-executor'],
+      },
+    )
+
+    expect(tree.children.map(c => c.id)).not.toContain('__manager__exploit-executor')
+    expect(tree.children.map(c => c.module)).toEqual(['exploit-analysis'])
+  })
+
+  it('hides ordered-manager frontier proposals under ordered-manager attempts', () => {
+    const g = makeGraph('root',
+      makeNode('root'),
+      makeNode('spe', {
+        parent_id: 'root',
+        module: 'system-prompt-extraction',
+        timestamp: 100,
+        children: ['self-frontier', 'next-frontier', 'tech-frontier'],
+      }),
+      makeNode('self-frontier', {
+        parent_id: 'spe',
+        module: 'system-prompt-extraction',
+        status: 'frontier',
+      }),
+      makeNode('next-frontier', {
+        parent_id: 'spe',
+        module: 'exploit-analysis',
+        status: 'frontier',
+      }),
+      makeNode('tech-frontier', {
+        parent_id: 'spe',
+        module: 'direct-ask',
+        status: 'frontier',
+      }),
+    )
+
+    const tree = buildLeaderTimeline(
+      g,
+      new Set(),
+      {
+        leaderModule: 'full-redteam-with-execution:executive',
+        modules: ['system-prompt-extraction', 'exploit-analysis', 'exploit-executor'],
+      },
+    )
+
+    const manager = tree.children[0]
+    expect(manager.children.map(c => c.id)).toEqual(['tech-frontier'])
+  })
+
   it('orders children by timestamp and stamps _seqNum 1-based', () => {
     const g = makeGraph('root',
       makeNode('root'),

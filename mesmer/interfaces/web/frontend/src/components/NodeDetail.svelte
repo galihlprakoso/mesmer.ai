@@ -28,6 +28,10 @@
     return node?.status === 'frontier'
   }
 
+  function isSyntheticManager(node) {
+    return !!node?._isSyntheticManager
+  }
+
   async function fetchModuleConfig(name) {
     if (!name || name === 'leader' || name === 'root' || name === 'synthetic') return null
     // Synthesized executive (named `<scenario-stem>:executive`) is built
@@ -92,15 +96,37 @@
   function outcomeTitle(n) {
     if (!n) return ''
     if (isFrontier(n)) return truncate(n.approach, 120) || 'Proposed move'
+    if (isSyntheticManager(n)) return 'Manager is running'
     const heading = firstLine(n.module_output || '')
     if (heading) return truncate(heading, 120)
     if (n.leaked_info) return truncate(n.leaked_info, 120)
     return truncate(n.approach, 120) || 'Attempt recorded'
   }
 
+  function isArtifactOutput(n) {
+    if (!n || isFrontier(n) || n._isLeaderOrchestrator) return false
+    if (n.status === 'completed') return true
+    const hasOutput = !!(n.module_output || '').trim()
+    const hasMessages = (n.messages_sent?.length ?? 0) || (n.target_responses?.length ?? 0)
+    return hasOutput && !hasMessages && !n.leaked_info && !n.reflection
+  }
+
+  function displayStatus(n) {
+    if (!n?.status) return ''
+    if (isSyntheticManager(n)) return 'running'
+    if (isArtifactOutput(n)) return 'output'
+    return n.status
+  }
+
   function scoreLabel(n) {
-    if (!n || isFrontier(n) || n._isLeaderOrchestrator) return ''
+    if (!n || isFrontier(n) || n._isLeaderOrchestrator || isSyntheticManager(n)) return ''
+    if (isArtifactOutput(n)) return ''
     return Number.isFinite(n.score) ? `Score ${n.score}/10` : ''
+  }
+
+  function outputLabel(n) {
+    if (n?.module === 'attack-planner') return 'Plan'
+    return 'Output'
   }
 </script>
 
@@ -137,7 +163,7 @@
 
       {#if !node._isLeaderOrchestrator && node.status}
         <div class="status-row">
-          <span class="status-badge {node.status}">{node.status}</span>
+          <span class="status-badge {displayStatus(node)}">{displayStatus(node)}</span>
           {#if scoreLabel(node)}
             <span class="score-pill">{scoreLabel(node)}</span>
           {/if}
@@ -172,7 +198,7 @@
       {:else}
         {#if node.module_output}
           <details class="detail-section" open>
-            <summary>Report</summary>
+            <summary>{outputLabel(node)}</summary>
             <!-- module_output is the manager's / sub-module's concluded
                  write-up. Render structured markdown, but keep raw HTML
                  disabled because this content is LLM-generated. -->
@@ -359,6 +385,17 @@
     background: rgba(168, 162, 158, 0.10);
     border-color: var(--text-muted);
     color: var(--text);
+  }
+  .status-badge.completed,
+  .status-badge.output {
+    background: rgba(59, 130, 246, 0.12);
+    border-color: var(--blue);
+    color: var(--blue);
+  }
+  .status-badge.running {
+    background: hsla(155 100% 42% / 0.12);
+    border-color: var(--phosphor);
+    color: var(--phosphor);
   }
   .status-badge.frontier {
     background: transparent;

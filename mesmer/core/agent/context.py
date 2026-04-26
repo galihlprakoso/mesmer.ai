@@ -51,6 +51,9 @@ if TYPE_CHECKING:
     from mesmer.targets.base import Target
 
 
+_ACTIVE_EXPERIMENT_UNSET = object()
+
+
 @dataclass
 class RunTelemetry:
     """Lightweight per-run accumulator for tokens and wall-clock.
@@ -554,7 +557,7 @@ class Context:
         instruction: str,
         max_turns: int | None = None,
         log=None,
-        active_experiment_id: str | None = None,
+        active_experiment_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
     ) -> str:
         """Delegate to a sub-module with a scoped turn budget.
 
@@ -603,10 +606,16 @@ class Context:
                     if log is not None:
                         log(LogEvent.TARGET_RESET_ERROR.value, f"reset failed for '{name}': {e}")
 
+        child_active_experiment_id = (
+            self.active_experiment_id
+            if active_experiment_id is _ACTIVE_EXPERIMENT_UNSET
+            else active_experiment_id
+        )
+
         child = self.child(
             max_turns=max_turns,
             target_fresh_session=fresh_session,
-            active_experiment_id=active_experiment_id or self.active_experiment_id,
+            active_experiment_id=child_active_experiment_id,
         )
         result = await run_react_loop(module, child, instruction, log=log)
 
@@ -637,7 +646,7 @@ class Context:
         max_turns: int | None = None,
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
-        active_experiment_id: str | None = None,
+        active_experiment_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
     ) -> Context:
         """Create a child context — shares target + turns + graph, own budget.
 
@@ -650,6 +659,12 @@ class Context:
         model for tests / specialised callers. Empty string uses the standard
         depth-based routing.
         """
+        child_active_experiment_id = (
+            self.active_experiment_id
+            if active_experiment_id is _ACTIVE_EXPERIMENT_UNSET
+            else active_experiment_id
+        )
+
         child = Context(
             target=self.target,
             registry=self.registry,
@@ -672,7 +687,7 @@ class Context:
             judge_rubric_additions=self.judge_rubric_additions,  # shared
             target_fresh_session=target_fresh_session,
             attacker_model_override=attacker_model_override or self.attacker_model_override,
-            active_experiment_id=active_experiment_id or self.active_experiment_id,
+            active_experiment_id=child_active_experiment_id,
             depth=self.depth + 1,  # deeper in the module tree
             scenario_mode=self.scenario_mode,  # inherit CONTINUOUS/TRIALS
             _turns=self.turns,  # same list reference

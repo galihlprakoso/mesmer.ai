@@ -163,3 +163,15 @@ class TestBuildToolListGating:
         assert ToolName.ASK_HUMAN.value not in names
         assert ToolName.TALK_TO_OPERATOR.value not in names
         assert ToolName.UPDATE_SCRATCHPAD.value not in names
+
+    def test_pure_reasoning_module_can_opt_out_of_send_message(self):
+        module = ModuleConfig(
+            name="attack-planner",
+            parameters={"allow_target_access": False},
+            is_executive=False,
+        )
+        names = {
+            t["function"]["name"]
+            for t in build_tool_list(module, self._ctx())
+        }
+        assert names == {ToolName.CONCLUDE.value}
