@@ -42,8 +42,30 @@ export const moduleTiers = derived(modules, $mods =>
 /** Selected scenario path */
 export const selectedScenario = writable(null)
 
+/** Target hash for the selected scenario, derived by joining the scenario
+ * path against the `scenarios` list (which carries `target_hash` for each
+ * scenario via the backend). Returns `null` when no scenario is selected
+ * or when the list hasn't been hydrated yet. Consumers (the BeliefMap
+ * view in particular) treat `null` as "no target available".
+ */
+export const selectedTargetHash = derived(
+  [scenarios, selectedScenario],
+  ([$scenarios, $sel]) => {
+    if (!$sel || !Array.isArray($scenarios)) return null
+    const match = $scenarios.find(s => s.path === $sel)
+    return match?.target_hash ?? null
+  },
+)
+
 /** Selected graph node (for detail panel) */
 export const selectedNode = writable(null)
+
+/**
+ * Selected belief-graph node — distinct from `selectedNode` because
+ * belief-graph nodes carry a different schema (kind / claim / utility /
+ * polarity / etc.) than the legacy `AttackNode`. Drives BeliefNodeDetail.
+ */
+export const selectedBeliefNode = writable(null)
 
 /** Bottom-panel display preference: 'autonomous' | 'co-op'.
  *  Frontend-only UI toggle. The backend executive ALWAYS has a chat

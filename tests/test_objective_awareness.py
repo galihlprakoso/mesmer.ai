@@ -239,7 +239,7 @@ async def test_conclude_with_objective_met_sets_ctx():
     )
     ctx.completion = fake_completion_conclude
 
-    result = await run_react_loop(module, ctx, instruction="probe")
+    await run_react_loop(module, ctx, instruction="probe")
 
     assert ctx.objective_met is True
     # objective_met_fragment is the full result text when objective_met=true

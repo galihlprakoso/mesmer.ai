@@ -44,6 +44,7 @@ FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 # Request / response models
 # ---------------------------------------------------------------------------
 
+
 class RunRequest(BaseModel):
     scenario_path: str
     model: str | None = None
@@ -176,7 +177,7 @@ target:
   base_url: "https://..."                      # for openai-compat
   model: "gpt-4o-mini"                         # for openai-compat
   url: "https://..."                           # for rest/ws adapters
-  api_key: "${{ENV_VAR_NAME}}"                  # comma-separated env = round-robin
+  api_key: "${{ENV_VAR_NAME}}"
   system_prompt: ""                            # optional, injected target-side
 objective:
   goal: "What the attacker is trying to achieve"
@@ -184,9 +185,10 @@ objective:
   max_turns: 25                                # per-module turn budget
 module: <leader module name>                   # required, see list below
 agent:
-  model: "openrouter/anthropic/claude-sonnet-4-20250514"
+  model: "anthropic/claude-opus-4-7"
+  sub_module_model: "anthropic/claude-haiku-4-5"
   judge_model: ""                              # falls back to model if empty
-  api_key: "${{OPENROUTER_API_KEY}}"
+  api_key: "${{ANTHROPIC_API_KEY}}"
   temperature: 0.7
 mode: trials                                   # trials | continuous
 ```
@@ -221,6 +223,7 @@ outside it, no backticks. Schema:
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
+
 
 def create_app(scenario_dir: str = ".") -> FastAPI:
     """Create the FastAPI app with all routes."""
@@ -282,9 +285,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 # render a tier badge. Multi-manager scenarios just preview
                 # the first; the executive itself has no meaningful tier.
                 first_mod = s.modules[0] if s.modules else None
-                item["module_tier"] = (
-                    registry.tier_of(first_mod) if first_mod else None
-                )
+                item["module_tier"] = registry.tier_of(first_mod) if first_mod else None
             except Exception:
                 # _list_scenarios already filters obviously broken files,
                 # but if env-var resolution fails (missing API key) we
@@ -407,7 +408,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     async def scenario_editor_chat(req: EditorChatRequest):
         """Vibe-code chat: user message + current YAML → reply + edited YAML.
 
-        Single completion (no tool-calling). Reads ``OPENROUTER_API_KEY``
+        Single completion (no tool-calling). Reads ``ANTHROPIC_API_KEY``
         from env by default — the LLM that powers this is decoupled from
         any individual scenario's agent config so the editor works even
         for blank/new scenarios.
@@ -434,20 +435,19 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 messages.append({"role": h.role, "content": h.content})
         messages.append({"role": "user", "content": user_payload})
 
-        model = os.environ.get("MESMER_EDITOR_MODEL", "openrouter/anthropic/claude-sonnet-4-20250514")
+        model = os.environ.get("MESMER_EDITOR_MODEL", "anthropic/claude-opus-4-7")
         kwargs: dict = {
             "model": model,
             "messages": messages,
             "temperature": 0.3,
         }
         api_key = (
-            os.environ.get("OPENROUTER_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("OPENROUTER_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
         )
         if api_key:
-            # If the env carries comma-separated keys, take the first.
-            kwargs["api_key"] = api_key.split(",")[0].strip()
+            kwargs["api_key"] = api_key.strip()
 
         try:
             response = await litellm.acompletion(**kwargs)
@@ -481,6 +481,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     async def get_module(name: str):
         from mesmer.core.registry import Registry
         from mesmer.core.runner import BUILTIN_MODULES
+
         registry = Registry()
         registry.auto_discover(BUILTIN_MODULES)
         mod = registry.get(name)
@@ -513,6 +514,57 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 "stats": g.stats(),
             }
         except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.get("/api/targets/{target_hash}/belief-graph")
+    async def get_target_belief_graph(target_hash: str):
+        """Return the typed Belief Attack Graph snapshot for a target.
+
+        Same shape contract as ``get_target_graph`` (a wrapping object
+        with ``graph`` + ``stats`` keys) so the frontend can pick the
+        same handler shape for both views. During a live run the graph
+        is served from ``current_ctx`` first because the runner only
+        persists ``belief_graph.json`` at run completion. Returns 404
+        when neither live state nor persisted state exists yet.
+        """
+        from mesmer.core.belief_graph import BeliefGraph
+        from mesmer.core.agent.graph_compiler import GraphContextCompiler
+        from mesmer.core.constants import BeliefRole
+
+        def _payload(bg: BeliefGraph):
+            return {
+                "graph": json.loads(bg.to_json()),
+                "stats": bg.stats(),
+                "prompt_context": GraphContextCompiler(bg).compile(
+                    role=BeliefRole.LEADER,
+                    token_budget=1200,
+                ),
+            }
+
+        live_graph = current_ctx.belief_graph if current_ctx is not None else None
+        live_hash = (
+            current_ctx.target_memory.target_hash
+            if current_ctx is not None and current_ctx.target_memory is not None
+            else (live_graph.target_hash if live_graph is not None else None)
+        )
+        if live_graph is not None and live_hash == target_hash:
+            try:
+                return _payload(live_graph)
+            except Exception as e:  # noqa: BLE001 — surface load errors to UI
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        target_dir = Path.home() / ".mesmer" / "targets" / target_hash
+        snapshot_path = target_dir / "belief_graph.json"
+        deltas_path = target_dir / "belief_deltas.jsonl"
+        if not snapshot_path.exists() and not deltas_path.exists():
+            return JSONResponse({"error": "Belief graph not found"}, status_code=404)
+        try:
+            if snapshot_path.exists():
+                bg = BeliefGraph.from_json(snapshot_path.read_text())
+            else:
+                bg = BeliefGraph.replay(deltas_path, target_hash=target_hash)
+            return _payload(bg)
+        except Exception as e:  # noqa: BLE001 — surface load errors to UI
             return JSONResponse({"error": str(e)}, status_code=400)
 
     # ----- API: Stats -----
@@ -587,12 +639,14 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                     on_ctx_ready=_on_ctx_ready,
                 )
                 bus.set_graph(result.graph)
-                run_state.update({
-                    "status": "completed",
-                    "result": result.result,
-                    "run_id": result.run_id,
-                    "graph_stats": result.graph.stats(),
-                })
+                run_state.update(
+                    {
+                        "status": "completed",
+                        "result": result.result,
+                        "run_id": result.run_id,
+                        "graph_stats": result.graph.stats(),
+                    }
+                )
                 bus.emit_status(
                     "completed",
                     result=result.result,
@@ -707,9 +761,13 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         ):
             ts = time.time()
             memory.append_chat("user", message, ts)
-            current_ctx.operator_messages.append({
-                "role": "user", "content": message, "timestamp": ts,
-            })
+            current_ctx.operator_messages.append(
+                {
+                    "role": "user",
+                    "content": message,
+                    "timestamp": ts,
+                }
+            )
             bus.log_fn(LogEvent.OPERATOR_MESSAGE.value, message)
             return {"queued": True, "reply": None, "tool_trace": [], "updated_scratchpad": None}
 
@@ -721,7 +779,9 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
 
         try:
             result = await run_leader_chat(
-                scenario, memory, message,
+                scenario,
+                memory,
+                message,
                 on_tool_call=_broadcast_tool_call,
             )
         except Exception as e:
@@ -750,6 +810,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         agent_config = scenario.agent
 
         import litellm
+
         litellm.suppress_debug_info = True
 
         prompt = f"""You are debriefing a human operator after an AI red-teaming run.
@@ -785,11 +846,14 @@ Return as JSON array of strings."""
                 questions = [line.strip() for line in content.split("\n") if line.strip()]
             return {"questions": questions}
         except Exception as e:
-            return {"questions": [
-                "What patterns did you notice in the target's responses?",
-                "Any specific target behavior that seemed exploitable?",
-                "What should we try differently next run?",
-            ], "error": str(e)}
+            return {
+                "questions": [
+                    "What patterns did you notice in the target's responses?",
+                    "Any specific target behavior that seemed exploitable?",
+                    "What should we try differently next run?",
+                ],
+                "error": str(e),
+            }
 
     # ----- WebSocket -----
 

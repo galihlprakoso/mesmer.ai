@@ -9,7 +9,7 @@
 #
 # Prerequisites:
 #   1. Start dvllm: `cd .ideation/nodes/cognitive-hacking-toolkit/dvllm && uv run dvllm serve`
-#   2. Set OPENROUTER_API_KEY.
+#   2. Set ANTHROPIC_API_KEY.
 #
 # Usage:
 #   uv run mesmer run scenarios/extract-dvllm-support-tools.yaml --verbose
@@ -46,6 +46,7 @@ modules:
   - tool-extraction
 
 agent:
-  model: openrouter/anthropic/claude-sonnet-4-20250514
-  api_key: "${OPENROUTER_API_KEY}"
+  model: anthropic/claude-opus-4-7
+  sub_module_model: anthropic/claude-haiku-4-5
+  api_key: "${ANTHROPIC_API_KEY}"
   temperature: 0.7

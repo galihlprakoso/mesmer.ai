@@ -41,8 +41,10 @@ def is_target_error(reply: str) -> bool:
     lowered = s.lower()
     return any(marker in lowered for marker in TARGET_ERROR_MARKERS)
 
+
 if TYPE_CHECKING:
     from mesmer.core.agent.memory import TargetMemory
+    from mesmer.core.belief_graph import BeliefGraph
     from mesmer.core.graph import AttackGraph
     from mesmer.core.registry import Registry
     from mesmer.core.scenario import AgentConfig
@@ -133,14 +135,16 @@ class HumanQuestionBroker:
         loop = asyncio.get_event_loop()
         self._pending[qid] = loop.create_future()
         if self.on_question:
-            self.on_question({
-                "question_id": qid,
-                "question": question,
-                "options": options or [],
-                "context": context,
-                "module": module,
-                "timestamp": time.time(),
-            })
+            self.on_question(
+                {
+                    "question_id": qid,
+                    "question": question,
+                    "options": options or [],
+                    "context": context,
+                    "module": module,
+                    "timestamp": time.time(),
+                }
+            )
         return qid
 
     async def wait_for_answer(self, question_id: str, timeout: float = 300.0) -> str:
@@ -255,6 +259,7 @@ class Context:
         success_signals: list[str] | None = None,
         max_turns: int | None = None,
         graph: AttackGraph | None = None,
+        belief_graph: "BeliefGraph | None" = None,
         run_id: str = "",
         human_broker: HumanQuestionBroker | None = None,
         target_memory: "TargetMemory | None" = None,
@@ -262,11 +267,13 @@ class Context:
         judge_rubric_additions: str = "",
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
+        active_experiment_id: str | None = None,
         depth: int = 0,
         scenario_mode: ScenarioMode = ScenarioMode.TRIALS,
         # Internal — set by child()
         _turns: list[Turn] | None = None,
         _module_log: list[ModuleRun] | None = None,
+        _belief_evidence_turn_indexes: set[int] | None = None,
         _target_reset_at: int = 0,
     ):
         self.target = target
@@ -301,9 +308,25 @@ class Context:
         # Attack graph — shared across parent/child
         self.graph: AttackGraph | None = graph
 
+        # Belief Attack Graph — typed planner state introduced in Session 1.
+        # Shared across parent/child like ``self.graph``. ``None`` for
+        # legacy callers that haven't been updated to construct one;
+        # the engine treats ``ctx.belief_graph is None`` as "skip belief
+        # updates" so existing tests don't break.
+        self.belief_graph: "BeliefGraph | None" = belief_graph
+        # The belief-graph FrontierExperiment this context is executing.
+        # Set when a parent dispatches a tool with `experiment_id`; inherited
+        # by deeper children so employee modules get the same narrow brief.
+        self.active_experiment_id = active_experiment_id
+
         # Shared across parent/child — same list reference
         self.turns: list[Turn] = _turns if _turns is not None else []
         self.module_log: list[ModuleRun] = _module_log if _module_log is not None else []
+        self._belief_evidence_turn_indexes: set[int] = (
+            _belief_evidence_turn_indexes
+            if _belief_evidence_turn_indexes is not None
+            else set()
+        )
 
         # P0 — target memory reset tracking.
         #   target_fresh_session: True when this module entered with a fresh
@@ -316,11 +339,10 @@ class Context:
         self.target_fresh_session: bool = target_fresh_session
         self._target_reset_at: int = _target_reset_at
 
-        # P5 — when a scenario declares an attacker-model ensemble, each
-        # child context is bound to a specific model chosen round-robin by
-        # ctx.run_module(). Empty string means "use agent_config.model".
-        # CompletionRole.JUDGE bypasses this and always resolves to
-        # agent_config.effective_judge_model.
+        # Optional test / caller override for the attacker model. Normal
+        # production routing is role-aware in _resolve_model: executive and
+        # manager contexts use agent_config.model, employee contexts use
+        # agent_config.sub_module_model.
         self.attacker_model_override: str = attacker_model_override
 
         # P6 — nesting depth for log display. Root context has depth 0;
@@ -372,25 +394,30 @@ class Context:
         # Late-imported to keep core/context-layer import order legible:
         # scratchpad.py lives at core/ top level, context.py sits mid-way.
         from mesmer.core.scratchpad import Scratchpad as _Scratchpad
+
         self.scratchpad: _Scratchpad = _Scratchpad()
 
     @property
     def agent_model(self) -> str:
-        """Currently-bound attacker model (rotation override wins)."""
-        return self.attacker_model_override or self.agent_config.model
+        """Currently-bound attacker model for this context."""
+        return self._resolve_model(CompletionRole.ATTACKER)
 
     def _resolve_model(self, role: CompletionRole) -> str:
         """Pick the model to use for an LLM call based on its role.
 
-        - :attr:`CompletionRole.ATTACKER` (default): the rotation-assigned
-          attacker model if bound on this context, otherwise the config's
-          base attacker model.
+        - :attr:`CompletionRole.ATTACKER` (default): executive and manager
+          contexts use the scenario model; employee / leaf contexts use the
+          configured sub-module model.
         - :attr:`CompletionRole.JUDGE`: the scenario's judge model (stable
-          across rotation).
+          across the run).
         """
         if role == CompletionRole.JUDGE:
             return self.agent_config.effective_judge_model
-        return self.attacker_model_override or self.agent_config.model
+        if self.attacker_model_override:
+            return self.attacker_model_override
+        if self.depth >= 2:
+            return self.agent_config.sub_module_model
+        return self.agent_config.model
 
     async def completion(
         self,
@@ -423,7 +450,6 @@ class Context:
             "temperature": self.agent_config.temperature,
         }
 
-        # API key — rotates through keys (round-robin, skipping cooled-down ones)
         key = self.agent_config.next_key()
         self._last_key_used = key  # exposed to _completion_with_retry
         if key:
@@ -465,6 +491,7 @@ class Context:
         # calls from attacker calls without a bespoke parser.
         if self.log is not None:
             import json as _json
+
             usage_obj = getattr(response, "usage", None)
 
             def _usage_val(attr: str) -> int:
@@ -481,16 +508,20 @@ class Context:
             try:
                 self.log(
                     LogEvent.LLM_COMPLETION.value,
-                    _json.dumps({
-                        "role": role.value,
-                        "model": kwargs["model"],
-                        "elapsed_s": round(elapsed, 3),
-                        "prompt_tokens": _usage_val("prompt_tokens"),
-                        "completion_tokens": _usage_val("completion_tokens"),
-                        "total_tokens": _usage_val("total_tokens"),
-                        "n_messages": len(messages),
-                        "tools": len(tools) if tools else 0,
-                    }, sort_keys=True, default=str),
+                    _json.dumps(
+                        {
+                            "role": role.value,
+                            "model": kwargs["model"],
+                            "elapsed_s": round(elapsed, 3),
+                            "prompt_tokens": _usage_val("prompt_tokens"),
+                            "completion_tokens": _usage_val("completion_tokens"),
+                            "total_tokens": _usage_val("total_tokens"),
+                            "n_messages": len(messages),
+                            "tools": len(tools) if tools else 0,
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ),
                 )
             except Exception:
                 # Logging is observability. Never let a broken sink
@@ -513,9 +544,7 @@ class Context:
 
         reply = await self.target.send(message)
         error = is_target_error(reply)
-        self.turns.append(
-            Turn(sent=message, received=reply, module=module_name, is_error=error)
-        )
+        self.turns.append(Turn(sent=message, received=reply, module=module_name, is_error=error))
         self.turns_used += 1
         return reply
 
@@ -525,6 +554,7 @@ class Context:
         instruction: str,
         max_turns: int | None = None,
         log=None,
+        active_experiment_id: str | None = None,
     ) -> str:
         """Delegate to a sub-module with a scoped turn budget.
 
@@ -557,7 +587,7 @@ class Context:
                         LogEvent.MODE_OVERRIDE.value,
                         f"module '{name}' declares reset_target: true but "
                         "scenario mode is CONTINUOUS — reset skipped, "
-                        "conversation continues."
+                        "conversation continues.",
                     )
             else:
                 try:
@@ -573,14 +603,10 @@ class Context:
                     if log is not None:
                         log(LogEvent.TARGET_RESET_ERROR.value, f"reset failed for '{name}': {e}")
 
-        # P5 — rotate the attacker model round-robin when an ensemble is
-        # declared. No-op (returns the single model) otherwise.
-        chosen_model = self.agent_config.next_attacker_model()
-
         child = self.child(
             max_turns=max_turns,
             target_fresh_session=fresh_session,
-            attacker_model_override=chosen_model,
+            active_experiment_id=active_experiment_id or self.active_experiment_id,
         )
         result = await run_react_loop(module, child, instruction, log=log)
 
@@ -611,6 +637,7 @@ class Context:
         max_turns: int | None = None,
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
+        active_experiment_id: str | None = None,
     ) -> Context:
         """Create a child context — shares target + turns + graph, own budget.
 
@@ -620,8 +647,8 @@ class Context:
         shared context with the target.
 
         ``attacker_model_override`` binds the child to a specific attacker
-        model (used for MODEL ensemble rotation). Empty string means inherit
-        the parent's override (or the config's base model if no override).
+        model for tests / specialised callers. Empty string uses the standard
+        depth-based routing.
         """
         child = Context(
             target=self.target,
@@ -630,24 +657,27 @@ class Context:
             objective=self.objective,
             success_signals=self.success_signals,
             max_turns=max_turns,
-            graph=self.graph,               # shared graph
+            graph=self.graph,  # shared graph
+            belief_graph=self.belief_graph,  # shared belief graph
             run_id=self.run_id,
-            human_broker=self.human_broker, # broker shared
+            human_broker=self.human_broker,  # broker shared
             target_memory=self.target_memory,  # handle shared (sub-modules
-                                               # don't write to it, but the
-                                               # leader's tools need it after
-                                               # delegation returns)
+            # don't write to it, but the
+            # leader's tools need it after
+            # delegation returns)
             operator_messages=self.operator_messages,  # SAME list — WS pushes
-                                                       # land here regardless
-                                                       # of which sub-module
-                                                       # is currently running
+            # land here regardless
+            # of which sub-module
+            # is currently running
             judge_rubric_additions=self.judge_rubric_additions,  # shared
             target_fresh_session=target_fresh_session,
             attacker_model_override=attacker_model_override or self.attacker_model_override,
-            depth=self.depth + 1,           # deeper in the module tree
+            active_experiment_id=active_experiment_id or self.active_experiment_id,
+            depth=self.depth + 1,  # deeper in the module tree
             scenario_mode=self.scenario_mode,  # inherit CONTINUOUS/TRIALS
-            _turns=self.turns,              # same list reference
-            _module_log=self.module_log,    # shared log
+            _turns=self.turns,  # same list reference
+            _module_log=self.module_log,  # shared log
+            _belief_evidence_turn_indexes=self._belief_evidence_turn_indexes,
             _target_reset_at=self._target_reset_at,
         )
         # Telemetry rolls up to the run — every sub-module's LLM usage
@@ -723,7 +753,7 @@ class Context:
         remembers — anything earlier has been wiped from the target's side.
         Summary turns (C9) render inline just like in :meth:`format_turns`.
         """
-        session_turns = self.turns[self._target_reset_at:]
+        session_turns = self.turns[self._target_reset_at :]
         recent = session_turns[-last_n:] if session_turns else []
         if not recent:
             return "(no conversation in this target session yet)"

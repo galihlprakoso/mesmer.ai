@@ -17,7 +17,8 @@
 #   - Optional context-budget + compression (C7/C9) — see the agent block.
 #
 # Usage:
-#   export OPENROUTER_API_KEY=your-key-here
+#   export ANTHROPIC_API_KEY=your-claude-key
+#   export OPENROUTER_API_KEY=your-target-provider-key
 #   mesmer run scenarios/extract-system-prompt-continuous.yaml --verbose
 #   # second run picks up where the first left off:
 #   mesmer run scenarios/extract-system-prompt-continuous.yaml --verbose
@@ -61,8 +62,9 @@ modules:
 
 # Agent (attacker brain) — prefix determines provider
 agent:
-  model: openrouter/anthropic/claude-sonnet-4-20250514
-  api_key: "${OPENROUTER_API_KEY}"
+  model: anthropic/claude-opus-4-7
+  sub_module_model: anthropic/claude-haiku-4-5
+  api_key: "${ANTHROPIC_API_KEY}"
   temperature: 0.7
 
   # Continuous-mode context budget (C7). Uncomment to enable summary-buffer

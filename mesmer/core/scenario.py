@@ -68,16 +68,15 @@ class TargetConfig:
 class AgentConfig:
     """Agent (attacker brain) configuration — fully declarative.
 
-    Two models live here:
+    Mesmer uses role-aware model routing:
 
-      1. ``model`` / ``models`` — the *attacker* brain. A scenario can declare
-         a single ``model`` or an ``models`` ensemble. When an ensemble is
-         set, :meth:`next_attacker_model` rotates through it round-robin so
-         different sub-modules get different base models — cheap diversity
-         without rewriting the framework.
-      2. ``judge_model`` — the evaluator model. Kept stable across the run
-         so scoring doesn't drift with the attacker rotation. Defaults to
-         the first attacker model when unset.
+      1. ``model`` — the executive and manager brain. For the hackathon this
+         is Claude Opus 4.7, because those roles own planning and judgment.
+      2. ``sub_module_model`` — employee / leaf technique brain. Defaults to
+         Claude Haiku 4.5 so low-level probes remain cheaper while staying on
+         Claude.
+      3. ``judge_model`` — the evaluator model. Defaults to ``model`` when
+         unset.
 
     Context-budget fields (C7 — continuous mode only):
 
@@ -98,15 +97,16 @@ class AgentConfig:
     """
 
     # LiteLLM model string: "openrouter/model", "anthropic/model", "openai/model", etc.
-    model: str = "openrouter/anthropic/claude-sonnet-4-20250514"
-    # Optional ensemble. When non-empty, ``model`` is overwritten by the first
-    # entry on __post_init__ and next_attacker_model() cycles through the list.
+    model: str = "anthropic/claude-opus-4-7"
+    # Optional legacy field. Kept for old scenario YAML compatibility, but
+    # model ensemble rotation is intentionally disabled.
     models: list[str] = field(default_factory=list)
+    sub_module_model: str = "anthropic/claude-haiku-4-5"
     # Model used by the judge / refinement LLM calls. Empty → falls back to
     # the attacker model. Keeping this separate stops the judge from drifting
     # with the attacker rotation.
     judge_model: str = ""
-    api_key: str = ""          # resolved from ${ENV_VAR} — supports comma-separated for rotation
+    api_key: str = ""          # resolved from ${ENV_VAR}
     api_base: str = ""         # optional: custom endpoint
     temperature: float = 0.7
     max_tokens: int | None = None
@@ -136,18 +136,13 @@ class AgentConfig:
     # the LLM-level variance. ``None`` means "no reseeding" (legacy behaviour).
     seed: int | None = None
 
-    # Internal — populated from api_key if comma-separated
+    # Internal — single API key only. Comma-separated pools are intentionally
+    # not supported; if a legacy value is provided, only the first key is used.
     _keys: list[str] = field(default_factory=list, repr=False)
     _pool: "object | None" = field(default=None, repr=False)
-    # Internal — round-robin cursor into ``models``.
-    _attacker_idx: int = field(default=0, repr=False)
 
     def __post_init__(self):
-        """Parse comma-separated api_key into rotation list + build KeyPool.
-
-        When ``models`` is non-empty, ``model`` is reset to ``models[0]`` so
-        the two settings stay in sync — callers may still read ``model`` to
-        get the current attacker brain.
+        """Normalize config and build the single-key pool.
 
         Context-budget fields are clamped to safe ranges — an invalid YAML
         value degrades to the default instead of crashing the run.
@@ -158,17 +153,18 @@ class AgentConfig:
             if self.models:
                 self.model = self.models[0]
 
-        if self.api_key and "," in self.api_key:
-            self._keys = [k.strip() for k in self.api_key.split(",") if k.strip()]
-            self.api_key = self._keys[0]  # set first as default
-        elif self.api_key:
-            self._keys = [self.api_key]
+        if not isinstance(self.sub_module_model, str) or not self.sub_module_model.strip():
+            self.sub_module_model = "anthropic/claude-haiku-4-5"
 
-        # Build a KeyPool that supports per-key cooldowns + throttle. The
-        # pool is pulled from a process-level cache keyed by the sorted
-        # API-key tuple — so when the bench harness constructs N
-        # AgentConfigs per trial, they all share one throttle (otherwise
-        # concurrency=8 would yield 8× the operator-declared rpm cap).
+        if self.api_key:
+            first_key = self.api_key.split(",", 1)[0].strip()
+            self.api_key = first_key
+            self._keys = [first_key] if first_key else []
+
+        # Build a single-key pool that supports shared throttling. The pool
+        # is pulled from a process-level cache keyed by the configured API key
+        # so when the bench harness constructs N AgentConfigs per trial, they
+        # all share one throttle.
         from mesmer.core.keys import get_or_create_pool
         self._pool = get_or_create_pool(list(self._keys), throttle=self.throttle)
 
@@ -194,38 +190,20 @@ class AgentConfig:
 
     @property
     def pool(self):
-        """The KeyPool backing this config. Exposes cooldown API for the loop."""
+        """The KeyPool backing this config. Exposes throttle state for the loop."""
         return self._pool
 
     def next_key(self) -> str:
-        """Return the next key whose cooldown (if any) has expired.
+        """Return the configured API key.
 
-        Empty string if there are no keys OR every key is currently cooled —
-        litellm will then fall back to env-var auth for the provider.
+        Empty string means litellm will fall back to provider env-var auth.
+        Mesmer intentionally does not rotate across API keys.
         """
-        if self._pool is None or not self._keys:
-            return self.api_key
-        key = self._pool.next()
-        return key if key is not None else ""
+        return self.api_key
 
     @property
     def key_count(self) -> int:
         return len(self._keys)
-
-    # --- attacker-model rotation (P5) ---
-
-    def next_attacker_model(self) -> str:
-        """Return the next attacker model, round-robin over ``models``.
-
-        When the ensemble is empty, always returns ``model`` (the single
-        attacker case) — callers can invoke this unconditionally without
-        branching on ensemble existence.
-        """
-        if not self.models:
-            return self.model
-        chosen = self.models[self._attacker_idx % len(self.models)]
-        self._attacker_idx += 1
-        return chosen
 
     @property
     def effective_judge_model(self) -> str:
@@ -239,7 +217,7 @@ class AgentConfig:
 
     @property
     def ensemble_size(self) -> int:
-        return len(self.models)
+        return 0
 
     # --- context budget + compression (C7) ---
 
@@ -417,8 +395,9 @@ def load_scenario(path: str | Path) -> Scenario:
     throttle = _parse_throttle(agent_data.get("throttle"))
 
     agent = AgentConfig(
-        model=agent_data.get("model", "openrouter/anthropic/claude-sonnet-4-20250514"),
+        model=agent_data.get("model", "anthropic/claude-opus-4-7"),
         models=list(agent_data.get("models", []) or []),
+        sub_module_model=agent_data.get("sub_module_model", "anthropic/claude-haiku-4-5"),
         judge_model=str(agent_data.get("judge_model", "") or ""),
         api_key=agent_data.get("api_key", ""),
         api_base=agent_data.get("api_base", ""),

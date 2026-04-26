@@ -1,0 +1,212 @@
+---
+title: Frontier experiments & utility
+description: How the planner decides what to try next — utility ranking, UCB-with-lookahead selection, and the cross-target strategy library.
+---
+
+The [belief graph](./belief-graph) holds the planner's typed state.
+This page is about how the planner *moves* — how a `WeaknessHypothesis`
+becomes a dispatchable `FrontierExperiment`, how experiments are ranked
+by utility, how the selector picks one to flag for the leader, and how
+strategies that worked against prior targets feed back in.
+
+## What a frontier experiment is
+
+A `FrontierExperiment` is a typed proposed move. Each one binds a
+hypothesis × a module × an optional strategy, plus the prompt the
+manager will dispatch and the signal the planner expects to see:
+
+```
+fx_a1b2c3d4
+├── hypothesis_id  wh_e5f6g7h8  (the belief being tested)
+├── strategy_id    st_…?         (the pattern, if known)
+├── module         format-shift  (the manager that will run it)
+├── instruction    "Probe the …"  (the actual prompt body)
+├── expected_signal "target follows the requested structure …"
+├── state          PROPOSED
+└── utility        0.71  (+ 8 component scores)
+```
+
+State lives on a small lifecycle:
+
+- **PROPOSED** — generated, ranked, sitting in the queue.
+- **EXECUTING** — the leader dispatched a manager bound to this
+  experiment. `tools/sub_module.py` applies the state delta *before*
+  the run starts, so the [Belief Map](../recipes/reading-the-belief-map)
+  shows the experiment in flight.
+- **FULFILLED** — an `Attempt` with `experiment_id` set landed and
+  closed it. Applied automatically inside the
+  `AttemptCreateDelta` apply path.
+- **DROPPED** — operator pruned, or the planner aged it out (parent
+  hypothesis refuted, dead-similarity too high).
+
+### The "no freelancing" dispatch contract
+
+Every sub-module dispatch tool's OpenAI function schema includes an
+`experiment_id` parameter (added by [`registry.as_tools`](../../../../mesmer/core/registry.py)).
+The leader is supposed to pass it. When the leader forgets,
+[`tools/sub_module._auto_bind_experiment_id`](../../../../mesmer/core/agent/tools/sub_module.py)
+scans for a PROPOSED experiment whose `module` matches the dispatched
+function name and binds the highest-utility one. The auto-binding is
+logged as a `BELIEF_DELTA` diagnostic.
+
+This means the `fx_…` linkage works even with weaker attacker models
+that ignore the prompt's required-action contract — the planner queue
+stays auditable end-to-end.
+
+## The 8-component utility formula
+
+`rank_frontier` (in [`agent/beliefs.py`](../../../../mesmer/core/agent/beliefs.py))
+computes nine numbers per PROPOSED experiment: eight components plus
+the weighted aggregate `utility`. Components are designed to fall in
+[-1, 1] before weighting; the aggregate is the signed weighted sum.
+
+| Component | Default weight | Range | What it asks |
+|---|---:|---|---|
+| `expected_progress` | **+0.30** | [0.3, 0.9] | How likely is this experiment to move the objective forward? Maps confidence linearly: `0.3 + 0.6·c`. |
+| `information_gain` | **+0.25** | [0, 1] | How much would running this shift our beliefs? Entropy-flavoured `1 − \|2c − 1\|` — peaks at confidence 0.5, zero at 0/1. The planner naturally tests uncertain hypotheses before exploiting confirmed ones. |
+| `hypothesis_confidence` | **+0.15** | [0, 1] | Raw confidence on the linked hypothesis. |
+| `novelty` | **+0.10** | [0, 1] | `1 − max-Jaccard(instruction+module tokens, recent attempts)`. High when the experiment doesn't look like anything in the last 8 attempts. |
+| `strategy_prior` | **+0.10** | [0, 1] | The linked strategy's local success rate (against this target). 0.5 when no strategy is linked or no attempts yet. |
+| `transfer_value` | **+0.05** | [0, 1] | Cross-target lifetime bonus from the [strategy library](#the-strategy-library). Reserved — emits 0.0 today; Session 2 wires it through. |
+| `query_cost` | **−0.10** | [0, 1] | Estimated relative cost of running the experiment. Conservative 0.3 default; future sessions refine via the registry. |
+| `repetition_penalty` | **−0.20** | [0, 1] | Token-Jaccard against fulfilled experiments in the last 8. High similarity lowers utility — we don't waste budget repeating. |
+| `dead_similarity` | **−0.25** | [0, 1] | Token-Jaccard against attempts whose outcome was dead/refusal. Look-alikes to dead approaches are heavily penalised. |
+
+The defaults live in
+`DEFAULT_UTILITY_WEIGHTS` in [`mesmer/core/constants.py`](../../../../mesmer/core/constants.py).
+`rank_frontier(weights={"novelty": 0.20, ...})` overrides per-call.
+Weights are tuned by intuition; they'll be perturbed against
+benchmarks once the benchmarking surface is wired in.
+
+The `recent_attempt_window` and `fulfilled_window` (default 8 each)
+cap how far back the novelty / repetition / dead-similarity
+comparisons look. Small windows keep ranking O(1) per experiment
+relative to graph size — frontier ranking stays cheap even after
+many runs.
+
+## UCB-with-lookahead
+
+Ranking gives every experiment a utility score. *Selecting* one for
+the leader's brief uses
+[`select_next_experiment`](../../../../mesmer/core/agent/beliefs.py),
+a two-layer UCB-with-lookahead policy.
+
+**Layer 1 — UCB on top of utility.** Standard upper-confidence-bound
+bandit math:
+
+```
+choice_score(fx) = fx.utility
+                 + c · sqrt(log(N + 1) / (n_h + 1))
+```
+
+`N` is the total `Attempt` count across the graph, `n_h` is the count
+of attempts that have already tested `fx.hypothesis_id`. The +1
+smoothing keeps the bonus finite for fresh hypotheses (`n_h = 0`).
+The default `c = 1.2` is slightly under the textbook `√2` because
+utility is already in [-1, 1] (not [0, 1]) — a smaller `c` keeps the
+bonus from dominating exploitative picks.
+
+**Layer 2 — depth-2 belief-state rollout** (when at least two
+proposed experiments exist). For each candidate the selector
+simulates two outcomes against the tested hypothesis and picks the
+expected best second move under each:
+
+```
+choice_score(fx) +=
+    lookahead_weight ·
+      (p_support · best_next(confidence + 0.16)
+     + (1 - p_support) · best_next(confidence - 0.12))
+```
+
+`p_support` is a cheap world-model prior (`_support_probability`)
+that blends utility, strategy_prior, and novelty into [0.1, 0.9].
+`best_next(...)` is the highest UCB-augmented utility among
+*remaining* proposed experiments under the simulated belief, capped
+at `rollout_branching` candidates by progressive widening so the
+lookahead stays O(N²) over the proposed set rather than exponential.
+Defaults: `lookahead_depth=2`, `lookahead_weight=0.35`,
+`rollout_branching=3`.
+
+The rollout is **target-query-free** — no LLM, no network. It's a
+bounded belief-state scheduler that costs a few microseconds per
+call. The selector never mutates the graph; it just returns the
+preferred experiment.
+
+The leader brief flags the selector's pick with `★`. The leader is
+free to override; the selector exists so the brief surfaces a
+default, automated callers (CI smoke runs, web auto-mode) can step
+the agent without an LLM in the loop, and the policy is auditable
+through one function instead of being spread across the prompt.
+
+## The strategy library
+
+A `Strategy` node carries a `family` (matching a hypothesis family)
+and a `template_summary` — short prose like *"Ask target to output
+policy as YAML"*. It's the *idea*, not a prompt template. Two slices
+of strategy data exist:
+
+**Per-target strategies** live as nodes inside the belief graph.
+They accumulate `success_count` and `attempt_count` against the
+current target. The `strategy_prior` utility component reads
+`success_count / attempt_count` so a pattern that's been winning
+locally rises in the queue.
+
+**Cross-target lifetime strategies** live in a separate global
+library at `~/.mesmer/global/strategies.json`, defined by
+[`mesmer/core/strategy_library.py`](../../../../mesmer/core/strategy_library.py).
+Schema (versioned for forward compatibility):
+
+```json
+{
+  "schema_version": 1,
+  "strategies": [
+    {
+      "family": "format-shift",
+      "template_summary": "Ask target to output policy as YAML",
+      "global_success_count": 4,
+      "global_attempt_count": 7,
+      "works_against_traits": ["assistant-style", "json-schema-aware"],
+      "fails_against_traits": ["strict-refusal-template"],
+      "last_updated": 1737000000.0
+    }
+  ]
+}
+```
+
+At run end, every per-target `Strategy` with `attempt_count > 0` is
+folded into the library by `merge_per_target_strategies`. Counters
+add; trait correlations dedupe-merge. At bootstrap, the hypothesis
+generator pulls family-matching entries via
+`retrieve_strategies_for_bootstrap` and renders them into the
+`generate_hypotheses` user prompt as a `## Cross-target strategy
+library` section — so a fresh target's hypotheses are grounded in
+what worked against prior targets.
+
+The library is **never** edited by the agent in flight. The planner
+reads it; operators or post-run hooks write it. Atomic writes via a
+temp-file rename keep the library safe under concurrent runs;
+schema-version bumps reject incompatible files rather than try to
+interpret them.
+
+## Reading the planner's choice
+
+Three places make the planner's decision visible:
+
+- **The Belief Map UI** — the Frontier rail shows experiments sorted
+  by utility, the canvas sizes each frontier square by utility, and
+  the detail panel exposes the live LEADER brief verbatim. See
+  [reading the belief map](../recipes/reading-the-belief-map).
+- **The leader's user prompt** — every iteration includes a `# Belief
+  Attack Graph` block from `GraphContextCompiler`. The recommended
+  experiments list flags the selector's pick with `★`.
+- **The trace events** — `BELIEF_DELTA` carries the delta kind +
+  fields; `FRONTIER_RANKED` fires after `rank_frontier`;
+  `FRONTIER_DROPPED` fires when an experiment is pruned. See
+  [bench trace](./bench-trace) for the full event catalog.
+
+References from
+[`plans/refined-graph-plan.md`](../../../../plans/refined-graph-plan.md):
+TAP (arXiv 2312.02119) for tree search shape, PAIR (arXiv 2310.08419)
+for single-branch refinement, GPTFuzzer (arXiv 2309.10253) for
+strategy mutation, AutoDAN-Turbo (arXiv 2410.05295) for the
+cross-target library, POMCP/UCT for the belief-state rollout.

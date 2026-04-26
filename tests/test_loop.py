@@ -483,39 +483,33 @@ class TestErrorHandling:
         assert "done despite error" in result
 
     @pytest.mark.asyncio
-    async def test_rate_limit_cools_key_and_rotates(self):
-        """On RateLimitError, the current key is cooled down, and the next
-        attempt happens on a different key (no sleep)."""
+    async def test_rate_limit_retries_same_key_without_rotation(self):
+        """On RateLimitError, retry with backoff on the same configured key."""
         from mesmer.core.keys import KeyPool
 
-        # Install a pool with two keys
         ctx = _make_ctx()
-        ctx.agent_config._keys = ["KEY_A", "KEY_B"]
-        ctx.agent_config._pool = KeyPool(["KEY_A", "KEY_B"])
+        ctx.agent_config.api_key = "KEY_A"
+        ctx.agent_config._keys = ["KEY_A"]
+        ctx.agent_config._pool = KeyPool(["KEY_A"])
 
-        # Track keys seen and script completion responses
         keys_seen = []
 
         async def rate_limited_then_succeed(messages, tools=None):
-            # Read the key that completion() would have selected and record it
             key = ctx.agent_config.next_key()
             ctx._last_key_used = key
             keys_seen.append(key)
             if len(keys_seen) == 1:
-                # First call hits rate-limit (per-day)
                 raise Exception(
                     'RateLimitError: OpenrouterException - {"error":{"message":'
                     '"Rate limit exceeded: free-models-per-day","code":429}}'
                 )
-            # Second call: succeeds → conclude
             return FakeResponse(FakeMessage(
-                tool_calls=[FakeToolCall("conclude", {"result": "rotated ok"})]
+                tool_calls=[FakeToolCall("conclude", {"result": "retried ok"})]
             ))
 
         ctx.completion = rate_limited_then_succeed
         module = _make_module()
 
-        # No sleeps — rate-limit path doesn't backoff on the dead key
         import mesmer.core.agent as agent_mod
         original_delays = agent_mod.RETRY_DELAYS
         agent_mod.RETRY_DELAYS = [0, 0, 0]
@@ -524,18 +518,14 @@ class TestErrorHandling:
         finally:
             agent_mod.RETRY_DELAYS = original_delays
 
-        assert result == "rotated ok"
-        # Two distinct keys were picked: the first (rate-limited) got cooled,
-        # pool rotated to the other on retry.
+        assert result == "retried ok"
         assert len(keys_seen) == 2
-        assert keys_seen[0] != keys_seen[1]
-        # The first key is now cooled (pool's active count dropped to 1)
+        assert keys_seen[0] == keys_seen[1] == "KEY_A"
         assert ctx.agent_config.pool.active_count() == 1
 
     @pytest.mark.asyncio
     async def test_rate_limit_all_keys_exhausted(self):
-        """If every key gets rate-limited, the run stops cleanly with a
-        rate_limit_wall event — doesn't infinite-loop."""
+        """If the configured key keeps rate-limiting, the run stops cleanly."""
         from mesmer.core.keys import KeyPool
 
         ctx = _make_ctx()
@@ -563,10 +553,9 @@ class TestErrorHandling:
         finally:
             agent_mod.RETRY_DELAYS = original_delays
 
-        # Run ends — ideally with a clean rate_limit_wall signal
-        assert any(evt == "rate_limit_wall" for evt, _ in events) or "LLM error" in result
-        # Only one key, and it's cooled
-        assert ctx.agent_config.pool.active_count() == 0
+        assert "LLM error" in result
+        assert not any(evt == "rate_limit_wall" for evt, _ in events)
+        assert ctx.agent_config.pool.active_count() == 1
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_during_send(self):

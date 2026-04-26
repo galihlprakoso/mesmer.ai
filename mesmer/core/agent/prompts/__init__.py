@@ -24,6 +24,12 @@ REFLECT_PROMPT = _load("reflect")
 SUMMARY_SYSTEM = _load("summary_system")
 EXECUTIVE_SYSTEM = _load("executive")
 
+# Belief Attack Graph (Session 1) — extractor + hypothesis generator.
+EXTRACT_EVIDENCE_SYSTEM = _load("extract_evidence_system")
+EXTRACT_EVIDENCE_USER = _load("extract_evidence_user")
+GENERATE_HYPOTHESES_SYSTEM = _load("generate_hypotheses_system")
+GENERATE_HYPOTHESES_USER = _load("generate_hypotheses_user")
+
 
 __all__ = [
     "CONTINUATION_PREAMBLE",
@@ -34,4 +40,8 @@ __all__ = [
     "REFLECT_PROMPT",
     "SUMMARY_SYSTEM",
     "EXECUTIVE_SYSTEM",
+    "EXTRACT_EVIDENCE_SYSTEM",
+    "EXTRACT_EVIDENCE_USER",
+    "GENERATE_HYPOTHESES_SYSTEM",
+    "GENERATE_HYPOTHESES_USER",
 ]

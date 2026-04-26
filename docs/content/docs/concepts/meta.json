@@ -1,4 +1,11 @@
 {
   "title": "Concepts",
-  "pages": ["attack-graph", "taper-tiers", "scratchpad", "bench-trace"]
+  "pages": [
+    "attack-graph",
+    "belief-graph",
+    "frontier-and-utility",
+    "taper-tiers",
+    "scratchpad",
+    "bench-trace"
+  ]
 }

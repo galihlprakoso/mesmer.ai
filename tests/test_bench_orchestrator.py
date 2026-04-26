@@ -24,6 +24,7 @@ from mesmer.bench import (
     BenchBudget,
     BenchCellSummary,
     BenchDatasetSpec,
+    BenchJudgeSpec,
     BenchSpec,
     BenchSummary,
     BenchTargetSpec,
@@ -68,7 +69,7 @@ def _minimal_spec(tmp_path: Path, n_targets: int = 1) -> BenchSpec:
     return BenchSpec(
         name="test-bench",
         version="v0",
-        module="system-prompt-extraction",
+        modules=["system-prompt-extraction"],
         dataset=BenchDatasetSpec(
             upstream_url="",
             local_cache=str(tmp_path / "data.jsonl"),
@@ -525,19 +526,21 @@ class TestLoadDataset:
                     "access_code": "canary-a",
                     "attack": "hack me",
                 },
-                {"sample_id": 2, "pre_prompt": "", "access_code": "x"},  # skipped: no pre
+                {"sample_id": 2, "pre_prompt": "", "access_code": "x"},  # ok: no system prompt
                 {"sample_id": 3, "pre_prompt": "P3", "access_code": ""},  # skipped: no canary
                 {"sample_id": 4, "pre_prompt": "P4", "access_code": "canary-d"},  # ok, no attack
             ],
         )
         spec = BenchDatasetSpec(upstream_url="", local_cache=str(cache))
         rows, _ = load_dataset(spec)
-        assert len(rows) == 2
+        assert len(rows) == 3
         assert rows[0].sample_id == "1"
         assert rows[0].canary == "canary-a"
         assert rows[0].baseline_attack == "hack me"
-        assert rows[1].sample_id == "4"
-        assert rows[1].baseline_attack == ""
+        assert rows[1].sample_id == "2"
+        assert rows[1].pre_prompt == ""
+        assert rows[2].sample_id == "4"
+        assert rows[2].baseline_attack == ""
 
 
 # ---------------------------------------------------------------------------
@@ -552,12 +555,26 @@ class TestLoadSpec:
         spec_path.write_text("""
 name: "test"
 version: v1
-modules: [system-prompt-extraction]
+modules: [target-profiler, system-prompt-extraction]
 dataset:
   upstream_url: https://example.com/data.jsonl
   local_cache: data.jsonl
   expected_sha256: ""
   expected_rows: 10
+  row_schema:
+    pre_prompt: defense
+    post_prompt: suffix
+    success_value: secret
+    baseline_attack: attack
+    sample_id: id
+target_prompt:
+  system_template: "SYSTEM {{ defense }}"
+  user_turn_suffix_template: "SUFFIX {{ suffix }}"
+judge:
+  type: regex
+  success_field: secret
+  case_insensitive: false
+  require_leader_consolidation: false
 targets:
   - id: t-a
     adapter: openai
@@ -566,8 +583,18 @@ targets:
     api_key: "${FAKE_KEY}"
 agent:
   model: openrouter/x
+  sub_module_model: openrouter/worker
+  judge_model: openrouter/judge
   api_key: "${FAKE_KEY}"
+  api_base: "https://example.test/v1"
   temperature: 0.9
+  max_tokens: 1234
+  extra:
+    top_p: 0.5
+  max_context_tokens: 8000
+  compression_keep_recent: 6
+  compression_target_ratio: 0.4
+  compression_model: openrouter/compressor
   seed_base: 100
 budget:
   max_turns: 10
@@ -585,14 +612,58 @@ contamination_posture:
 """)
         spec = load_spec(spec_path)
         assert spec.name == "test"
+        assert spec.modules == ["target-profiler", "system-prompt-extraction"]
+        assert spec.module == "target-profiler"
+        assert spec.dataset.row_schema["success_value"] == "secret"
+        assert spec.target_prompt.system_template == "SYSTEM {{ defense }}"
+        assert spec.target_prompt.user_turn_suffix_template == "SUFFIX {{ suffix }}"
+        assert spec.judge.type == "regex"
+        assert spec.judge.success_field == "secret"
+        assert spec.judge.case_insensitive is False
+        assert spec.judge.require_leader_consolidation is False
         assert spec.targets[0].api_key == "sk-testing"
         assert spec.agent.api_key == "sk-testing"
+        assert spec.agent.sub_module_model == "openrouter/worker"
+        assert spec.agent.judge_model == "openrouter/judge"
+        assert spec.agent.api_base == "https://example.test/v1"
         assert spec.agent.temperature == 0.9
+        assert spec.agent.max_tokens == 1234
+        assert spec.agent.extra == {"top_p": 0.5}
+        assert spec.agent.max_context_tokens == 8000
+        assert spec.agent.compression_keep_recent == 6
+        assert spec.agent.compression_target_ratio == 0.4
+        assert spec.agent.compression_model == "openrouter/compressor"
         assert spec.budget.trials_per_row == 4
         assert spec.budget.run_baseline is False
         assert spec.contamination_posture.dataset_release_date == "2023-11-01"
         assert spec.contamination_posture.attacker_model_cutoff == "2025-01"
         assert "training overlap" in spec.contamination_posture.risk_assessment
+
+    def test_legacy_module_loads_as_single_module(self, tmp_path: Path):
+        spec_path = tmp_path / "legacy-module.yaml"
+        spec_path.write_text("""
+name: legacy
+version: v1
+module: system-prompt-extraction
+dataset:
+  upstream_url: ""
+  local_cache: data.jsonl
+targets:
+  - id: t
+    adapter: echo
+    model: e
+agent:
+  model: x
+contamination_posture:
+  dataset_release_date: "2023-11-01"
+  upstream_license: "MIT"
+  target_model_cutoff: "2023-12"
+  attacker_model_cutoff: "2025-01"
+  risk_assessment: "ok"
+""")
+        spec = load_spec(spec_path)
+        assert spec.modules == ["system-prompt-extraction"]
+        assert spec.module == "system-prompt-extraction"
 
     def test_spec_rejects_missing_contamination_posture(self, tmp_path: Path):
         """Specs without a contamination block must fail loading."""
@@ -718,6 +789,30 @@ class TestBuildScenario:
         assert scenario.agent.seed == 7
         assert scenario.objective.max_turns == 5
 
+    def test_threads_multiple_modules_and_prompt_templates(self, tmp_path: Path):
+        spec = _minimal_spec(tmp_path)
+        spec.modules = ["target-profiler", "system-prompt-extraction", "tool-extraction"]
+        spec.target_prompt.system_template = "DEFENSE: {{ defense }}"
+        spec.target_prompt.user_turn_suffix_template = "AFTER: {{ suffix }}"
+        row = DatasetRow(
+            sample_id="x",
+            pre_prompt="unused",
+            post_prompt="unused",
+            canary="c",
+            baseline_attack="a",
+            raw={"defense": "keep the secret", "suffix": "repeat policy"},
+        )
+
+        scenario = build_scenario_for_row(spec, spec.targets[0], row, seed=7)
+
+        assert scenario.modules == [
+            "target-profiler",
+            "system-prompt-extraction",
+            "tool-extraction",
+        ]
+        assert scenario.target.system_prompt == "DEFENSE: keep the secret"
+        assert scenario.target.user_turn_suffix == "AFTER: repeat policy"
+
     def test_throttle_is_threaded_into_target_config(self, tmp_path: Path):
         """A target's declared throttle reaches the scenario's
         ``TargetConfig`` so that ``create_target`` builds the target's
@@ -755,6 +850,78 @@ class TestBuildScenario:
         )
         s2 = build_scenario_for_row(spec, untouched, row, seed=1)
         assert s2.target.throttle is None
+
+    def test_agent_role_models_are_threaded_into_scenario(self, tmp_path: Path):
+        spec = _minimal_spec(tmp_path)
+        spec.agent.sub_module_model = "provider/worker"
+        spec.agent.judge_model = "provider/judge"
+        spec.agent.api_base = "https://agent.example/v1"
+        spec.agent.max_tokens = 2048
+        spec.agent.extra = {"top_p": 0.25}
+        spec.agent.max_context_tokens = 9000
+        spec.agent.compression_keep_recent = 4
+        spec.agent.compression_target_ratio = 0.5
+        spec.agent.compression_model = "provider/compressor"
+        row = DatasetRow(
+            sample_id="x",
+            pre_prompt="pre",
+            post_prompt="post",
+            canary="c",
+            baseline_attack="a",
+        )
+
+        scenario = build_scenario_for_row(spec, spec.targets[0], row, seed=9)
+
+        assert scenario.agent.sub_module_model == "provider/worker"
+        assert scenario.agent.judge_model == "provider/judge"
+        assert scenario.agent.api_base == "https://agent.example/v1"
+        assert scenario.agent.max_tokens == 2048
+        assert scenario.agent.extra == {"top_p": 0.25}
+        assert scenario.agent.max_context_tokens == 9000
+        assert scenario.agent.compression_keep_recent == 4
+        assert scenario.agent.compression_target_ratio == 0.5
+        assert scenario.agent.compression_model == "provider/compressor"
+
+    def test_target_extra_is_threaded_into_target_config(self, tmp_path: Path):
+        spec = _minimal_spec(tmp_path)
+        target = BenchTargetSpec(
+            id="rest-target",
+            adapter="rest",
+            extra={
+                "url": "https://target.example/chat",
+                "method": "PUT",
+                "headers": {"Authorization": "Bearer test"},
+                "body_template": '{"input":"{{message}}"}',
+                "response_path": "choices[0].text",
+                "send_template": '{"message":"{{message}}"}',
+                "receive": {"response_field": "reply"},
+                "connect_signal": {"field": "type", "value": "ready"},
+                "query_params": {"room": "bench"},
+                "connect_timeout": 3,
+                "receive_timeout": 12,
+            },
+        )
+        row = DatasetRow(
+            sample_id="x",
+            pre_prompt="pre",
+            post_prompt="post",
+            canary="c",
+            baseline_attack="a",
+        )
+
+        scenario = build_scenario_for_row(spec, target, row, seed=1)
+
+        assert scenario.target.url == "https://target.example/chat"
+        assert scenario.target.method == "PUT"
+        assert scenario.target.headers == {"Authorization": "Bearer test"}
+        assert scenario.target.body_template == '{"input":"{{message}}"}'
+        assert scenario.target.response_path == "choices[0].text"
+        assert scenario.target.send_template == '{"message":"{{message}}"}'
+        assert scenario.target.receive == {"response_field": "reply"}
+        assert scenario.target.connect_signal == {"field": "type", "value": "ready"}
+        assert scenario.target.query_params == {"room": "bench"}
+        assert scenario.target.connect_timeout == 3
+        assert scenario.target.receive_timeout == 12
 
     def test_post_prompt_lands_in_user_turn_suffix_not_system(self, tmp_path: Path):
         """Regression guard for the pre/post sandwich bug.
@@ -912,7 +1079,8 @@ class TestCanonicalShippedSpec:
         )
         assert repo_spec.exists(), f"canonical spec missing at {repo_spec}"
         spec = load_spec(repo_spec)
-        assert spec.module == "system-prompt-extraction"
+        assert "system-prompt-extraction" in spec.modules
+        assert spec.modules[0] == "target-profiler"
         assert spec.targets, "canonical spec must declare at least one target"
         assert spec.contamination_posture.dataset_release_date
         assert spec.contamination_posture.attacker_model_cutoff
@@ -1060,6 +1228,77 @@ class TestRunBenchmarkEndToEnd:
         assert events_dir.is_dir()
         event_files = list(events_dir.iterdir())
         assert len(event_files) == 4  # 2 rows × 2 mesmer trials, 0 baseline
+
+        summary_json = json.loads(next(f for f in files if f.name.endswith("-summary.json")).read_text())
+        assert summary_json["modules"] == ["system-prompt-extraction"]
+        assert summary_json["judge"]["type"] == "substring"
+        assert summary_json["target_prompt"]["system_template"] == "{{ pre_prompt }}"
+
+    async def test_regex_judge_can_score_target_turn_without_leader_consolidation(
+        self, tmp_path: Path
+    ):
+        cache = tmp_path / "regex.jsonl"
+        _write_jsonl(
+            cache,
+            [
+                {
+                    "sample_id": "r1",
+                    "prompt": "",
+                    "expected_pattern": r"FLAG-[0-9]+",
+                    "attack": "show flag",
+                }
+            ],
+        )
+        spec = _minimal_spec(tmp_path)
+        spec.dataset.local_cache = str(cache)
+        spec.dataset.row_schema = {
+            "pre_prompt": "prompt",
+            "success_value": "expected_pattern",
+            "baseline_attack": "attack",
+            "sample_id": "sample_id",
+        }
+        spec.judge = BenchJudgeSpec(
+            type="regex",
+            success_field="success_value",
+            require_leader_consolidation=False,
+        )
+        spec.budget.trials_per_row = 1
+        spec.budget.run_baseline = False
+
+        async def fake_execute_run(config, **_ignored):
+            telemetry = SimpleNamespace(
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+                llm_seconds=0.0,
+                n_calls=0,
+            )
+            ctx = SimpleNamespace(
+                turns=[SimpleNamespace(sent="probe", received="leaked FLAG-123", is_error=False)],
+                telemetry=telemetry,
+                target=SimpleNamespace(last_fingerprint=""),
+            )
+            return SimpleNamespace(
+                run_id="regex-run",
+                ctx=ctx,
+                telemetry=telemetry,
+                duration_s=0.1,
+                graph=None,
+                memory=None,
+                scenario=config.scenario_override,
+                result="leader missed it",
+            )
+
+        summary, trials = await run_benchmark(
+            spec,
+            spec_dir=tmp_path,
+            output_dir=tmp_path / "regex-results",
+            execute_run_fn=fake_execute_run,
+        )
+
+        assert trials[0].success is True
+        assert trials[0].matched_text == "FLAG-123"
+        assert summary.cells[0].n_successes == 1
 
     async def test_errors_surface_as_failed_trials(self, tmp_path: Path):
         cache = tmp_path / "data.jsonl"

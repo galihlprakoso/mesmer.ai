@@ -1,4 +1,4 @@
-"""Tests for KeyPool rotation + cooldown, and compute_cooldown heuristics."""
+"""Tests for single-key KeyPool throttling and compute_cooldown heuristics."""
 
 import asyncio
 import time
@@ -29,45 +29,18 @@ class TestKeyPool:
         assert p.next() is None
         assert p.active_count() == 0
 
-    def test_round_robin_through_active_keys(self):
+    def test_uses_first_key_only(self):
         p = KeyPool(["A", "B", "C"])
-        # 3 keys, so we should cycle through all three
         seen = [p.next() for _ in range(3)]
-        assert set(seen) == {"A", "B", "C"}
+        assert seen == ["A", "A", "A"]
+        assert p.total == 1
 
-    def test_cool_down_skips_that_key(self):
+    def test_cool_down_is_noop(self):
         p = KeyPool(["A", "B"])
         p.cool_down("A", time.time() + 3600, reason="test")
-        # Only B should come out — A is cooled
         for _ in range(5):
-            assert p.next() == "B"
-
-    def test_all_cooled_returns_none(self):
-        p = KeyPool(["A", "B"])
-        later = time.time() + 3600
-        p.cool_down("A", later)
-        p.cool_down("B", later)
-        assert p.next() is None
-        assert p.active_count() == 0
-
-    def test_expired_cooldown_reactivates_key(self):
-        p = KeyPool(["A"])
-        # Cool down to a past timestamp → already expired → still active
-        p.cool_down("A", time.time() - 10, reason="expired")
-        assert p.next() == "A"
+            assert p.next() == "A"
         assert p.active_count() == 1
-
-    def test_cool_down_extends_never_shortens(self):
-        """If a key is cooled until T1, cool_down(key, T0<T1) must not shorten it."""
-        p = KeyPool(["A"])
-        far = time.time() + 3600
-        near = time.time() + 60
-        p.cool_down("A", far, reason="far")
-        p.cool_down("A", near, reason="near")
-        # Still cooled
-        assert p.next() is None
-        status = [s for s in p.status() if s.masked]
-        assert status[0].cooled_until >= far - 1
 
     def test_cool_down_unknown_key_noop(self):
         p = KeyPool(["A"])
@@ -78,16 +51,16 @@ class TestKeyPool:
         p = KeyPool(["A", "B"])
         p.cool_down("A", time.time() + 300, reason="rate_limit")
         statuses = p.status()
-        assert len(statuses) == 2
+        assert len(statuses) == 1
         a = next(s for s in statuses if "A" in s.masked or s.masked == "***")
-        assert a.cooled_until > time.time()
-        assert a.reason == "rate_limit"
+        assert a.cooled_until == 0
+        assert a.reason == ""
 
     def test_active_count(self):
         p = KeyPool(["A", "B", "C"])
-        assert p.active_count() == 3
+        assert p.active_count() == 1
         p.cool_down("A", time.time() + 300)
-        assert p.active_count() == 2
+        assert p.active_count() == 1
         p.cool_down("B", time.time() + 300)
         assert p.active_count() == 1
 
@@ -230,42 +203,6 @@ class TestKeyPoolAcquire:
             await p.acquire()
 
     @pytest.mark.asyncio
-    async def test_cooldown_wall_fail_fast_when_no_wait_budget(self):
-        """All keys cooled + max_wait=0 raises immediately with gate label."""
-        p = KeyPool(["A"], throttle=ThrottleConfig(max_concurrent=2))
-        p.cool_down("A", time.time() + 3600, reason="test")
-        with pytest.raises(ThrottleTimeout, match="all_keys_cooled"):
-            await p.acquire()
-
-    @pytest.mark.asyncio
-    async def test_cooldown_wall_waits_until_expiry(self):
-        """All cooled but cooldown expires soon: acquire sleeps and returns."""
-        p = KeyPool(["A"], throttle=ThrottleConfig(
-            max_concurrent=2, max_wait_seconds=1.0,
-        ))
-        # Cool A for ~0.2s — within the 1s budget, should recover.
-        p.cool_down("A", time.time() + 0.2, reason="brief")
-        start = time.monotonic()
-        await p.acquire()
-        elapsed = time.monotonic() - start
-        assert 0.15 < elapsed < 0.8, f"expected short wait, got {elapsed}"
-        p.release()
-
-    @pytest.mark.asyncio
-    async def test_cooldown_wall_raises_when_budget_exceeded(self):
-        """All cooled for longer than max_wait_seconds: raises after waiting."""
-        p = KeyPool(["A"], throttle=ThrottleConfig(
-            max_concurrent=2, max_wait_seconds=0.15,
-        ))
-        p.cool_down("A", time.time() + 10, reason="long")
-        start = time.monotonic()
-        with pytest.raises(ThrottleTimeout, match="all_keys_cooled"):
-            await p.acquire()
-        elapsed = time.monotonic() - start
-        # Waited at least the budget before raising.
-        assert elapsed >= 0.1
-
-    @pytest.mark.asyncio
     async def test_gate_raise_releases_concurrency_slot(self):
         """If a later gate raises, the concurrency slot taken earlier is freed.
 
@@ -300,10 +237,15 @@ class TestPoolCache:
     def teardown_method(self):
         clear_pool_cache()
 
-    def test_same_keys_share_one_pool(self):
-        """Sibling AgentConfigs with the same key bag share state."""
+    def test_same_key_shares_one_pool(self):
+        """Sibling AgentConfigs with the same key share throttle state."""
+        a = get_or_create_pool(["sk-123"])
+        b = get_or_create_pool(["sk-123"])
+        assert a is b
+
+    def test_only_first_key_is_used_for_cache_identity(self):
         a = get_or_create_pool(["sk-123", "sk-456"])
-        b = get_or_create_pool(["sk-456", "sk-123"])  # order-insensitive
+        b = get_or_create_pool(["sk-123"])
         assert a is b
 
     def test_different_keys_produce_different_pools(self):

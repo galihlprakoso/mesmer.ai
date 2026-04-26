@@ -40,7 +40,7 @@ uv run mesmer run <scenario.yaml> [OPTIONS]
 | `--module-path` | path (repeatable) | Additional module search paths (layered on top of `BUILTIN_MODULES`) |
 | `--hint` | string (repeatable) | Inline human hint — becomes a `NodeSource.HUMAN` frontier node |
 | `--hint-file` | path | Load hints from a file (one per line) |
-| `--fresh` | flag | Ignore any existing graph under `~/.mesmer/targets/{hash}/` |
+| `--fresh` | flag | Bypass loading any existing per-target state under `~/.mesmer/targets/{hash}/` — both the legacy `graph.json` and the [belief graph](/docs/concepts/belief-graph) (`belief_graph.json` + `belief_deltas.jsonl`). The CONTINUOUS-mode conversation is also cleared. The disk files are left untouched; future runs without `--fresh` see them again. The executive's hand-curated `scratchpad.md` is **not** wiped — delete it manually if you want a truly clean slate. |
 
 **Examples**:
 
@@ -66,7 +66,7 @@ uv run mesmer run scenarios/extract-system-prompt.yaml --fresh
 
 ## `mesmer graph show`
 
-Print the persisted attack graph for a scenario's target.
+Print the persisted **legacy** attack graph for a scenario's target.
 
 ```bash
 uv run mesmer graph show <scenario.yaml>
@@ -74,7 +74,10 @@ uv run mesmer graph show <scenario.yaml>
 
 Renders a summary panel (nodes, best score, run counter) plus three
 tables: promising nodes, frontier (next moves), dead ends. For
-interactive exploration, use the Web UI (`mesmer serve`).
+interactive exploration — and for the new
+[Belief Map view](/docs/recipes/reading-the-belief-map) on top of the
+[belief graph](/docs/concepts/belief-graph) — use the web UI
+(`mesmer serve`); the CLI doesn't render the belief graph.
 
 ## `mesmer graph reset`
 
@@ -87,7 +90,9 @@ uv run mesmer graph reset <scenario.yaml>
 
 Equivalent to `rm ~/.mesmer/targets/{hash}/graph.json`. Use `--fresh`
 on `mesmer run` if you want to bypass the graph for one run without
-deleting it.
+deleting it. **Belief-graph files are not deleted by `graph reset`** —
+remove `belief_graph.json` and `belief_deltas.jsonl` manually if you
+want to also clear the typed planner state.
 
 ## `mesmer hint`
 

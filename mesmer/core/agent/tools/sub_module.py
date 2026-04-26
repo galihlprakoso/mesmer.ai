@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from mesmer.core.agent.evaluation import (
     _judge_module_result,
     _reflect_and_expand,
+    _update_belief_graph,
     _update_graph,
 )
 from mesmer.core.agent.prompt import _find_missed_frontier
@@ -23,6 +24,38 @@ if TYPE_CHECKING:
     from mesmer.core.agent.context import Context
     from mesmer.core.agent.engine import LogFn
     from mesmer.core.module import ModuleConfig
+
+
+def _auto_bind_experiment_id(ctx: "Context", fn_name: str, experiment_id: str | None) -> str | None:
+    """Resolve the belief-graph dispatch contract at the tool boundary.
+
+    The prompt tells the leader to pass `experiment_id`, but models still
+    omit it. When a proposed experiment for this module exists, bind it here
+    before the child runs so the Attempt links precisely instead of falling
+    back to active-hypothesis fan-out.
+    """
+    if ctx.belief_graph is None:
+        return experiment_id
+
+    from mesmer.core.belief_graph import FrontierExperiment
+    from mesmer.core.constants import ExperimentState
+
+    if experiment_id:
+        node = ctx.belief_graph.nodes.get(experiment_id)
+        if isinstance(node, FrontierExperiment):
+            return experiment_id
+
+    candidates = [
+        n
+        for n in ctx.belief_graph.iter_nodes()
+        if isinstance(n, FrontierExperiment)
+        and n.state is ExperimentState.PROPOSED
+        and n.module == fn_name
+    ]
+    if not candidates:
+        return experiment_id
+    candidates.sort(key=lambda fx: fx.utility, reverse=True)
+    return candidates[0].id
 
 
 async def handle(
@@ -44,8 +77,21 @@ async def handle(
     sub_instruction = args.get("instruction", instruction)
     sub_max_turns = args.get("max_turns")
     # Leader may pass frontier_id to indicate this attempt is
-    # executing a suggested frontier (TAP-aligned refinement).
+    # executing a suggested frontier (TAP-aligned refinement of the
+    # legacy AttackGraph).
     frontier_id = args.get("frontier_id") or None
+    # Session 2.5 — leader may also pass experiment_id (`fx_…`) to tie
+    # the attempt to a specific FrontierExperiment in the Belief Attack
+    # Graph. Independent of frontier_id (different namespaces); the
+    # leader can pass either, both, or neither depending on which graph
+    # surfaced the recommendation.
+    raw_experiment_id = args.get("experiment_id") or ctx.active_experiment_id or None
+    experiment_id = _auto_bind_experiment_id(ctx, fn_name, raw_experiment_id)
+    if experiment_id and experiment_id != raw_experiment_id:
+        log(
+            LogEvent.BELIEF_DELTA.value,
+            f"auto-bound {fn_name} to belief experiment {experiment_id}",
+        )
     approach = args.get("instruction", fn_name)[:100]
 
     # If the leader made a FRESH attempt (no frontier_id) but a
@@ -70,12 +116,30 @@ async def handle(
                 "tier": tier,
                 "max_turns": sub_max_turns,
                 "frontier_id": frontier_id,
+                "experiment_id": experiment_id,
                 "instruction": sub_instruction,
             },
             sort_keys=True,
             default=str,
         ),
     )
+
+    if experiment_id and ctx.belief_graph is not None:
+        from mesmer.core.belief_graph import FrontierExperiment, FrontierUpdateStateDelta
+        from mesmer.core.constants import ExperimentState
+        from mesmer.core.errors import InvalidDelta
+
+        if isinstance(ctx.belief_graph.nodes.get(experiment_id), FrontierExperiment):
+            try:
+                ctx.belief_graph.apply(
+                    FrontierUpdateStateDelta(
+                        experiment_id=experiment_id,
+                        state=ExperimentState.EXECUTING,
+                        run_id=ctx.run_id,
+                    )
+                )
+            except InvalidDelta as e:
+                log(LogEvent.BELIEF_DELTA.value, f"frontier-executing rejected: {e}")
 
     # --- Sibling roster injection (see_siblings / call_siblings) ---
     # Look up this sub-module's entry config in the leader's sub_modules list.
@@ -99,7 +163,17 @@ async def handle(
     # the messages that THIS sub-module added
     turns_before = len(ctx.turns)
 
-    result = await ctx.run_module(fn_name, sub_instruction, sub_max_turns, log=log)
+    import inspect as _inspect
+
+    run_kwargs = {"log": log}
+    try:
+        params = _inspect.signature(ctx.run_module).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "active_experiment_id" in params:
+        run_kwargs["active_experiment_id"] = experiment_id or ctx.active_experiment_id
+
+    result = await ctx.run_module(fn_name, sub_instruction, sub_max_turns, **run_kwargs)
     log(LogEvent.DELEGATE_DONE.value, f"← {fn_name}: {result}")
 
     # Auto-write the sub-module's conclude() text onto the run's
@@ -117,6 +191,17 @@ async def handle(
     # per-turn error flags so the judge can ignore pipeline
     # glitches (P4).
     sub_turns = ctx.turns[turns_before:]
+    already_extracted = getattr(ctx, "_belief_evidence_turn_indexes", set())
+    extractor_sent: list[str] = []
+    extractor_recv: list[str] = []
+    for offset, turn in enumerate(sub_turns):
+        absolute_idx = turns_before + offset
+        if absolute_idx in already_extracted:
+            continue
+        if getattr(turn, "is_error", False):
+            continue
+        extractor_sent.append(turn.sent)
+        extractor_recv.append(turn.received)
 
     # --- Judge the attempt ---
     judge_result = await _judge_module_result(
@@ -145,6 +230,27 @@ async def handle(
         # a module" story: a profiler's output is just its conclude().
         module_output=result,
         frontier_id=frontier_id,
+    )
+
+    # Mirror the attempt into the typed Belief Attack Graph and run the
+    # post-attempt belief pipeline (extractor → confidence updates →
+    # frontier rank). No-op when ``ctx.belief_graph`` is None — legacy
+    # callers that build a Context directly (most of the test suite)
+    # won't pay the LLM cost. Failures are caught inside
+    # ``_update_belief_graph`` so a flaky extractor doesn't kill the run.
+    await _update_belief_graph(
+        ctx,
+        fn_name,
+        approach,
+        judge_result,
+        log,
+        messages_sent=[t.sent for t in sub_turns],
+        target_responses=[t.received for t in sub_turns],
+        module_output=result,
+        experiment_id=experiment_id,
+        available_modules=module.sub_module_names if module.sub_modules else None,
+        extractor_messages_sent=extractor_sent,
+        extractor_target_responses=extractor_recv,
     )
 
     # --- Reflect + generate frontier ---

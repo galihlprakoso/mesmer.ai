@@ -6,6 +6,8 @@ Mesmer uses cognitive science — linguistics, psychology, social engineering �
 
 It gets **smarter with every run.** A persistent per-target attack graph remembers what worked, what failed, and what to try next. Dead ends are never re-walked. Promising leads are deepened. Human insights get priority.
 
+Built during the Opus 4.7 hackathon, Mesmer uses Claude Opus 4.7 as more than a code assistant: it helped shape the planner vocabulary the system thinks in — falsifiable weakness hypotheses, structured evidence, confidence shifts, and utility-ranked next experiments.
+
 ## Why mesmer?
 
 Existing tools fire payloads at models and check outputs. They're fuzzers.
@@ -21,6 +23,21 @@ Mesmer is different. It **thinks**. Each module is an autonomous agent grounded 
 | Memory | None | None | **Per-target persistent graph** |
 | Human-in-the-loop | None | None | **`--hint`, `debrief`** |
 
+## Built with Opus 4.7
+
+Mesmer was developed with Claude Opus 4.7 as a co-architect for the parts of the project that require judgment, not just autocomplete. The core question was: *what should an LLM red-team agent remember between attempts so it gets better instead of just longer?*
+
+Opus 4.7 helped turn that question into Mesmer's internal reasoning language:
+
+- **Hypotheses** — falsifiable claims about how a target may break.
+- **Evidence** — structured signals extracted from target replies, such as `partial_compliance`, `refusal_template`, `tool_reference`, or `hidden_instruction_fragment`.
+- **Belief updates** — confidence shifts that promote a hypothesis to `CONFIRMED` or prune it as `REFUTED`.
+- **Frontier experiments** — ranked next moves that connect a belief to a concrete attack module.
+
+The result is a system that does not just ask Claude to write payloads. It uses Claude's reasoning strengths to design a planner that can observe, remember, and adapt across runs. The runtime itself stays provider-agnostic through LiteLLM, but Opus 4.7 was the model used to reason through the architecture, module vocabulary, prompts, tests, and demo flow.
+
+Mesmer is intended for authorized AI safety testing: local demo targets, owned systems, benchmark scenarios, and explicit operator-controlled targets.
+
 ## Quick start
 
 ```bash
@@ -31,7 +48,7 @@ uv sync
 pip install -e .
 
 # Set your API key
-export OPENROUTER_API_KEY=your-key-here
+export ANTHROPIC_API_KEY=your-key-here
 
 # Run an attack scenario
 mesmer run scenarios/extract-system-prompt.yaml --verbose
@@ -51,19 +68,26 @@ mesmer stats
 
 ## How it works
 
-**Every module is a ReAct agent. Every run builds an attack graph.**
+**Every module is a ReAct agent. Every run builds two graphs in parallel — an attack graph (attempt history) and a belief graph (typed planner state).**
 
 ```
-Plan → Execute → Judge → Reflect → Update
+Plan → Execute → Judge → Extract → Update → Reflect
 
-1. PLAN    — Agent sees: attack graph state, dead ends, frontier nodes, budget mode
-2. EXECUTE — Picks a cognitive technique, sends crafted messages to target
+1. PLAN    — Agent sees: ranked frontier experiments, hypothesis confidences,
+             dead ends, scratchpad, budget mode
+2. EXECUTE — Dispatches the manager bound to the highest-utility experiment
 3. JUDGE   — Separate LLM call scores the attempt 1-10, extracts insights
-4. REFLECT — Generates 1-3 frontier nodes (suggested next moves to explore)
-5. UPDATE  — Graph persisted to ~/.mesmer/targets/{hash}/graph.json
+4. EXTRACT — Judge model tags structured evidence on the target's reply
+             (refusal_template, hidden_instruction_fragment, partial_compliance, …)
+5. UPDATE  — Evidence shifts hypothesis confidence; thresholds (0.85 / 0.15)
+             flip status to CONFIRMED / REFUTED. Frontier re-ranks. Both graphs
+             persist to ~/.mesmer/targets/{hash}/
+6. REFLECT — Per-attempt: strategy stats bumped; hypotheses regenerated when
+             stale. Per target reply: per-send extraction runs the same loop
+             mid-attempt so the leader sees belief shifts inside the ReAct loop.
 ```
 
-On the next run, the agent loads the graph, skips dead ends, and starts from the highest-priority frontier. It gets smarter with every execution.
+On the next run, the agent loads both graphs, skips dead ends, inherits prior beliefs, and starts from the highest-utility frontier experiment. It gets smarter with every execution.
 
 ```
 system-prompt-extraction (leader)
@@ -99,6 +123,8 @@ Finding a vulnerability is a **search problem.** Mesmer treats it as one — a p
 ```
 
 The graph persists at `~/.mesmer/targets/{hash}/`. No database, no embeddings — just JSON on disk.
+
+Alongside that attempt log, mesmer maintains a typed **belief graph** at the same path (`belief_graph.json` + an append-only `belief_deltas.jsonl` audit log). Six node kinds — target, weakness hypothesis, evidence, attempt, strategy, frontier experiment — and an 8-component utility ranker that picks the next move using UCB-with-lookahead instead of attempt-tree heuristics. The web UI's *Belief Map* toggle renders it live, hypothesis circles sized by confidence and frontier squares sized by utility. Strategies that work fold into a cross-target library at `~/.mesmer/global/strategies.json` so a fresh target's hypotheses inherit prior wins.
 
 ## Human-in-the-loop
 
@@ -185,11 +211,15 @@ objective:
     - "system prompt"
     - "instructions"
 
-module: system-prompt-extraction
+modules:
+  - system-prompt-extraction
 
 agent:
-  model: openrouter/anthropic/claude-sonnet-4-20250514  # any LiteLLM model string
-  api_key: "${OPENROUTER_API_KEY}"  # supports comma-separated for rotation
+  # Executive + manager modules use Opus 4.7.
+  model: anthropic/claude-opus-4-7
+  # Employee / leaf sub-modules use Haiku 4.5.
+  sub_module_model: anthropic/claude-haiku-4-5
+  api_key: "${ANTHROPIC_API_KEY}"
   temperature: 0.7
 ```
 
@@ -201,18 +231,25 @@ Uses [LiteLLM](https://github.com/BerriAI/litellm) — model string prefix deter
 
 ```yaml
 agent:
-  model: openrouter/nvidia/nemotron-3-super-120b-a12b:free  # OpenRouter
-  model: anthropic/claude-sonnet-4-20250514                  # Anthropic direct
-  model: openai/gpt-4o                                       # OpenAI
-  model: gemini/gemini-2.0-flash                             # Google
-  model: ollama/llama3                                        # Local Ollama
+  # Claude Opus 4.7 for executive + manager roles:
+  model: anthropic/claude-opus-4-7
+
+  # Claude Haiku 4.5 for lower-level sub-modules:
+  sub_module_model: anthropic/claude-haiku-4-5
+
+  # Other supported examples:
+  # model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+  # model: anthropic/claude-sonnet-4-20250514
+  # model: openai/gpt-4o
+  # model: gemini/gemini-2.0-flash
+  # model: ollama/llama3
 ```
 
-Comma-separated API keys rotate round-robin across all LLM calls (leader, judge, reflection):
+Mesmer uses a single configured API key per run. It does not rotate across multiple provider keys:
 
 ```yaml
 agent:
-  api_key: "${KEY1},${KEY2},${KEY3},${KEY4}"
+  api_key: "${ANTHROPIC_API_KEY}"
 ```
 
 ## Target adapters
@@ -227,37 +264,37 @@ agent:
 ## Benchmarks
 
 Mesmer ships a reproducible benchmark suite so claims in this README are
-numbers, not vibes. Each spec binds one module to one real public dataset,
-fires trials against a list of target models, and writes a versioned JSONL
-+ summary.json + Markdown table.
+numbers, not vibes. Each spec binds one or more manager modules to one
+real public dataset, fires trials against a list of target models, and
+writes a versioned JSONL + summary.json + Markdown table.
 
 ```bash
 # Fast smoke (2-3 rows, 1 trial):
-uv run mesmer bench benchmarks/specs/tensor-trust-extraction-smoke.yaml
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --sample 3 --trials 1
 
 # Iteration run on the full spec (50 rows × 3 trials):
-uv run mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml --sample 50
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --sample 50
 
 # Publication run (full dataset):
-uv run mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --sample 0
 ```
 
 ### Current specs
 
-| Spec | Module | Dataset | Rows |
+| Spec | Modules | Dataset | Rows |
 |---|---|---|---|
-| [`tensor-trust-extraction-v1`](benchmarks/specs/tensor-trust-extraction-v1.yaml) | `system-prompt-extraction` | [Tensor Trust extraction-robustness v1](benchmarks/datasets/README.md#tensor-trust--extraction_robustness_datasetjsonl) (ICLR 2024) | 569 real player-crafted defenses |
+| [`tensor-trust-extraction`](benchmarks/specs/tensor-trust-extraction.yaml) | `target-profiler`, `system-prompt-extraction` | [Tensor Trust extraction-robustness v1](benchmarks/datasets/README.md#tensor-trust--extraction_robustness_datasetjsonl) (ICLR 2024) | 569 real player-crafted defenses |
 
 Every spec has **two arms**:
 
 - **mesmer** — the full multi-turn ReAct loop attacks the defense (that's the product under test).
 - **baseline** — the dataset's own single-turn `attack` field is replayed against the same target. Apples-to-apples control, so the published delta (*"multi-turn mesmer +33pp over single-turn baseline"*) is a meaningful scientific claim rather than a marketing one.
 
-Judging is **deterministic** — a ~40-line canary-substring matcher in
-[`mesmer/bench/canary.py`](mesmer/bench/canary.py) with full
-unit-test coverage. The in-loop LLM judge guides mesmer's next move but
-does **not** decide benchmark success. Datasets are SHA-pinned, model
-snapshots are pinned, seeds are committed. Full reproducibility contract:
+Judging is **deterministic** — the spec's `judge:` block selects a
+code scorer such as `substring` or `regex`. The in-loop LLM judge guides
+mesmer's next move but does **not** decide benchmark success. Datasets
+are SHA-pinned, model snapshots are pinned, seeds are committed. Full
+reproducibility contract:
 [`benchmarks/README.md`](benchmarks/README.md).
 
 ### Published results
@@ -273,22 +310,34 @@ some API credit._
 ```
 mesmer/
 ├── core/                    # attacker runtime — agent consumes scenario/runner
-│   ├── agent/               # ReAct loop + tools + judge + compressor + memory
-│   │   ├── engine.py        # run_react_loop — Plan→Execute→Judge→Reflect→Update
+│   ├── agent/               # ReAct loop + tools + judge + belief layer + memory
+│   │   ├── engine.py        # run_react_loop — Plan→Execute→Judge→Extract→Update→Reflect
 │   │   ├── tools/           # one file per tool (send_message, ask_human, …)
 │   │   ├── judge.py         # in-loop LLM judge (scores attempts 1-10)
+│   │   ├── evidence.py      # evidence extractor (judge-model LLM call → typed Evidence)
+│   │   ├── beliefs.py       # generate_hypotheses + apply_evidence + rank_frontier +
+│   │   │                     #   generate_frontier_experiments + select_next_experiment
+│   │   │                     #   (UCB-with-lookahead)
+│   │   ├── graph_compiler.py # GraphContextCompiler — role-scoped belief brief
+│   │   │                     #   (LEADER / MANAGER / EMPLOYEE / JUDGE / EXTRACTOR)
 │   │   ├── compressor.py    # CONTINUOUS-mode summary-buffer compression
 │   │   ├── context.py       # shared state, LiteLLM completion, telemetry
 │   │   ├── memory.py        # per-target persistence
 │   │   └── prompts/         # prose prompt text (.prompt.md)
-│   ├── graph.py             # persistent per-target attack graph + frontier proposer
+│   ├── graph.py             # legacy per-target attack graph (attempt history)
+│   ├── belief_graph.py      # typed planner state — TargetNode / WeaknessHypothesis /
+│   │                         #   Evidence / Attempt / Strategy / FrontierExperiment,
+│   │                         #   GraphDelta mutation contract, JSONL audit log
+│   ├── strategy_library.py  # cross-target lifelong strategy library
 │   ├── runner.py            # execute_run — shared CLI/web/bench entry point
 │   ├── scenario.py          # YAML scenario loader with ${ENV_VAR} resolution
 │   ├── module.py            # ModuleConfig + YAML loader
 │   ├── registry.py          # module auto-discovery
-│   ├── keys.py              # API key rotation
-│   ├── constants.py         # enums (ToolName, TurnKind, ScenarioMode, …)
-│   └── errors.py            # MesmerError hierarchy
+│   ├── keys.py              # Single-key throttling helpers
+│   ├── constants.py         # enums (ToolName, ScenarioMode, HypothesisStatus,
+│   │                         #   EvidenceType, ExperimentState, BeliefRole, …)
+│   └── errors.py            # MesmerError hierarchy (incl. InvalidDelta,
+│                              #   EvidenceExtractionError, HypothesisGenerationError)
 ├── bench/                   # benchmark infrastructure (consumes core)
 │   ├── orchestrator.py      # spec loader, trial dispatch, aggregation, artifacts
 │   └── canary.py            # deterministic substring judge (benchmark success)

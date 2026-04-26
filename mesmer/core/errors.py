@@ -91,7 +91,7 @@ class ThrottleTimeout(MesmerError):
     throttle's ``max_wait_seconds`` budget.
 
     Carries ``gate`` — which constraint blocked us (``"max_concurrent"``,
-    ``"max_rpm"``, or ``"all_keys_cooled"``) — so ``execute_run``'s error
+    ``"max_rpm"``) — so ``execute_run``'s error
     surfacing gives operators an actionable message instead of a silent
     0-turn trial.
     """
@@ -100,3 +100,58 @@ class ThrottleTimeout(MesmerError):
         self.gate = gate
         self.waited_s = waited_s
         super().__init__(f"throttle timeout at gate={gate} after {waited_s:.1f}s")
+
+
+# --- Belief Attack Graph (Session 1) ---
+
+class BeliefGraphError(MesmerError):
+    """Base for failures inside :mod:`mesmer.core.belief_graph` and the
+    extractor / updater pipeline that feeds it."""
+
+
+class InvalidDelta(BeliefGraphError):
+    """A :class:`mesmer.core.belief_graph.GraphDelta` failed validation
+    when applied — references a node that doesn't exist, declares an
+    unknown enum value, or violates the edge-endpoint contract.
+
+    Carries the delta ``kind`` and a one-line ``reason`` so the boundary
+    catch (typically the engine's per-iteration update) can log
+    actionable context. The whole delta payload is intentionally NOT
+    captured here — it can be huge (full attempt transcripts) and
+    ``logger.exception`` would dump it. Callers that need the full
+    payload should hold the delta object alongside the raise site.
+    """
+
+    def __init__(self, kind: str, reason: str):
+        self.kind = kind
+        self.reason = reason
+        super().__init__(f"invalid belief-graph delta kind={kind!r}: {reason}")
+
+
+class EvidenceExtractionError(BeliefGraphError):
+    """The evidence extractor's LLM call failed or returned unparseable
+    JSON.
+
+    ``reason`` is short and human-readable; ``cause`` carries the
+    underlying exception when one was raised by litellm or the JSON
+    parser. Caught at the engine boundary — extraction is best-effort,
+    a failure does NOT abort the run, it just leaves the iteration's
+    evidence empty.
+    """
+
+    def __init__(self, reason: str, *, cause: BaseException | None = None):
+        self.reason = reason
+        self.cause = cause
+        super().__init__(reason)
+
+
+class HypothesisGenerationError(BeliefGraphError):
+    """The hypothesis generator's LLM call failed or returned unparseable
+    JSON. Same boundary behaviour as :class:`EvidenceExtractionError` —
+    a failure leaves the existing hypothesis set unchanged for this
+    iteration."""
+
+    def __init__(self, reason: str, *, cause: BaseException | None = None):
+        self.reason = reason
+        self.cause = cause
+        super().__init__(reason)

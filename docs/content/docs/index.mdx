@@ -18,19 +18,21 @@ attack can't adapt to a defense it hasn't seen. Mesmer treats attack
 generation as a **search problem over cognitive space**: explore,
 exploit, prune, remember.
 
-<Mermaid caption="The top-level loop." chart={`
+<Mermaid caption="The top-level loop. Every UPDATE step writes to two graphs in parallel — the legacy attack graph (attempt history) and the typed belief graph (planner state)." chart={`
 flowchart LR
   P([PLAN]) --> E([EXECUTE])
   E --> J([JUDGE])
-  J --> U([UPDATE])
+  J --> X([EXTRACT<br/>EVIDENCE])
+  X --> U([UPDATE<br/>BELIEFS + RANK])
   U --> R([REFLECT])
   R --> P
   U --> G[(Attack graph<br/>~/.mesmer/)]
+  U --> B[(Belief graph<br/>~/.mesmer/)]
 
   classDef step fill:#141A17,stroke:#00D67A,color:#E6EDE8;
   classDef store fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8;
-  class P,E,J,U,R step;
-  class G store;
+  class P,E,J,X,U,R step;
+  class G,B store;
 `} />
 
 Every module execution is recorded as an `AttackNode` — including the
@@ -38,6 +40,15 @@ synthesised executive's run-end verdict. The frontier proposer
 respects the **TAPER tier ladder** (T0 naive → T1 structural → T2
 cognitive → T3 composed), so simple moves get tried before expensive
 ones, and wins are attributable to the cheapest technique that worked.
+
+Alongside that legacy log, mesmer maintains a typed
+[**belief graph**](/docs/concepts/belief-graph): weakness hypotheses
+gain or lose confidence as the judge model extracts structured
+evidence from each target reply, and a deterministic
+[utility-ranked frontier](/docs/concepts/frontier-and-utility) names
+the next move. The web UI's
+[Belief Map view](/docs/recipes/reading-the-belief-map) renders this
+state live.
 
 ## What you can do today
 

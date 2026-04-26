@@ -1,10 +1,9 @@
-"""API key rotation + throttle.
+"""API key throttling helpers.
 
 This module owns everything about managing a bag of API keys:
 
-  * :class:`KeyPool` — round-robin rotation with per-key cooldown. Rate-limit
-    errors mark a specific key cooled via :meth:`KeyPool.cool_down`;
-    :meth:`KeyPool.next` skips cooled keys until their window expires.
+  * :class:`KeyPool` — a single configured API key plus optional throttle.
+    Mesmer intentionally does not rotate across multiple provider keys.
   * :class:`ThrottleConfig` — declarative rate limiter attached to a pool.
     Caps requests-per-minute and in-flight concurrency, and — when
     ``max_wait_seconds > 0`` — blocks ``acquire()`` on saturation instead
@@ -14,9 +13,7 @@ This module owns everything about managing a bag of API keys:
     in the trial's JSONL row rather than disappearing as "turns=0".
   * :func:`get_or_create_pool` — process-level cache keyed by the sorted
     tuple of API keys. Lets sibling bench trials that share the same keys
-    share a single throttle (otherwise a 4-trial concurrency setting
-    would create 4 independent 60-rpm limiters, and the per-process cap
-    would be 4× what the operator declared).
+    share a single throttle.
 """
 
 from __future__ import annotations
@@ -114,25 +111,19 @@ class KeyStatus:
 
 
 class KeyPool:
-    """Round-robin API key pool with per-key cooldown + optional throttle.
+    """Single API key holder with optional throttle.
 
-    Two concerns collapsed into one object because they share state:
+    The object intentionally does not rotate across keys. It exists so the
+    runner can share one throttle across concurrent calls that use the same
+    configured key.
 
-      * **Rotation + cooldown** (sync, pre-existing): ``next()`` returns the
-        next non-cooled key or None. Rate-limit errors call
-        ``cool_down(key, until_ts)``. Thread-safe — the bench harness
-        dispatches trials in threads + asyncio.
-
-      * **Throttle** (async, new): ``acquire()`` enforces
+      * ``acquire()`` enforces
         :attr:`ThrottleConfig.max_concurrent` (via :class:`asyncio.Semaphore`)
         and :attr:`ThrottleConfig.max_rpm` (via a 60-second sliding window)
-        before a completion call goes out. When every key is cooled, it
-        waits for the earliest cooldown to lift — capped by
-        ``max_wait_seconds`` — so transient 429 bursts don't produce
-        silent 0-turn trials. A timeout raises :class:`ThrottleTimeout`;
-        :meth:`mesmer.core.runner.execute_run` catches it into a
-        ``"Error: ..."`` result that the bench orchestrator surfaces
-        into the trial's JSONL ``error`` field.
+        before a completion call goes out. A timeout raises
+        :class:`ThrottleTimeout`; :meth:`mesmer.core.runner.execute_run`
+        catches it into an ``"Error: ..."`` result that the bench
+        orchestrator surfaces into the trial's JSONL ``error`` field.
     """
 
     def __init__(
@@ -141,12 +132,8 @@ class KeyPool:
         *,
         throttle: ThrottleConfig | None = None,
     ):
-        self._keys: list[str] = [k.strip() for k in (keys or []) if k.strip()]
-        self._index = 0
-        # key → unix-seconds until (0 / absent = active)
-        self._cooldown: dict[str, float] = {}
-        # key → reason for cooldown (for UI/log)
-        self._reasons: dict[str, str] = {}
+        cleaned = [k.strip() for k in (keys or []) if k.strip()]
+        self._keys: list[str] = cleaned[:1]
         self._lock = threading.Lock()
 
         # Throttle state. A None throttle disables throttling entirely
@@ -170,13 +157,11 @@ class KeyPool:
         *,
         throttle: ThrottleConfig | None = None,
     ) -> "KeyPool":
-        multi = os.environ.get(env_multi, "")
-        if multi:
-            return cls(
-                [k.strip() for k in multi.split(",") if k.strip()],
-                throttle=throttle,
-            )
         single = os.environ.get(env_single, "")
+        if not single:
+            # Legacy compatibility: if an old multi-key env var exists, use
+            # only the first value. Do not create a rotating pool.
+            single = os.environ.get(env_multi, "").split(",", 1)[0]
         return cls([single] if single.strip() else [], throttle=throttle)
 
     # --- core rotation ---
@@ -194,68 +179,32 @@ class KeyPool:
         return self._throttle
 
     def active_count(self) -> int:
-        """Number of keys that are currently NOT in cooldown."""
-        now = time.time()
-        return sum(1 for k in self._keys if self._cooldown.get(k, 0.0) <= now)
+        """Number of configured keys. Kept for UI compatibility."""
+        return len(self._keys)
 
     def next(self) -> str | None:
-        """Return the next key whose cooldown has expired.
-
-        Cycles through all keys once; returns None if every key is cooled down.
-        """
-        if not self._keys:
-            return None
-        now = time.time()
-        with self._lock:
-            n = len(self._keys)
-            for _ in range(n):
-                idx = self._index % n
-                self._index += 1
-                key = self._keys[idx]
-                if self._cooldown.get(key, 0.0) <= now:
-                    return key
-            # All keys cooled
-            return None
+        """Return the single configured key, if any."""
+        return self._keys[0] if self._keys else None
 
     def cool_down(self, key: str, until_ts: float, reason: str = "") -> None:
-        """Mark `key` as cooled until `until_ts` (unix seconds)."""
-        if not key or key not in self._keys:
-            return
-        with self._lock:
-            # Never shorten an existing cooldown
-            prior = self._cooldown.get(key, 0.0)
-            self._cooldown[key] = max(prior, until_ts)
-            if reason:
-                self._reasons[key] = reason
+        """Deprecated no-op. API key cooldown/rotation is disabled."""
+        _ = key, until_ts, reason
 
     def clear_expired(self) -> None:
-        """Drop expired cooldowns from the table. Purely for hygiene."""
-        now = time.time()
-        with self._lock:
-            for k in list(self._cooldown.keys()):
-                if self._cooldown[k] <= now:
-                    del self._cooldown[k]
-                    self._reasons.pop(k, None)
+        """Deprecated no-op."""
 
     def earliest_cooldown(self) -> float:
-        """Unix seconds of the nearest-future cooldown expiry, 0 if none set."""
-        now = time.time()
-        with self._lock:
-            future = [t for t in self._cooldown.values() if t > now]
-        return min(future) if future else 0.0
+        """Deprecated compatibility hook; cooldowns are disabled."""
+        return 0.0
 
     def status(self) -> list[KeyStatus]:
         """Snapshot of each key's state (for UI display)."""
-        now = time.time()
         out: list[KeyStatus] = []
         for k in self._keys:
-            cooled = self._cooldown.get(k, 0.0)
-            if cooled <= now:
-                cooled = 0.0
             out.append(KeyStatus(
                 masked=_mask(k),
-                cooled_until=cooled,
-                reason=self._reasons.get(k, "") if cooled else "",
+                cooled_until=0.0,
+                reason="",
             ))
         return out
 
@@ -326,9 +275,6 @@ class KeyPool:
                 assert self._rpm_lock is not None  # ensured above
                 await self._rpm_gate(cfg, logger)
 
-            # 3. Cooldown wall
-            if self.has_keys and self.active_count() == 0:
-                await self._cooldown_gate(cfg, logger)
         except ThrottleTimeout:
             self.release()
             raise
@@ -371,37 +317,6 @@ class KeyPool:
                 self._request_times.popleft()
             self._request_times.append(now)
 
-    async def _cooldown_gate(self, cfg: ThrottleConfig, log: LogFn) -> None:
-        """Wait for at least one key's cooldown to expire.
-
-        The sentinel case that produced problem 2: all keys are cooled at
-        once. Pre-throttle behaviour was to return None from the completion
-        wrapper and let the loop fall out with zero turns. Here we wait
-        for the earliest cooldown (capped by ``max_wait_seconds``) and
-        raise a typed error if we give up — which ``execute_run`` catches
-        into ``result.result = "Error: ..."`` so the bench orchestrator's
-        existing error-surfacing path populates the JSONL error field.
-        """
-        t0 = time.monotonic()
-        while self.has_keys and self.active_count() == 0:
-            earliest = self.earliest_cooldown()
-            wait = max(0.0, earliest - time.time())
-            if wait <= 0:
-                return
-            remaining = cfg.max_wait_seconds - (time.monotonic() - t0)
-            if cfg.max_wait_seconds <= 0 or remaining <= 0:
-                raise ThrottleTimeout(
-                    "all_keys_cooled",
-                    waited_s=time.monotonic() - t0,
-                )
-            sleep_for = min(wait, remaining)
-            log(
-                LogEvent.THROTTLE_WAIT.value,
-                f"all {self.total} keys cooled; waiting {sleep_for:.1f}s "
-                f"for earliest recovery",
-            )
-            await asyncio.sleep(sleep_for)
-
     def release(self) -> None:
         """Return a concurrency slot taken by :meth:`acquire`.
 
@@ -426,9 +341,8 @@ class KeyPool:
 # AgentConfigs that carry the same key set onto one pool, so the throttle
 # caps are global to the key set rather than per-scenario.
 #
-# Keyed by the sorted tuple of keys (not an arbitrary scenario ID) because
-# that's what the rate-limit actually applies to — different scenarios
-# using the same OpenRouter keys share the same provider-side quota.
+# Keyed by the single configured key (not an arbitrary scenario ID) because
+# that's what the rate-limit actually applies to.
 
 _POOL_CACHE: dict[tuple[str, ...], KeyPool] = {}
 _POOL_CACHE_LOCK = threading.Lock()
@@ -450,7 +364,8 @@ def get_or_create_pool(
     Empty key lists bypass the cache — returns a fresh pool since every
     empty pool is equivalent and caching them only wastes dict entries.
     """
-    key_tuple = tuple(sorted(k.strip() for k in keys if k.strip()))
+    first_key = next((k.strip() for k in keys if k and k.strip()), "")
+    key_tuple = (first_key,) if first_key else ()
     if not key_tuple:
         return KeyPool([], throttle=throttle)
     with _POOL_CACHE_LOCK:
