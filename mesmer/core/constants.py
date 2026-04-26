@@ -56,9 +56,9 @@ class ScenarioMode(str, Enum):
     """How sub-modules relate to the target across a run.
 
     ``TRIALS`` — the default and the original mesmer model. Sub-modules are
-    independent rollouts; ``module.reset_target`` controls whether each
+    independent attempts; ``module.reset_target`` controls whether each
     sibling opens a fresh target session. Good against stateless or
-    session-scoped targets; MCTS-style exploration assumes each node is a
+    session-scoped targets; the frontier proposer assumes each node is a
     comparable trial of *that technique*.
 
     ``CONTINUOUS`` — one target conversation for the whole run (and across
@@ -256,8 +256,8 @@ MAX_CONSECUTIVE_REASONING = 3
 # When the target's infrastructure glitches — rate-limit, timeout, gateway
 # error, proxy failure — the reply the adapter returns is NOT a refusal
 # from the target model. Scoring it as a refusal inflates dead-ends; worse,
-# it teaches the MCTS that whatever technique was deployed "failed" when
-# the technique never got a chance to land.
+# it teaches the frontier proposer that whatever technique was deployed
+# "failed" when the technique never got a chance to land.
 #
 # Substrings below (case-insensitive) flag a reply as a pipeline error.
 # Conservative by design — false positives would over-forgive real refusals.

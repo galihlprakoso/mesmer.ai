@@ -4,7 +4,7 @@
 
 Mesmer uses cognitive science — linguistics, psychology, social engineering — to systematically test AI safety alignment through adaptive, multi-turn attacks. Every attack module is a ReAct agent that reasons, acts, and adapts in real-time.
 
-It gets **smarter with every run.** An MCTS-inspired attack graph remembers what worked, what failed, and what to try next. Dead ends are never re-walked. Promising leads are deepened. Human insights get priority.
+It gets **smarter with every run.** A persistent per-target attack graph remembers what worked, what failed, and what to try next. Dead ends are never re-walked. Promising leads are deepened. Human insights get priority.
 
 ## Why mesmer?
 
@@ -83,7 +83,7 @@ system-prompt-extraction (leader)
 
 ## The attack graph
 
-Finding a vulnerability is a **search problem.** Mesmer applies Monte Carlo Tree Search to LLM red-teaming:
+Finding a vulnerability is a **search problem.** Mesmer treats it as one — a per-target attack graph that compounds across runs, with tier-gated frontier expansion at the technique level and score-based pruning of dead ends:
 
 ```
 [root] ─── no info yet
@@ -281,7 +281,7 @@ mesmer/
 │   │   ├── context.py       # shared state, LiteLLM completion, telemetry
 │   │   ├── memory.py        # per-target persistence
 │   │   └── prompts/         # prose prompt text (.prompt.md)
-│   ├── graph.py             # attack graph (MCTS-inspired search tree)
+│   ├── graph.py             # persistent per-target attack graph + frontier proposer
 │   ├── runner.py            # execute_run — shared CLI/web/bench entry point
 │   ├── scenario.py          # YAML scenario loader with ${ENV_VAR} resolution
 │   ├── module.py            # ModuleConfig + YAML loader

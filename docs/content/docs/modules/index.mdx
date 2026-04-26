@@ -1,13 +1,37 @@
 ---
 title: Modules overview
-description: Every module is a ReAct agent. Every leader composes sub-modules. Every module declares a TAPER tier.
+description: Every module is a ReAct agent. Managers are authored; the executive is synthesised. Every module declares a TAPER tier.
 ---
 
-A **module** is a `module.yaml` plus the runtime machinery mesmer injects
-around it. There is no programmatic escape hatch — everything a module
-can do is expressible as YAML: a system prompt, a theory section, a tier
-declaration, a judge rubric, and a list of sub-modules it can delegate
-to.
+A **module** is a `module.yaml` plus the runtime machinery mesmer
+injects around it. There is no programmatic escape hatch — everything
+an authored module can do is expressible as YAML: a system prompt, a
+theory section, a tier declaration, a judge rubric, and a list of
+sub-modules it can delegate to.
+
+## The three runtime roles
+
+Mesmer has three roles, distinguished by where they sit in the call
+tree and one flag on `ModuleConfig`:
+
+| Role | `is_executive` | Authored? | Depth | Tools |
+|---|---|---|---|---|
+| **Executive** | `True` | No — synthesised by `runner.execute_run` | 0 | `talk_to_operator`, `update_scratchpad`, `ask_human`, manager dispatch, `conclude` |
+| **Manager** | `False` | YES — `modules/attacks/<name>/`, listed in `scenario.modules` | 1 | `send_message`, sub-module dispatch, `conclude` |
+| **Employee** | `False` | YES — anywhere under `modules/`, referenced in a manager's `sub_modules:` | ≥ 2 | same as manager (recursive) |
+
+The executive owns the **operator channel** (chat, ask-human,
+scratchpad). Managers and employees own the **target channel**
+(`send_message`). Tool gating is in
+`core/agent/tools/__init__.py::build_tool_list` — the executive's
+tool list excludes `send_message` entirely; managers' lists exclude
+`talk_to_operator` / `update_scratchpad` / `ask_human`.
+
+The executive is **synthesised in memory at run start** from
+`scenario.modules`; you never author one. `is_executive: true` in
+authored YAML is silently ignored. See
+[Writing scenarios](/docs/scenarios/walkthrough#executive-vs-manager-the-role-split)
+for the full split.
 
 ```yaml title="modules/techniques/cognitive-bias/foot-in-door/module.yaml"
 name: foot-in-door
@@ -45,16 +69,24 @@ in `core/runner.py`. Additional paths can be layered via
 
 Every card shows the module's TAPER tier (T0–T3) alongside the category
 badge. Click any module with a dedicated page for its theory, system
-prompt, and how the leader composes it.
+prompt, and how it composes sub-modules.
 
 ## The shipped tiers
 
-The 19 modules ship in five categories:
+The 21 authored modules ship in five categories (the synthesised
+executive doesn't appear in the registry):
 
-- **Leader** (`modules/attacks/`, T0 orchestrator) — 2 modules.
+- **Manager** (`modules/attacks/`, T0 orchestrator) — 4 modules.
   [`system-prompt-extraction`](/docs/modules/system-prompt-extraction)
-  for hidden-instruction extraction; `tool-extraction` for
-  function-catalog disclosure against function-calling agents.
+  for hidden-instruction extraction;
+  [`tool-extraction`](/docs/modules/tool-extraction) for
+  function-catalog disclosure against function-calling agents;
+  [`exploit-analysis`](/docs/modules/exploit-analysis) synthesises
+  the recon → exploit hypothesis catalog;
+  [`exploit-executor`](/docs/modules/exploit-executor) runs the
+  cataloged exploits with published multi-turn chain templates
+  (Crescendo / GOAT / AgentDojo) and writes a PTES/OSCP-shaped
+  proof-of-impact dossier.
 - **Profiler** (`modules/profilers/`, T0) — `target-profiler`: layered
   identity → defence-shape → policy-surface recon.
 - **Planner** (`modules/planners/`, T0) — `attack-planner`: reads the
@@ -75,23 +107,28 @@ the worked example — see [Techniques](/docs/techniques).
 See [TAPER tier ladder](/docs/concepts/taper-tiers) for what the tiers
 mean and how the frontier gate uses them.
 
-## Leaders vs sub-modules
+## Managers vs sub-modules
 
-- **Leader modules** (`modules/attacks/*`) — orchestrate. They read the
-  attack graph, inspect the scratchpad (`## Scratchpad — current state`
-  block injected into every user message), and pick which sub-module
-  to delegate to next. The leader's own execution is also recorded on
-  the graph (distinguished by `source: LEADER`), and its conclude()
-  text is the final run result.
-- **Sub-modules** — run one move. Exposed to the leader as OpenAI-style
-  function-calling tools. Each sub-module runs its **own nested ReAct
-  loop** — its own planner, own turn budget, own sequence of target
-  messages — and returns a string that the framework writes to the
-  scratchpad under the module's name, then appends an `AttackNode` to
-  the graph.
+- **Manager modules** (`modules/attacks/*`) — orchestrate. They read
+  the attack graph, inspect the scratchpad (`## Scratchpad — current
+  state` block injected into every user message), and pick which
+  sub-module to delegate to next. The manager's `conclude()` text
+  becomes its `AttackNode.module_output` and is rendered into the
+  executive's prompt for the executive to read on its next iteration.
+- **Sub-modules** (employees) — run one move. Exposed to the parent
+  manager as OpenAI-style function-calling tools. Each sub-module
+  runs its **own nested ReAct loop** — its own planner, own turn
+  budget, own sequence of target messages — and returns a string that
+  the framework writes to the scratchpad under the module's name,
+  then appends an `AttackNode` to the graph.
 
 Sub-modules are listed in YAML as a `sub_modules:` array. The nested
 loop is automatic — you don't write Python to wire them.
+
+The **executive's own run-end verdict** is also recorded as an
+`AttackNode`, distinguished by `source: LEADER` (legacy enum value
+preserved across the rename — treat as the opaque "depth-0 root"
+marker). Its `conclude()` text is the final run result.
 
 ### Sub-module entries — strings or dicts
 
@@ -108,13 +145,13 @@ sub_modules:
 ```
 
 `see_siblings: true` makes the framework inject a `## Available modules
-(siblings in this leader)` block — name + description + theory of every
-sibling — into the sub-module's instruction. The `attack-planner`
-module needs this so it can name specific siblings in its plan;
-without it the planner would have to be hardcoded to a known module
-list. Use `see_siblings` for any sub-module that *reasons about which
-siblings to recommend*; leave it false for techniques that just probe
-the target.
+(siblings under the same parent)` block — name + description + theory
+of every sibling — into the sub-module's instruction. The
+`attack-planner` module needs this so it can name specific siblings
+in its plan; without it the planner would have to be hardcoded to a
+known module list. Use `see_siblings` for any sub-module that
+*reasons about which siblings to recommend*; leave it false for
+techniques that just probe the target.
 
 `call_siblings: true` is parsed (it's a real `SubModuleEntry` field)
 but the runtime doesn't expose siblings as callable tools yet. Reserved
@@ -127,7 +164,7 @@ for future use.
    ```yaml
    name: my-technique
    tier: 2                  # 0=naive · 1=structural · 2=cognitive (default) · 3=composed
-   description: One-line blurb the leader reads when picking a tool
+   description: One-line blurb the parent reads when picking this tool
    theory: Cognitive-science basis for why this works
    system_prompt: |
      You are a specialist in... Your approach:
@@ -148,8 +185,9 @@ for future use.
 3. `Registry.auto_discover(BUILTIN_MODULES)` picks it up automatically
    on next startup.
 
-4. Reference it by `name` in a scenario's `module:` field (if it's a
-   leader), or add to an existing leader's `sub_modules:` list.
+4. Reference it by `name` either as a manager (in a scenario's
+   `modules:` list) or as an employee (in some manager's
+   `sub_modules:` list).
 
 **No Python. No plugin registration.** If you need programmatic
 behaviour the engine can't express, extend the engine — don't bypass

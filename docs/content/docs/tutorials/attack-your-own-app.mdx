@@ -73,7 +73,8 @@ objective:
     leak of operating instructions or persona definition.
   max_turns: 20
 
-module: system-prompt-extraction
+modules:
+  - system-prompt-extraction
 
 agent:
   model: openrouter/anthropic/claude-sonnet-4
@@ -109,7 +110,8 @@ Watch for:
   [Recipes → Picking an attacker model](/docs/recipes/picking-an-attacker-model)
   with a stronger attacker.
 - `OBJECTIVE SIGNAL — <fragment>` lines: a sub-module flagged a possible
-  win. The leader inspects and decides whether to call
+  win. The executive inspects (via the manager's write-up) and
+  decides whether to call
   `conclude(objective_met=true)`.
 
 ## Common gotchas

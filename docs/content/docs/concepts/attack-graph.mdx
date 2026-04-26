@@ -1,6 +1,6 @@
 ---
 title: The attack graph
-description: Mesmer's per-target memory — an MCTS-inspired tree of attack attempts.
+description: Mesmer's per-target memory — a persistent tree of attack attempts that compounds across runs.
 ---
 
 Every time mesmer attacks a target, it writes the result into a graph.
@@ -12,45 +12,52 @@ ever seen and how we judged it.
 ## Shape
 
 Nodes are attack attempts (one per module execution, including the
-leader). Edges are parent-child refinements.
+synthesised executive's run-end verdict). Edges are parent-child
+refinements.
 
-<Mermaid caption="A mid-run graph against a single target." chart={`
+<Mermaid caption="A mid-run graph against a single target. The executive verdict (square) is the rendered root; managers and employees branch from it." chart={`
 flowchart TD
-  ROOT([root · target-hash])
+  EXEC[[executive verdict<br/>objective_met true · source LEADER]]
   TP[target-profiler<br/>score 6.0 · PROMISING]
-  AP[attack-planner<br/>ALIVE]
+  SPE[system-prompt-extraction<br/>manager · ALIVE]
   DA[direct-ask<br/>score 2.1 · DEAD]
   PC[prefix-commitment<br/>score 8.4 · PROMISING]
   DI[delimiter-injection<br/>score 7.2 · PROMISING]
   HH[/human hint<br/>FRONTIER · source HUMAN/]
-  LV[[leader verdict<br/>objective_met true · source LEADER]]
 
-  ROOT --> TP
-  ROOT --> AP
-  ROOT --> DA
-  AP --> PC
-  AP --> DI
-  AP --> HH
-  HH --> LV
+  EXEC --> TP
+  EXEC --> SPE
+  EXEC --> DA
+  SPE --> PC
+  SPE --> DI
+  SPE --> HH
 
   classDef promising fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8;
   classDef alive fill:#141A17,stroke:#6B7A70,color:#E6EDE8;
   classDef dead fill:#2A1414,stroke:#EF4444,color:#E6EDE8,stroke-dasharray: 4 3;
   classDef frontier fill:#141A17,stroke:#6B7A70,color:#9DB1A4,stroke-dasharray: 4 3;
-  classDef leader fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8,stroke-width:2px;
+  classDef exec fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8,stroke-width:2px;
 
   class TP,PC,DI promising;
-  class AP alive;
+  class SPE alive;
   class DA dead;
   class HH frontier;
-  class LV leader;
+  class EXEC exec;
 `} />
 
 Every module execution produces exactly **one** `AttackNode` in the
-graph. Sub-module executions are recorded by `evaluation._update_graph`
-from inside the parent's dispatch; the leader's own execution node is
-recorded by `execute_run` right after the outer ReAct loop returns, and
-distinguished by `source: LEADER` (not by a sentinel module name).
+graph. Manager and employee executions are recorded by
+`evaluation._update_graph` from inside the parent's dispatch; the
+**executive's** own run-end verdict is recorded by `execute_run` right
+after the outer ReAct loop returns, distinguished by `source: LEADER`
+(the enum value name is preserved across the leader → executive rename
+for graph-schema compatibility — treat it as the opaque "depth-0 root"
+marker).
+
+The executive is **synthesised in memory at run start** (not loaded
+from any `module.yaml`); its name is `f"{scenario_stem}:executive"`.
+Authored manager modules listed in `scenario.modules` are dispatched
+by the executive at depth 1; their employees nest at depth ≥ 2.
 
 ## Node anatomy
 
@@ -88,21 +95,28 @@ Every node has a `source` field recording who produced it:
 - **`JUDGE`** — the in-loop LLM judge surfaced it while scoring an
   attempt ("the target leaked auth context, try that angle").
 - **`HUMAN`** — came in via `mesmer hint`, `mesmer debrief`, or the web
-  UI. Explored **first** on the next run — human pattern-matching beats
-  the judge for creative leaps.
-- **`LEADER`** — the leader's own execution (one per run). Filtered out
-  of attempt-centric walks (TAPER trace, winning-module attribution)
-  via `AttackNode.is_leader_verdict`; renders as a **square** in the
-  bench viz so every tree ends on the leader's verdict, not on
-  whichever sub-module was last delegated to.
+  UI. Explored **first** by the executive on the next run — human
+  pattern-matching beats the judge for creative leaps.
+- **`LEADER`** — the **executive's** run-end verdict node (one per
+  run). The enum value name predates the leader → executive rename and
+  is preserved for graph-schema compatibility. Filtered out of
+  attempt-centric walks (TAPER trace, winning-module attribution) via
+  `AttackNode.is_leader_verdict`; renders as a **square** in the bench
+  viz so every tree ends on the executive's decision, not on whichever
+  sub-module was last delegated to.
 
 ## Persistence
 
 ```
 ~/.mesmer/targets/{hash}/
 ├── graph.json          # full node tree — the authoritative record
+├── scratchpad.md       # the executive's persistent working notes —
+│                       # written by the update_scratchpad tool AND by
+│                       # the operator chat; seeded into the executive's
+│                       # scratchpad slot at run start
+├── chat.jsonl          # append-only operator ↔ executive chat log;
+│                       # one JSON row per message
 ├── profile.md          # optional free-form human notes (hand-edited)
-├── plan.md             # optional human-authored plan
 ├── conversation.json   # CONTINUOUS-mode rolling target transcript
 └── runs/
     └── {run_id}.jsonl  # append-only Turn log per run
@@ -113,9 +127,15 @@ Different model strings hash differently, so upgrading your target
 branches into a fresh graph rather than corrupting old state.
 
 Pass `--fresh` to any `mesmer run` invocation to bypass loading the
-existing graph — useful when your target fundamentally changed and the
-old attack history is misleading. Use `mesmer graph reset <scenario>` to
-delete the file entirely (asks for confirmation first).
+existing graph and to clear the CONTINUOUS conversation. **`--fresh`
+does NOT delete `scratchpad.md`** — the executive's curated notes are
+treated as durable human-curated state. Delete it manually if you want
+a truly clean run. Use `mesmer graph reset <scenario>` to delete the
+graph file entirely (asks for confirmation first).
+
+The legacy `plan.md` file is gone; `TargetMemory.__init__` performs a
+one-shot rename of `plan.md` → `scratchpad.md` on first init of an
+existing target so old persistence directories migrate automatically.
 
 Cross-target technique stats live separately at
 `~/.mesmer/global/techniques.json` (`mesmer stats` surfaces these).

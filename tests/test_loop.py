@@ -1263,7 +1263,7 @@ class TestReflectAndExpandTraceEvents:
 
 class TestReflectAndExpandGraphFirst:
     """Integration check: _reflect_and_expand must route through
-    graph.propose_frontier (deterministic MCTS Selection) + judge.refine_approach
+    graph.propose_frontier (deterministic frontier selection) + judge.refine_approach
     (LLM writes approach for a graph-chosen module), not through the pre-P2
     generate_frontier that asked the LLM to pick the module itself.
     """

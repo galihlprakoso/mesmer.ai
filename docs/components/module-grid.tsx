@@ -56,7 +56,7 @@ export const MODULES: Module[] = [
     tier: 0,
     status: "shipped",
     description:
-      "Thin orchestration leader — runs profiler → planner → executor. Picks the right sub-module for the right plan step, never freestyles targeting.",
+      "Thin orchestration manager — runs profiler → planner → executor. Picks the right sub-module for the right plan step, never freestyles targeting.",
     icon: Layers,
     hasPage: true,
   },
@@ -67,8 +67,31 @@ export const MODULES: Module[] = [
     tier: 0,
     status: "shipped",
     description:
-      "Multi-phase tool / function-catalog extraction leader. Mirror of system-prompt-extraction, oriented toward callable-tool disclosure on agentic LLMs.",
+      "Multi-phase tool / function-catalog extraction manager. Mirror of system-prompt-extraction, oriented toward callable-tool disclosure on agentic LLMs.",
     icon: Wrench,
+    hasPage: true,
+  },
+  {
+    name: "exploit-analysis",
+    slug: "exploit-analysis",
+    category: "attack",
+    tier: 0,
+    status: "shipped",
+    description:
+      "Synthesises recon (system-prompt + tool-catalog) into a structured findings catalog across three outcome classes. Validates high-impact hypotheses and concludes with a security-team-shaped markdown report.",
+    icon: ClipboardList,
+    hasPage: true,
+  },
+  {
+    name: "exploit-executor",
+    slug: "exploit-executor",
+    category: "attack",
+    tier: 0,
+    status: "shipped",
+    description:
+      "Runs each cataloged finding with a published multi-turn chain template (Crescendo / GOAT / AgentDojo) and writes a PTES/OSCP-shaped proof-of-impact dossier. The deliverable for external disclosure.",
+    icon: Target,
+    hasPage: true,
   },
 
   // ─── PROFILERS + PLANNERS (tier 0, recon/strategy) ─────────────────

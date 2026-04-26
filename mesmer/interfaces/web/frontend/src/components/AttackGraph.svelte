@@ -269,14 +269,31 @@
   $: selectedIdRef = $selectedNode?.id ?? null
   $: {
     const s = ($scenarios || []).find(s => s.path === $selectedScenario)
-    // ``s.modules`` (plural list) is the current shape; ``s.module`` is
-    // the legacy field still emitted by older list endpoints. Pick the
-    // first manager as the canonical "leader module" label for the
-    // scenario header — multi-manager scenarios show the first.
-    const firstModule = (s && Array.isArray(s.modules) && s.modules[0])
-      || (s && s.module)
-      || ''
-    scenarioMetaRef = s ? { leaderModule: firstModule, objective: '' } : null
+    // The depth=0 module during a run is the SYNTHESIZED EXECUTIVE
+    // (named `<scenario-stem>:executive`), not the first manager in
+    // scenario.modules. The backend mints this name in
+    // runner.py::execute_run via Path(config.scenario_path).stem +
+    // ":executive"; we mirror that here so the live-run synthetic
+    // leader stub matches the leader-verdict node the backend
+    // persists at run end. Without this, reloading the page changes
+    // the displayed root (live: first manager → persisted: executive).
+    //
+    // Falls back to the first manager only when the scenario has no
+    // path (defensive — shouldn't happen in practice since scenarios
+    // are always loaded from disk by `selectedScenario`).
+    let leaderModule = ''
+    if (s) {
+      const filename = (s.path || '').split('/').pop() || ''
+      const stem = filename.replace(/\.ya?ml$/i, '')
+      if (stem) {
+        leaderModule = `${stem}:executive`
+      } else {
+        leaderModule = (Array.isArray(s.modules) && s.modules[0])
+          || s.module
+          || ''
+      }
+    }
+    scenarioMetaRef = s ? { leaderModule, objective: '' } : null
   }
 
   // Full re-render when graph structure / scenario / active set / run

@@ -248,10 +248,10 @@ class TestAttackGraphConstruction:
         )
         assert node.status == "promising"
 
-    # --- P2 graph.propose_frontier — MCTS Selection as pure code ---
+    # --- P2 graph.propose_frontier — frontier selection as pure code ---
 
     def test_propose_frontier_prefers_untried(self):
-        """Untried modules have infinite UCB — they come first."""
+        """Untried modules come first — they're the unexplored branch."""
         g = AttackGraph()
         root = g.ensure_root()
         # 'authority-bias' has been run and scored well.

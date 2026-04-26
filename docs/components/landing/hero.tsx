@@ -59,7 +59,7 @@ export function Hero() {
               <dt className="pixel-label text-[var(--color-muted-foreground)]">
                 modules
               </dt>
-              <dd className="mt-1 font-mono text-xl font-semibold">19</dd>
+              <dd className="mt-1 font-mono text-xl font-semibold">21</dd>
             </div>
             <div>
               <dt className="pixel-label text-[var(--color-muted-foreground)]">

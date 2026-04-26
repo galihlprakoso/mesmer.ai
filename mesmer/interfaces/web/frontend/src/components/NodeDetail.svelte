@@ -30,6 +30,10 @@
 
   async function fetchModuleConfig(name) {
     if (!name || name === 'leader' || name === 'root' || name === 'synthetic') return null
+    // Synthesized executive (named `<scenario-stem>:executive`) is built
+    // in-memory by runner.execute_run — never registered. The registry
+    // GET would 404. Skip the round-trip.
+    if (name.endsWith(':executive')) return null
     if (moduleCache.has(name)) return moduleCache.get(name)
     try {
       const res = await fetch(`/api/modules/${encodeURIComponent(name)}`)

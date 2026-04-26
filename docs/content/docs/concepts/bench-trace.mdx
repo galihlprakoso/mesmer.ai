@@ -26,9 +26,9 @@ callsite passes an event name from the `LogEvent` enum in
 
 | Event | Payload | Answers |
 |---|---|---|
-| `tier_gate` | `{selected_tier, escape_hatch, by_tier: {0: {live, dead_or_stale}, …}, available, tiers}` | why did the leader only see T0? |
+| `tier_gate` | `{selected_tier, escape_hatch, by_tier: {0: {live, dead_or_stale}, …}, available, tiers}` | why did the executive only see T0? |
 | `judge_verdict` | Full `JudgeResult` — `score + leaked_info + promising_angle + dead_end + suggested_next` | why did the judge score what it scored? |
-| `delegate` | `{module, tier, max_turns, frontier_id, instruction}` | what did the leader tell the sub-module to do? |
+| `delegate` | `{module, tier, max_turns, frontier_id, instruction}` | what did the executive tell the manager to do? |
 | `llm_completion` | `{role, model, elapsed_s, prompt_tokens, completion_tokens, total_tokens, n_messages, tools}` | attacker vs judge vs compressor cost mix |
 
 Every `ctx.completion` (attacker, judge, compressor) auto-emits
@@ -77,7 +77,7 @@ added for readability — the real file is one JSON object per line):
   }
 }
 
-// delegate — what the leader told the sub-module
+// delegate — what the executive told the manager
 {
   "t": 4.30,
   "event": "delegate",
@@ -159,7 +159,7 @@ produces `{stem}-viz.html` — a self-contained D3 mind-map:
   details (module, tier, score, sent messages, target responses,
   reflection, leaked info).
 - Leader verdict renders as a **square** with verdict-colored fill
-  (green = objective met, red = not) so every tree ends on the leader's
+  (green = objective met, red = not) so every tree ends on the executive's
   decision.
 - Opens offline. Pass `--offline` to inline the vendored D3 bundle
   (~280 KB) so it renders with no network.

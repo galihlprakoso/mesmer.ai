@@ -4,12 +4,30 @@ description: The scenario YAML schema, annotated against a real file.
 ---
 
 A scenario is a single YAML file describing **what you're attacking**,
-**who is doing the attacking**, and **which leader module to dispatch**.
-It's the only artifact you write to add a new attack surface.
+**who is doing the attacking**, and **which manager modules the
+synthesised executive can dispatch**. It's the only artifact you write
+to add a new attack surface.
 
 The loader lives at `core/scenario.py`. It resolves `${ENV_VAR}`
 placeholders at load time and validates into typed dataclasses
 (`Scenario`, `TargetConfig`, `AgentConfig`, `Objective`, `ThrottleConfig`).
+
+## Three runtime roles
+
+Mesmer's runtime has three roles. Scenario authors only ever name the
+middle one — the executive is synthesised, the employees are reached
+through manager `sub_modules:` lists.
+
+| Role | Authored? | Runs at | Tools |
+|---|---|---|---|
+| **Executive** | No — synthesised by the runner from `scenario.modules` | depth 0 | `talk_to_operator`, `update_scratchpad`, `ask_human`, manager-dispatch tools, `conclude` |
+| **Manager** | Yes — `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | depth 1 | `send_message`, sub-module dispatch, `conclude` |
+| **Employee** | Yes — anywhere under `modules/`, referenced via a manager's `sub_modules:` | depth ≥ 2 | same as manager (recursive) |
+
+The executive never talks to the target — it dispatches managers.
+Managers and employees never talk to the operator — only the executive
+runs that channel. See [the role split](#executive-vs-manager-the-role-split)
+below.
 
 ## Annotated example
 
@@ -50,8 +68,19 @@ objective:
     - "Response mentions specific rules like 'never discuss competitors'"
   max_turns: 20                   # per-module turn budget
 
-# ─── LEADER MODULE ──────────────────────────────────────────────────
-module: system-prompt-extraction  # leader name from the registry
+# ─── MANAGER MODULES ────────────────────────────────────────────────
+# The executive (synthesised at run start) dispatches these in order.
+# A list — even with one entry. The legacy `module: <name>` (singular)
+# is rejected by the loader; load_scenario raises ValueError.
+modules:
+  - system-prompt-extraction
+  # - tool-extraction        # chain a second manager
+  # - exploit-analysis       # synthesise a findings report at the end
+
+# Optional: override the executive's system prompt. Defaults to
+# core/agent/prompts/executive.prompt.md when unset.
+# leader_prompt: |
+#   You are the operations lead for this engagement...
 
 # ─── AGENT (attacker brain) ─────────────────────────────────────────
 agent:
@@ -230,12 +259,67 @@ target:
     Authorization: "Bearer ${WS_API_KEY}"
 ```
 
+## Multiple managers — manager chains
+
+Because `modules:` is a list, the executive can dispatch several
+managers in sequence. Each populates the scratchpad with its findings;
+later managers read what the prior ones produced.
+
+```yaml
+modules:
+  - system-prompt-extraction   # extract hidden prompt
+  - tool-extraction            # then enumerate the function catalog
+  - exploit-analysis           # then synthesise a findings report
+```
+
+`scenarios/full-redteam-report.yaml` is the canonical example —
+recon → tool catalog → analysis, single scenario.
+
+## Migration: `module:` → `modules:`
+
+The legacy single-field schema is gone. `load_scenario` raises
+`ValueError` with a one-line migration hint when it sees the legacy
+`module: <name>` field. To migrate:
+
+```yaml
+# Before
+module: system-prompt-extraction
+
+# After
+modules:
+  - system-prompt-extraction
+```
+
+A YAML carrying both `module:` and `modules:` also fails (ambiguous).
+
+## Executive vs manager: the role split
+
+The executive owns the **operator channel** (chat, ask-human,
+scratchpad). Managers own the **target channel** (`send_message`).
+The split is enforced by `core/agent/tools/__init__.py::build_tool_list`
+— at runtime the executive's tool list excludes `send_message`
+entirely, and managers' tool lists exclude `talk_to_operator` /
+`update_scratchpad` / `ask_human`.
+
+If you find yourself wanting the executive to query the target
+directly, you're trying to do a manager's job. Either author a manager
+that does it, or extend `system-prompt-extraction`'s prompt.
+
+If a manager's `system_prompt:` mentions any of the operator-only
+tools, the model will hallucinate a call that resolves to "unknown
+tool" — the operator sees nothing and the manager's iteration burns.
+Audit your manager prompts for residual operator-tool mentions.
+
 ## Where scenarios live
 
 - `scenarios/*.yaml` — shipped examples, checked into git.
   - `extract-system-prompt.yaml` — OpenAI-compatible target, TRIALS mode.
   - `extract-system-prompt-ws.yaml` — WebSocket target.
   - `extract-system-prompt-continuous.yaml` — CONTINUOUS mode variant.
+  - `extract-dvllm-tools.yaml` — `tool-extraction` against dvllm research-l1.
+  - `extract-dvllm-support-tools.yaml` — negative control: support-l1 has no tools.
+  - `extract-system-and-tools.yaml` — chained: system-prompt then tool-extraction.
+  - `full-redteam-report.yaml` — recon → analysis → catalog (three managers).
 - `scenarios/private/*.yaml` — **gitignored**. Put scenarios that
   reference real production targets here.
 

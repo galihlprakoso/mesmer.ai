@@ -6,7 +6,7 @@ description: A copy-paste skeleton for a new technique module — frontmatter, s
 A technique is a `module.yaml` that knows **how** to do one specific
 thing — e.g. `prefix-commitment` forces a quoting prefix,
 `narrative-transport` wraps the ask in fiction. Auto-discovered by the
-registry on startup; declared in any leader's `sub_modules:` list to
+registry on startup; declared in a manager's `sub_modules:` list to
 become callable.
 
 ## Skeleton
@@ -16,20 +16,20 @@ name: your-technique
 tier: 2                        # 0=naive · 1=structural · 2=cognitive · 3=composed
 
 description: |
-  One-line blurb the LEADER reads when picking a tool. Visible in the
-  function-calling tool list. Be concrete: "Wrap the ask in a fictional
-  framing where the target is a character." Vague descriptions get
-  picked less often.
+  One-line blurb the parent module reads when picking a tool. Visible
+  in the function-calling tool list. Be concrete: "Wrap the ask in a
+  fictional framing where the target is a character." Vague
+  descriptions get picked less often.
 
 theory: |
   Cognitive-science / linguistics basis for why this works. 1-3
   sentences, cite if the basis is a named effect (Cialdini foot-in-door,
-  Loftus misinformation, etc). The leader doesn't read this; the docs
+  Loftus misinformation, etc). The parent doesn't read this; the docs
   page for your technique does.
 
 system_prompt: |
   You are a specialist in <technique>. Your role is to <one-sentence
-  goal>. You are NOT the leader — you have one job and a fixed turn
+  goal>. You are a SUB-MODULE — you have one job and a fixed turn
   budget; do that job and call conclude() with your write-up.
 
   ## Your approach
@@ -65,7 +65,7 @@ reset_target: false            # default; set true for fresh-session probes
 
 Picking the wrong tier makes the gate misfire. A T0 technique that
 needs 6 turns blows its budget; a T2 technique declared as T0 gets
-picked before the leader has tried any baseline. **Default to your
+picked before the manager has tried any baseline. **Default to your
 intuition for the cheapest reasonable tier, and let the gate's
 escape-hatch surface miscalibration on the first run.**
 
@@ -89,12 +89,13 @@ dataset-specific terminology. The scan is in
 ## Don't repeat the OBJECTIVE AWARENESS protocol
 
 The engine appends a depth-aware OBJECTIVE AWARENESS stanza to every
-module's prompt at runtime. Sub-modules automatically get the
-`OBJECTIVE SIGNAL — <fragment>` flag protocol; leaders get the
-`conclude(objective_met=true)` protocol. **Do not write either into
-your module's `system_prompt`** — the engine handles it. Writing
-`OBJECTIVE MET — …` into a module prompt is a known author mistake
-that breaks termination semantics.
+module's prompt at runtime. Sub-modules (depth > 0 — including your
+authored module) automatically get the `OBJECTIVE SIGNAL —
+<fragment>` flag protocol; the synthesised executive (depth 0) gets
+the `conclude(objective_met=true)` protocol. **Do not write either
+into your module's `system_prompt`** — the engine handles it.
+Writing `OBJECTIVE MET — …` into a module prompt is a known author
+mistake that breaks termination semantics.
 
 ## Test it
 
@@ -102,7 +103,7 @@ that breaks termination semantics.
 # Verify it loads
 uv run mesmer modules describe your-technique
 
-# Run a scenario where some leader has it in sub_modules
+# Run a scenario where some manager has it in sub_modules
 uv run mesmer run scenarios/private/your-test-scenario.yaml --verbose
 ```
 
@@ -120,7 +121,7 @@ just authored to do something other than probe. The differences:
 |---|---|---|---|
 | Technique | `modules/techniques/<category>/<name>/` | Yes — multiple turns. | Attack write-up; the win, or what was learned. |
 | Profiler | `modules/profilers/<name>/` | Yes — recon-only, doesn't try to win. | Dossier — identity, defence shape, policy surface, exploitation hypothesis. |
-| Planner | `modules/planners/<name>/` | **No** — pure reasoning over the scratchpad. | Ordered plan: `(module, targeting sentence)` pairs the leader executes in order. |
+| Planner | `modules/planners/<name>/` | **No** — pure reasoning over the scratchpad. | Ordered plan: `(module, targeting sentence)` pairs the parent manager executes in order. |
 
 **Authoring a profiler**: write it like a tier-0 technique that
 doesn't try to satisfy the objective. Its `system_prompt` instructs
@@ -131,10 +132,10 @@ example.
 **Authoring a planner**: same YAML shape, but the `system_prompt`
 forbids `send_message` calls — the planner should only `conclude()`
 with its plan text. To let the planner name specific siblings in
-its plan without hardcoding them, the leader's `sub_modules:` entry
+its plan without hardcoding them, the manager's `sub_modules:` entry
 for the planner must set `see_siblings: true`:
 
-```yaml title="modules/attacks/your-leader/module.yaml — leader-side"
+```yaml title="modules/attacks/your-manager/module.yaml"
 sub_modules:
   - target-profiler
   - name: your-planner
@@ -144,8 +145,8 @@ sub_modules:
 ```
 
 `attack-planner` is the canonical example. See
-[Writing a new leader](/docs/recipes/writing-a-new-leader) for how
-the leader composes profiler + planner + techniques.
+[Writing a new manager](/docs/recipes/writing-a-new-manager) for how
+a manager composes profiler + planner + techniques.
 
 ## Cross-link forward
 

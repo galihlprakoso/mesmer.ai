@@ -14,8 +14,8 @@ mode: continuous   # one long conversation
 
 Each sub-module runs in an independent session. The target is reset
 (if the module declares `reset_target: true`) between attempts. The
-graph accumulates one `AttackNode` per attempt; the leader's verdict
-caps each run.
+graph accumulates one `AttackNode` per attempt; the executive's
+verdict caps each run.
 
 **Use when:**
 
@@ -44,7 +44,7 @@ summarising older turns into a buffer.
 - The attack depends on long-horizon rapport — `foot-in-door` and
   `narrative-transport` benefit from compounding compliance the
   target can't easily reset.
-- You want the target to forget the leader's existence and treat each
+- You want the target to forget the manager's existence and treat each
   technique as the same human.
 
 **Resource shape:** sequential — every technique reads the full

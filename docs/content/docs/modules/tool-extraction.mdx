@@ -1,0 +1,102 @@
+---
+title: tool-extraction
+description: Manager that extracts the tool / function-calling catalog of an agentic LLM target.
+---
+
+`tool-extraction` is the **manager** for function-catalog disclosure
+against agentic LLMs. It mirrors `system-prompt-extraction`'s
+recon → plan → execute shape but targets a different surface — the
+callable-function inventory, parameter schemas, and tool descriptions
+exposed by tools-using assistants.
+
+## When to use it
+
+- The target is a function-calling agent (OpenAI Tools, Anthropic
+  tool-use, Llama 3.1+ Json Tools, agent frameworks like LangChain
+  / Mastra / Vercel AI SDK).
+- You want the tool surface, not the system prompt. Many production
+  agents leak tool catalogs through pathways that don't disclose
+  their system prompt — JSON-format requests, schema-shaped probes,
+  meta-questions ("what can you help with?"), verbatim recital of
+  function definitions.
+- You want to enumerate tools before deciding whether to attack any
+  individual one. `exploit-analysis` reads the resulting catalog
+  to plan tool-scoped exploits.
+
+## When NOT to use it
+
+- The target is a bare chat without tools. There's nothing to
+  extract; the manager's probes will all dead-end.
+- You want the system prompt, not the tool catalog. Use
+  `system-prompt-extraction` instead — same shape, different target
+  surface.
+- You're chasing one specific known tool. Author a focused
+  technique; the manager's overhead isn't worth it for a known
+  single-target probe.
+
+## Sub-modules it composes
+
+The same recon → plan → execute pattern as
+`system-prompt-extraction`, but with tool-flavoured techniques in the
+execute phase:
+
+```yaml
+sub_modules:
+  - target-profiler                  # T0 recon — agentic posture, tool hints
+  - name: attack-planner
+    see_siblings: true               # planner picks the rotation
+  - direct-ask                       # T0 baseline ("what can you do?")
+  - instruction-recital              # T0 echo / repeat your tool list
+  - format-shift                     # T0 reformat as JSON / schema
+  - hallucinated-tool-probing        # T1 enumerate via "did you mean…"
+  - fake-function-injection          # T1 forge a schema, observe self-call
+  - prefix-commitment                # T1 force a tool-recital prefix
+  - delimiter-injection              # T1 mimic the tool-section markers
+  - role-impersonation               # T1 fake operator/dev role
+  # cognitive techniques — applicable, used opportunistically
+  - foot-in-door
+  - authority-bias
+  - narrative-transport
+```
+
+The two T1 techniques unique to this manager —
+[`hallucinated-tool-probing`](/docs/techniques/hallucinated-tool-probing)
+and [`fake-function-injection`](/docs/techniques/fake-function-injection)
+— exist specifically because tool-calling models leak through
+function-shaped pathways that text-disclosure techniques don't reach.
+
+## Running it
+
+```bash
+# Against a hypothetical agent endpoint
+uv run mesmer run scenarios/private/your-agent.yaml --verbose
+
+# Against the dvllm research-l1 target (canonical example)
+uv run mesmer run scenarios/extract-dvllm-tools.yaml --verbose
+
+# Negative control: dvllm support-l1 has no tools — verifies the
+# manager doesn't false-positive on a tool-less target.
+uv run mesmer run scenarios/extract-dvllm-support-tools.yaml --verbose
+```
+
+## Chained recon
+
+`scenarios/extract-system-and-tools.yaml` chains
+`system-prompt-extraction` then `tool-extraction` in one run — the
+executive dispatches both managers in order, and each populates the
+scratchpad with its findings:
+
+```yaml
+modules:
+  - system-prompt-extraction   # extract hidden prompt first
+  - tool-extraction            # then enumerate the tool catalog
+```
+
+## Related
+
+- [system-prompt-extraction](/docs/modules/system-prompt-extraction) —
+  same shape, prompt-disclosure target surface.
+- [exploit-analysis](/docs/modules/exploit-analysis) — reads the
+  extracted catalog and plans exploits against specific tools.
+- Source:
+  [`modules/attacks/tool-extraction/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/modules/attacks/tool-extraction/module.yaml)

@@ -43,9 +43,10 @@ You'll see five things scroll past in this order:
 3. `[ PHASE 1 RECON ]` — `target-profiler` writes a dossier.
 4. `[ PHASE 2 PLAN ]` — `attack-planner` reads the dossier + any prior
    wins, emits a step list.
-5. `[ PHASE 3 EXECUTE ]` — leader fires technique sub-modules in tier
-   order (T0 first), judge scores each attempt 1-10, you usually see
-   `OBJECTIVE SIGNAL` and `objective_met=true` within 3-8 turns.
+5. `[ PHASE 3 EXECUTE ]` — the `system-prompt-extraction` manager
+   fires technique sub-modules in tier order (T0 first), judge scores
+   each attempt 1-10, the executive sees the manager's write-up and
+   usually calls `conclude(objective_met=true)` within 3-8 turns.
 
 If the run aborts on a 401, you set the wrong env var. If it hangs, the
 target is rate-limiting — see [Recipes → Throttling](/docs/recipes/throttling).
@@ -72,9 +73,9 @@ uv run mesmer serve
 Visit `http://localhost:8000`. You'll see:
 
 - Your scenario in the list (left).
-- The attack graph as a D3 tree (centre) — leader as a blue diamond,
-  sub-modules as circles colour-coded by tier and status, the leader
-  verdict as a green square.
+- The attack graph as a D3 tree (centre) — the executive's verdict as
+  a green square (the rendered root), managers and employees as
+  circles colour-coded by status, frontier proposals dashed.
 - A node-detail panel (right) — click any node for the full delegate
   prompt, target turns, judge verdict, and concluded text.
 

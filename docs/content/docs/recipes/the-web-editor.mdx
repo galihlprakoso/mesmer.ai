@@ -60,19 +60,22 @@ at you, sanity-check confirmations) leave your YAML alone.
 
 ## Module picker
 
-The leader-module dropdown groups modules by registry category
-(`<optgroup>`):
+The manager picker — the form field that drives `modules:` in the
+YAML — groups modules by registry category (`<optgroup>`):
 
 ```
-attacks/      — leaders
+attacks/      — managers (system-prompt-extraction, tool-extraction,
+                exploit-analysis, exploit-executor)
 planners/     — attack-planner
 profilers/    — target-profiler
 techniques/   — every shipped technique
 ```
 
-Tier is intentionally not shown for the leader picker — leader's own
-tier doesn't drive runtime. Sub-module pickers under the leader (when
-authoring a new leader) DO show tier.
+The form supports adding multiple managers (the YAML round-trips as a
+list — the executive dispatches them in order). Tier is intentionally
+not shown for the manager picker — managers run at depth 1 and the
+executive's tier-0 framing already covers the ladder. Sub-module
+pickers under a manager (when authoring a new one) DO show tier.
 
 ## Saving
 
@@ -93,6 +96,29 @@ Save first, then click **Run attack** — the URL navigates to
 `#/scenarios/{path}` (graph view). Run controls (max turns, hints,
 `--fresh`, mode override) live in the graph-view sidebar. Editor and
 graph view are routes on the same SPA so navigation is instant.
+
+## Operator chat with the executive
+
+While a run is live, the graph view exposes two operator channels
+exclusively to the synthesised executive (managers and employees are
+sealed off — see
+[Writing scenarios](/docs/scenarios/walkthrough#executive-vs-manager-the-role-split)):
+
+| Panel | Endpoint | Behaviour |
+|---|---|---|
+| **Chat** | `POST /api/leader-chat` (push) · `GET /api/chat` (history tail) | Non-blocking. Operator sends a message; it lands on `ctx.operator_messages` and the executive drains it at the top of the next ReAct iteration. Executive replies via `talk_to_operator` (emits `OPERATOR_REPLY`, persisted to `chat.jsonl`). |
+| **Scratchpad** | `GET /api/scratchpad` · `PUT /api/scratchpad` | Operator can read or rewrite the executive's persistent working notes (`scratchpad.md`). Edits via the executive's `update_scratchpad` tool emit `SCRATCHPAD_UPDATED`. |
+
+Use the chat for status updates, course-correction, "I see X, try Y"
+nudges. Use the scratchpad for hand-curated working notes that should
+survive into the next run (`--fresh` does not delete the scratchpad).
+Hints (`PATCH /api/frontier`) remain the right channel for "explore
+this specific frontier node first" — those persist in the graph and
+are explored ahead of agent / judge frontier nodes.
+
+The `ContextMode.AUTONOMOUS` / `CO_OP` distinction no longer exists.
+Every executive has these channels available; whether the operator
+engages them is purely a UI choice.
 
 ## What you can't do (yet)
 

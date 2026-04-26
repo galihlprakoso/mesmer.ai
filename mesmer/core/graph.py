@@ -1,7 +1,16 @@
-"""Attack Graph — MCTS-inspired search structure for LLM red-teaming.
+"""Attack Graph — persistent per-target memory of attack attempts + frontier proposer.
 
-Every attack attempt is a node. Dead ends are remembered. Promising leads
-are deepened. The agent never re-walks an explored path.
+Every attack attempt is a node. Dead ends are remembered (score ≤ DEAD
+threshold). Promising leads are deepened (score ≥ PROMISING threshold).
+The frontier proposer picks the next move via tier-gated selection
+(simple-before-complex, not UCB) and reads off prior nodes to avoid
+re-walking explored paths.
+
+This is NOT MCTS — there's no UCT/UCB selection rule, no rollouts, no
+backpropagation of values up the tree. It's a scored attack-attempt
+graph with a deterministic frontier proposer. The compounding-across-
+runs property comes from on-disk persistence at
+``~/.mesmer/targets/{hash}/graph.json``, not from a search algorithm.
 """
 
 from __future__ import annotations
@@ -445,7 +454,7 @@ class AttackGraph:
         self._auto_classify(node)
         return node
 
-    # --- frontier proposal (P2, MCTS Selection phase) ---
+    # --- frontier proposal — deterministic next-move selection ---
 
     def propose_frontier(
         self,
@@ -458,8 +467,8 @@ class AttackGraph:
     ) -> list[dict]:
         """Rank available modules for the next frontier expansion.
 
-        This is the MCTS Selection step made deterministic: the LLM no longer
-        picks which technique to try, the graph does. Rules, in priority order:
+        Deterministic next-move selection — the LLM no longer picks which
+        technique to try, the graph does. Rules, in priority order:
 
           1. **Tier gate** — "simple before complex". Find the lowest tier
              that still has a live candidate (untried module, or a tried
@@ -473,8 +482,10 @@ class AttackGraph:
              with dead-or-unpromising tried modules), fall back to cross-tier
              ranking so a dead tier-0 pool doesn't strand a promising tier-2
              lead.
-          3. Untried modules first within the gated tier — unexplored arms
-             have infinite UCB; run them before re-walking anything.
+          3. Untried modules first within the gated tier — unexplored
+             techniques run before re-walking anything (no statistical
+             prior is computed; "untried" is treated as the highest-
+             priority class outright).
           4. Modules with at least one non-dead attempt, ranked by best score
              (exploit what worked).
           5. Exclude: modules whose every prior attempt is dead in the graph

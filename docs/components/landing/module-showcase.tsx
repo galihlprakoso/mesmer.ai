@@ -8,7 +8,7 @@ export function ModuleShowcase() {
           ▸ modules.shipped
         </span>
         <h2 className="font-mono text-3xl font-bold tracking-tight sm:text-4xl">
-          Nineteen modules, one graph.
+          Twenty-one modules, one graph.
         </h2>
         <p className="mt-3 max-w-xl text-[var(--color-muted-foreground)]">
           Every module is a ReAct agent with its own system prompt and judge

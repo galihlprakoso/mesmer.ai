@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repo. Keep this file up to date — sta
 
 ## Project
 
-`mesmer` — a cognitive hacking toolkit for LLMs. Red-teams LLM targets by running ReAct agents that pick cognitive-science-based techniques (foot-in-door, authority bias, narrative transport, etc.), judges each attempt, and persists an MCTS-inspired attack graph per-target so successive runs get smarter.
+`mesmer` — a cognitive hacking toolkit for LLMs. Red-teams LLM targets by running ReAct agents that pick cognitive-science-based techniques (foot-in-door, authority bias, narrative transport, etc.), judges each attempt, and persists a per-target attack graph (tier-gated frontier expansion + score-based pruning) so successive runs get smarter. Multi-manager scenarios chain managers in pipeline fashion (recon → analysis → execution); the synthesized executive owns the operator conversation and dispatches managers.
 
 See `README.md` for the product pitch and `VISUALIZATION.md` for flowcharts of the core loop.
 

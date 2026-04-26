@@ -34,21 +34,23 @@ flowchart LR
 `} />
 
 Every module execution is recorded as an `AttackNode` — including the
-leader's own. The frontier proposer respects the **TAPER tier ladder**
-(T0 naive → T1 structural → T2 cognitive → T3 composed), so simple
-moves get tried before expensive ones, and wins are attributable to
-the cheapest technique that worked.
+synthesised executive's run-end verdict. The frontier proposer
+respects the **TAPER tier ladder** (T0 naive → T1 structural → T2
+cognitive → T3 composed), so simple moves get tried before expensive
+ones, and wins are attributable to the cheapest technique that worked.
 
 ## What you can do today
 
 <ModuleGrid />
 
-19 shipped modules: 2 leaders (`system-prompt-extraction`,
-`tool-extraction`), 1 profiler, 1 planner, 9 field-level techniques
-(T0/T1 — payload-shape and structural injection, including
-function-calling probes), 6 cognitive / linguistic / psychological
-techniques (T2). All YAML, all declarative, all picked up by
-`Registry.auto_discover()` on startup.
+21 shipped modules: 4 managers (`system-prompt-extraction`,
+`tool-extraction`, `exploit-analysis`, `exploit-executor`), 1
+profiler, 1 planner, 9 field-level techniques (T0/T1 — payload-shape
+and structural injection, including function-calling probes), 6
+cognitive / linguistic / psychological techniques (T2). All YAML,
+all declarative, all picked up by `Registry.auto_discover()` on
+startup. The depth-0 executive is synthesised by the runtime — never
+authored.
 
 ## Pick your starting point
 

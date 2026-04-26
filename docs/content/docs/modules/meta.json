@@ -1,4 +1,10 @@
 {
   "title": "Attack Modules",
-  "pages": ["index", "system-prompt-extraction"]
+  "pages": [
+    "index",
+    "system-prompt-extraction",
+    "tool-extraction",
+    "exploit-analysis",
+    "exploit-executor"
+  ]
 }

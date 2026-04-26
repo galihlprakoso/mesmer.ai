@@ -99,7 +99,7 @@ judge_rubric_additions: |
 
 A benchmark has exactly **one** authoritative scorer:
 [`bench/canary.py::judge_trial_success`](https://github.com/galihlprakoso/mesmer.ai/blob/main/mesmer/bench/canary.py)
-— a deterministic substring match against the leader's concluded
+— a deterministic substring match against the executive's concluded
 output. Pure function, zero LLM, zero randomness.
 
 The in-loop LLM judge is still active, but **only to guide mesmer's
@@ -107,8 +107,10 @@ next move**. Its 1–10 scores feed the frontier proposer and the
 reflection loop; they have no effect on benchmark ASR.
 
 A key consequence: an accidental canary leak in a sub-module's probe
-that the leader never consolidated into its verdict text does **NOT**
-count. This is the whole point of leader-grounded scoring.
+that the executive never consolidated into its verdict text does
+**NOT** count. This is the whole point of leader-grounded scoring
+(the term "leader-grounded" persists from the source enum name;
+mechanically it's the executive's `conclude` text that's scanned).
 
 ## Output artifacts
 
