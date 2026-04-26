@@ -566,8 +566,18 @@ targets:
     api_key: "${FAKE_KEY}"
 agent:
   model: openrouter/x
+  sub_module_model: openrouter/worker
+  judge_model: openrouter/judge
   api_key: "${FAKE_KEY}"
+  api_base: "https://example.test/v1"
   temperature: 0.9
+  max_tokens: 1234
+  extra:
+    top_p: 0.5
+  max_context_tokens: 8000
+  compression_keep_recent: 6
+  compression_target_ratio: 0.4
+  compression_model: openrouter/compressor
   seed_base: 100
 budget:
   max_turns: 10
@@ -587,7 +597,16 @@ contamination_posture:
         assert spec.name == "test"
         assert spec.targets[0].api_key == "sk-testing"
         assert spec.agent.api_key == "sk-testing"
+        assert spec.agent.sub_module_model == "openrouter/worker"
+        assert spec.agent.judge_model == "openrouter/judge"
+        assert spec.agent.api_base == "https://example.test/v1"
         assert spec.agent.temperature == 0.9
+        assert spec.agent.max_tokens == 1234
+        assert spec.agent.extra == {"top_p": 0.5}
+        assert spec.agent.max_context_tokens == 8000
+        assert spec.agent.compression_keep_recent == 6
+        assert spec.agent.compression_target_ratio == 0.4
+        assert spec.agent.compression_model == "openrouter/compressor"
         assert spec.budget.trials_per_row == 4
         assert spec.budget.run_baseline is False
         assert spec.contamination_posture.dataset_release_date == "2023-11-01"
@@ -755,6 +774,78 @@ class TestBuildScenario:
         )
         s2 = build_scenario_for_row(spec, untouched, row, seed=1)
         assert s2.target.throttle is None
+
+    def test_agent_role_models_are_threaded_into_scenario(self, tmp_path: Path):
+        spec = _minimal_spec(tmp_path)
+        spec.agent.sub_module_model = "provider/worker"
+        spec.agent.judge_model = "provider/judge"
+        spec.agent.api_base = "https://agent.example/v1"
+        spec.agent.max_tokens = 2048
+        spec.agent.extra = {"top_p": 0.25}
+        spec.agent.max_context_tokens = 9000
+        spec.agent.compression_keep_recent = 4
+        spec.agent.compression_target_ratio = 0.5
+        spec.agent.compression_model = "provider/compressor"
+        row = DatasetRow(
+            sample_id="x",
+            pre_prompt="pre",
+            post_prompt="post",
+            canary="c",
+            baseline_attack="a",
+        )
+
+        scenario = build_scenario_for_row(spec, spec.targets[0], row, seed=9)
+
+        assert scenario.agent.sub_module_model == "provider/worker"
+        assert scenario.agent.judge_model == "provider/judge"
+        assert scenario.agent.api_base == "https://agent.example/v1"
+        assert scenario.agent.max_tokens == 2048
+        assert scenario.agent.extra == {"top_p": 0.25}
+        assert scenario.agent.max_context_tokens == 9000
+        assert scenario.agent.compression_keep_recent == 4
+        assert scenario.agent.compression_target_ratio == 0.5
+        assert scenario.agent.compression_model == "provider/compressor"
+
+    def test_target_extra_is_threaded_into_target_config(self, tmp_path: Path):
+        spec = _minimal_spec(tmp_path)
+        target = BenchTargetSpec(
+            id="rest-target",
+            adapter="rest",
+            extra={
+                "url": "https://target.example/chat",
+                "method": "PUT",
+                "headers": {"Authorization": "Bearer test"},
+                "body_template": '{"input":"{{message}}"}',
+                "response_path": "choices[0].text",
+                "send_template": '{"message":"{{message}}"}',
+                "receive": {"response_field": "reply"},
+                "connect_signal": {"field": "type", "value": "ready"},
+                "query_params": {"room": "bench"},
+                "connect_timeout": 3,
+                "receive_timeout": 12,
+            },
+        )
+        row = DatasetRow(
+            sample_id="x",
+            pre_prompt="pre",
+            post_prompt="post",
+            canary="c",
+            baseline_attack="a",
+        )
+
+        scenario = build_scenario_for_row(spec, target, row, seed=1)
+
+        assert scenario.target.url == "https://target.example/chat"
+        assert scenario.target.method == "PUT"
+        assert scenario.target.headers == {"Authorization": "Bearer test"}
+        assert scenario.target.body_template == '{"input":"{{message}}"}'
+        assert scenario.target.response_path == "choices[0].text"
+        assert scenario.target.send_template == '{"message":"{{message}}"}'
+        assert scenario.target.receive == {"response_field": "reply"}
+        assert scenario.target.connect_signal == {"field": "type", "value": "ready"}
+        assert scenario.target.query_params == {"room": "bench"}
+        assert scenario.target.connect_timeout == 3
+        assert scenario.target.receive_timeout == 12
 
     def test_post_prompt_lands_in_user_turn_suffix_not_system(self, tmp_path: Path):
         """Regression guard for the pre/post sandwich bug.

@@ -78,9 +78,10 @@
       modules: [],
       leader_prompt: '',
       agent: {
-        model: 'openrouter/anthropic/claude-sonnet-4-20250514',
+        model: 'anthropic/claude-opus-4-7',
+        sub_module_model: 'anthropic/claude-haiku-4-5',
         judge_model: '',
-        api_key: '${OPENROUTER_API_KEY}',
+        api_key: '${ANTHROPIC_API_KEY}',
         temperature: 0.7,
       },
     }
@@ -120,6 +121,7 @@
       base.leader_prompt = data.leader_prompt ?? ''
       const a = data.agent || {}
       base.agent.model = a.model ?? base.agent.model
+      base.agent.sub_module_model = a.sub_module_model ?? base.agent.sub_module_model
       base.agent.judge_model = a.judge_model ?? ''
       base.agent.api_key = a.api_key ?? base.agent.api_key
       base.agent.temperature = a.temperature ?? 0.7
@@ -144,6 +146,7 @@
     if (sig.length) objective.success_signals = sig
     const agent = {
       model: f.agent.model,
+      sub_module_model: f.agent.sub_module_model,
     }
     if (f.agent.judge_model) agent.judge_model = f.agent.judge_model
     if (f.agent.api_key) agent.api_key = f.agent.api_key
@@ -372,12 +375,16 @@
             <input type="text" bind:value={form.agent.model} on:input={onFormChange} {disabled} />
           </label>
           <label>
+            <span>Sub-module model</span>
+            <input type="text" bind:value={form.agent.sub_module_model} on:input={onFormChange} {disabled} />
+          </label>
+          <label>
             <span>Judge model (optional, falls back to model)</span>
             <input type="text" bind:value={form.agent.judge_model} on:input={onFormChange} {disabled} />
           </label>
           <label>
             <span>API key (env-var placeholder)</span>
-            <input type="text" bind:value={form.agent.api_key} on:input={onFormChange} placeholder={'${OPENROUTER_API_KEY}'} {disabled} />
+            <input type="text" bind:value={form.agent.api_key} on:input={onFormChange} placeholder={'${ANTHROPIC_API_KEY}'} {disabled} />
           </label>
           <label>
             <span>Temperature</span>

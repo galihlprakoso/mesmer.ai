@@ -38,7 +38,7 @@ def cli():
 
 @cli.command()
 @click.argument("scenario_path", type=click.Path(exists=True))
-@click.option("--model", default=None, help="Override agent model (e.g., anthropic/claude-sonnet-4-20250514)")
+@click.option("--model", default=None, help="Override executive/manager model (e.g., anthropic/claude-opus-4-7)")
 @click.option("--max-turns", default=None, type=int, help="Override max turns")
 @click.option("--verbose", "-v", is_flag=True, help="Show full ReAct reasoning")
 @click.option("--output", "-o", default=None, help="Save report to JSON file")
@@ -188,10 +188,7 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
     agent_config = scenario.agent
     if agent_config.key_count > 0:
         masked = agent_config.api_key[:8] + "..." + agent_config.api_key[-4:] if len(agent_config.api_key) > 12 else "***"
-        if agent_config.key_count > 1:
-            console.print(f"[dim]API keys: {agent_config.key_count} keys loaded (first: {masked}) \u2014 rotating[/dim]")
-        else:
-            console.print(f"[dim]API key: {masked}[/dim]")
+        console.print(f"[dim]API key: {masked}[/dim]")
     else:
         console.print(
             "[yellow]Warning: no api_key in scenario. LiteLLM will fall back to "

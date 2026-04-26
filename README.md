@@ -6,6 +6,8 @@ Mesmer uses cognitive science — linguistics, psychology, social engineering �
 
 It gets **smarter with every run.** A persistent per-target attack graph remembers what worked, what failed, and what to try next. Dead ends are never re-walked. Promising leads are deepened. Human insights get priority.
 
+Built during the Opus 4.7 hackathon, Mesmer uses Claude Opus 4.7 as more than a code assistant: it helped shape the planner vocabulary the system thinks in — falsifiable weakness hypotheses, structured evidence, confidence shifts, and utility-ranked next experiments.
+
 ## Why mesmer?
 
 Existing tools fire payloads at models and check outputs. They're fuzzers.
@@ -21,6 +23,21 @@ Mesmer is different. It **thinks**. Each module is an autonomous agent grounded 
 | Memory | None | None | **Per-target persistent graph** |
 | Human-in-the-loop | None | None | **`--hint`, `debrief`** |
 
+## Built with Opus 4.7
+
+Mesmer was developed with Claude Opus 4.7 as a co-architect for the parts of the project that require judgment, not just autocomplete. The core question was: *what should an LLM red-team agent remember between attempts so it gets better instead of just longer?*
+
+Opus 4.7 helped turn that question into Mesmer's internal reasoning language:
+
+- **Hypotheses** — falsifiable claims about how a target may break.
+- **Evidence** — structured signals extracted from target replies, such as `partial_compliance`, `refusal_template`, `tool_reference`, or `hidden_instruction_fragment`.
+- **Belief updates** — confidence shifts that promote a hypothesis to `CONFIRMED` or prune it as `REFUTED`.
+- **Frontier experiments** — ranked next moves that connect a belief to a concrete attack module.
+
+The result is a system that does not just ask Claude to write payloads. It uses Claude's reasoning strengths to design a planner that can observe, remember, and adapt across runs. The runtime itself stays provider-agnostic through LiteLLM, but Opus 4.7 was the model used to reason through the architecture, module vocabulary, prompts, tests, and demo flow.
+
+Mesmer is intended for authorized AI safety testing: local demo targets, owned systems, benchmark scenarios, and explicit operator-controlled targets.
+
 ## Quick start
 
 ```bash
@@ -31,7 +48,7 @@ uv sync
 pip install -e .
 
 # Set your API key
-export OPENROUTER_API_KEY=your-key-here
+export ANTHROPIC_API_KEY=your-key-here
 
 # Run an attack scenario
 mesmer run scenarios/extract-system-prompt.yaml --verbose
@@ -197,8 +214,11 @@ objective:
 module: system-prompt-extraction
 
 agent:
-  model: openrouter/anthropic/claude-sonnet-4-20250514  # any LiteLLM model string
-  api_key: "${OPENROUTER_API_KEY}"  # supports comma-separated for rotation
+  # Executive + manager modules use Opus 4.7.
+  model: anthropic/claude-opus-4-7
+  # Employee / leaf sub-modules use Haiku 4.5.
+  sub_module_model: anthropic/claude-haiku-4-5
+  api_key: "${ANTHROPIC_API_KEY}"
   temperature: 0.7
 ```
 
@@ -210,18 +230,25 @@ Uses [LiteLLM](https://github.com/BerriAI/litellm) — model string prefix deter
 
 ```yaml
 agent:
-  model: openrouter/nvidia/nemotron-3-super-120b-a12b:free  # OpenRouter
-  model: anthropic/claude-sonnet-4-20250514                  # Anthropic direct
-  model: openai/gpt-4o                                       # OpenAI
-  model: gemini/gemini-2.0-flash                             # Google
-  model: ollama/llama3                                        # Local Ollama
+  # Claude Opus 4.7 for executive + manager roles:
+  model: anthropic/claude-opus-4-7
+
+  # Claude Haiku 4.5 for lower-level sub-modules:
+  sub_module_model: anthropic/claude-haiku-4-5
+
+  # Other supported examples:
+  # model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+  # model: anthropic/claude-sonnet-4-20250514
+  # model: openai/gpt-4o
+  # model: gemini/gemini-2.0-flash
+  # model: ollama/llama3
 ```
 
-Comma-separated API keys rotate round-robin across all LLM calls (leader, judge, reflection):
+Mesmer uses a single configured API key per run. It does not rotate across multiple provider keys:
 
 ```yaml
 agent:
-  api_key: "${KEY1},${KEY2},${KEY3},${KEY4}"
+  api_key: "${ANTHROPIC_API_KEY}"
 ```
 
 ## Target adapters
@@ -305,7 +332,7 @@ mesmer/
 │   ├── scenario.py          # YAML scenario loader with ${ENV_VAR} resolution
 │   ├── module.py            # ModuleConfig + YAML loader
 │   ├── registry.py          # module auto-discovery
-│   ├── keys.py              # API key rotation
+│   ├── keys.py              # Single-key throttling helpers
 │   ├── constants.py         # enums (ToolName, ScenarioMode, HypothesisStatus,
 │   │                         #   EvidenceType, ExperimentState, BeliefRole, …)
 │   └── errors.py            # MesmerError hierarchy (incl. InvalidDelta,

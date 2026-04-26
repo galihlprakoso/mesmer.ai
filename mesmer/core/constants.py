@@ -78,10 +78,9 @@ class ScenarioMode(str, Enum):
 class CompletionRole(str, Enum):
     """The role a :meth:`Context.completion` call is playing.
 
-    Drives model selection (attacker vs judge cascade) and rotation
-    behaviour. ``ATTACKER`` uses the rotation override / scenario attacker
-    model; ``JUDGE`` always uses ``effective_judge_model`` so scoring
-    doesn't drift when the attacker rotation kicks in.
+    Drives model selection (attacker vs judge cascade). ``ATTACKER`` uses
+    scenario role-based routing; ``JUDGE`` always uses
+    ``effective_judge_model`` so scoring stays stable.
     """
 
     ATTACKER = "attacker"
@@ -150,8 +149,6 @@ class LogEvent(str, Enum):
     LLM_COMPLETION = "llm_completion"
     LLM_RETRY = "llm_retry"
     LLM_ERROR = "llm_error"
-    RATE_LIMIT_WALL = "rate_limit_wall"
-    KEY_COOLED = "key_cooled"
     THROTTLE_WAIT = "throttle_wait"
 
     # Target interaction

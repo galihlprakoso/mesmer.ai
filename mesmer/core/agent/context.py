@@ -339,11 +339,10 @@ class Context:
         self.target_fresh_session: bool = target_fresh_session
         self._target_reset_at: int = _target_reset_at
 
-        # P5 — when a scenario declares an attacker-model ensemble, each
-        # child context is bound to a specific model chosen round-robin by
-        # ctx.run_module(). Empty string means "use agent_config.model".
-        # CompletionRole.JUDGE bypasses this and always resolves to
-        # agent_config.effective_judge_model.
+        # Optional test / caller override for the attacker model. Normal
+        # production routing is role-aware in _resolve_model: executive and
+        # manager contexts use agent_config.model, employee contexts use
+        # agent_config.sub_module_model.
         self.attacker_model_override: str = attacker_model_override
 
         # P6 — nesting depth for log display. Root context has depth 0;
@@ -400,21 +399,25 @@ class Context:
 
     @property
     def agent_model(self) -> str:
-        """Currently-bound attacker model (rotation override wins)."""
-        return self.attacker_model_override or self.agent_config.model
+        """Currently-bound attacker model for this context."""
+        return self._resolve_model(CompletionRole.ATTACKER)
 
     def _resolve_model(self, role: CompletionRole) -> str:
         """Pick the model to use for an LLM call based on its role.
 
-        - :attr:`CompletionRole.ATTACKER` (default): the rotation-assigned
-          attacker model if bound on this context, otherwise the config's
-          base attacker model.
+        - :attr:`CompletionRole.ATTACKER` (default): executive and manager
+          contexts use the scenario model; employee / leaf contexts use the
+          configured sub-module model.
         - :attr:`CompletionRole.JUDGE`: the scenario's judge model (stable
-          across rotation).
+          across the run).
         """
         if role == CompletionRole.JUDGE:
             return self.agent_config.effective_judge_model
-        return self.attacker_model_override or self.agent_config.model
+        if self.attacker_model_override:
+            return self.attacker_model_override
+        if self.depth >= 2:
+            return self.agent_config.sub_module_model
+        return self.agent_config.model
 
     async def completion(
         self,
@@ -447,7 +450,6 @@ class Context:
             "temperature": self.agent_config.temperature,
         }
 
-        # API key — rotates through keys (round-robin, skipping cooled-down ones)
         key = self.agent_config.next_key()
         self._last_key_used = key  # exposed to _completion_with_retry
         if key:
@@ -601,14 +603,9 @@ class Context:
                     if log is not None:
                         log(LogEvent.TARGET_RESET_ERROR.value, f"reset failed for '{name}': {e}")
 
-        # P5 — rotate the attacker model round-robin when an ensemble is
-        # declared. No-op (returns the single model) otherwise.
-        chosen_model = self.agent_config.next_attacker_model()
-
         child = self.child(
             max_turns=max_turns,
             target_fresh_session=fresh_session,
-            attacker_model_override=chosen_model,
             active_experiment_id=active_experiment_id or self.active_experiment_id,
         )
         result = await run_react_loop(module, child, instruction, log=log)
@@ -650,8 +647,8 @@ class Context:
         shared context with the target.
 
         ``attacker_model_override`` binds the child to a specific attacker
-        model (used for MODEL ensemble rotation). Empty string means inherit
-        the parent's override (or the config's base model if no override).
+        model for tests / specialised callers. Empty string uses the standard
+        depth-based routing.
         """
         child = Context(
             target=self.target,

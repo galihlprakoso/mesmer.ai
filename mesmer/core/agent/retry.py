@@ -1,4 +1,4 @@
-"""LLM retry, per-key cooldown, and throttle integration.
+"""LLM retry and throttle integration.
 
 ``_completion_with_retry`` is the single wrapper around ``ctx.completion``.
 Three layered concerns live here:
@@ -11,8 +11,8 @@ Three layered concerns live here:
     it into a ``result = "Error: ..."`` line that the bench orchestrator
     surfaces into the trial's JSONL ``error`` field. This closes the
     silent 0-turn trial loophole that hid the previous rate-limit wall.
-  * **Rate-limit**: on a 429 from the provider, cool the specific key
-    via ``KeyPool.cool_down`` and rotate — no sleep on a dead key.
+  * **Rate-limit**: on a 429 from the provider, back off and retry the same
+    configured key. Mesmer intentionally does not rotate through API keys.
   * **Transient errors** (provider/5xx/timeout/overloaded): backoff with
     ``asyncio.sleep(RETRY_DELAYS[attempt])`` on the same key.
 
@@ -27,37 +27,13 @@ from __future__ import annotations
 
 import asyncio
 
-from mesmer.core.constants import (
-    MAX_LLM_RETRIES,
-    LogEvent,
-)
+from mesmer.core.constants import MAX_LLM_RETRIES, LogEvent
 
 
 def _is_rate_limit_error(err_str: str) -> bool:
     """Heuristic: does this exception string look like a rate-limit error?"""
     s = err_str.lower()
     return "ratelimit" in s or "rate limit" in s or "429" in s
-
-
-def _cool_down_key_for(ctx, err_str: str, log) -> None:
-    """Cool down the key that was just used if we have a pool and the error
-    looks rate-limited. Logs a `key_cooled` event."""
-    pool = ctx.agent_config.pool
-    key = ctx._last_key_used or ""
-    if pool is None or not key:
-        return
-    from mesmer.core.keys import compute_cooldown, _mask
-    import datetime
-    until_ts, reason = compute_cooldown(err_str)
-    pool.cool_down(key, until_ts, reason=reason)
-    until_iso = datetime.datetime.fromtimestamp(
-        until_ts, tz=datetime.timezone.utc
-    ).isoformat()
-    log(
-        LogEvent.KEY_COOLED.value,
-        f"key {_mask(key)} cooled until {until_iso} ({reason}); "
-        f"active {pool.active_count()}/{pool.total}"
-    )
 
 
 async def _completion_with_retry(ctx, messages, tools, log):
@@ -70,9 +46,7 @@ async def _completion_with_retry(ctx, messages, tools, log):
     run's result string rather than returning None (which would mask it
     as a silent 0-turn trial — the bug that motivated this throttle).
 
-    On rate-limit errors, cool down the specific key that was used and
-    rotate. The next iteration's ``acquire()`` may then have to wait for
-    the remaining keys; that wait is bounded by the same throttle budget.
+    On rate-limit errors, retry the same configured key after backoff.
     """
     # Late-bind RETRY_DELAYS via the package namespace so tests that
     # monkey-patch ``mesmer.core.agent.RETRY_DELAYS`` take effect.
@@ -115,28 +89,17 @@ async def _completion_with_retry(ctx, messages, tools, log):
             except Exception as e:
                 err_str = str(e)
 
-                # Rate-limit: cool the key and try the next one (no sleep).
+                # Rate-limit: do not rotate keys. Back off and retry the
+                # same configured key so provider limits remain respected.
                 if _is_rate_limit_error(err_str):
-                    _cool_down_key_for(ctx, err_str, log)
-                    if pool is not None and pool.active_count() == 0:
-                        # All keys cooled AND the caller either didn't
-                        # configure a throttle wait or already exhausted
-                        # it at acquire() above. Emit the wall signal so
-                        # the CLI log is legible, then fall through to
-                        # LLM_ERROR on the next iteration (or let the
-                        # throttle block the next acquire()).
-                        if not pool.throttle.is_active:
-                            log(
-                                LogEvent.RATE_LIMIT_WALL.value,
-                                "all API keys are cooled down; stopping",
-                            )
-                            return None
                     if attempt < MAX_LLM_RETRIES - 1:
+                        delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
                         log(
                             LogEvent.LLM_RETRY.value,
                             f"Rate limit on current key (attempt {attempt + 1}/{MAX_LLM_RETRIES}): "
-                            f"{err_str[:100]} — switching key and retrying"
+                            f"{err_str[:100]} — retrying in {delay}s"
                         )
+                        await asyncio.sleep(delay)
                         continue
                     log(LogEvent.LLM_ERROR.value, f"Max retries on rate-limit: {err_str}")
                     return None
@@ -159,4 +122,4 @@ async def _completion_with_retry(ctx, messages, tools, log):
     return None
 
 
-__all__ = ["_is_rate_limit_error", "_cool_down_key_for", "_completion_with_retry"]
+__all__ = ["_is_rate_limit_error", "_completion_with_retry"]

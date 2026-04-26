@@ -4,7 +4,7 @@
 :func:`run_react_loop` is the only orchestrator. Everything that's more than
 glue has been lifted into a sibling module:
 
-  - LLM retry + key rotation → :mod:`mesmer.core.agent.retry`
+  - LLM retry + throttling → :mod:`mesmer.core.agent.retry`
   - Tool schemas + per-tool handlers → :mod:`mesmer.core.agent.tools`
     (one file per tool; dispatch helpers in the subpackage's ``__init__``).
   - System/user prompt assembly → :mod:`mesmer.core.agent.prompt`

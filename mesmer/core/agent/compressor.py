@@ -160,7 +160,7 @@ async def _summarise_block(
         return await _raw_completion(ctx, explicit_compression_model, messages)
 
     # No explicit override — route through the normal judge-role completion
-    # so retries / key rotation / rate-limit handling all apply.
+    # so retries / rate-limit handling all apply.
     prior = ctx.attacker_model_override
     ctx.attacker_model_override = ""  # ensure CompletionRole.JUDGE path wins
     try:

@@ -20,8 +20,9 @@ objective:
   max_turns: 20
 module: system-prompt-extraction
 agent:
-  model: openrouter/anthropic/claude-sonnet-4-20250514
-  api_key: \${OPENROUTER_API_KEY}
+  model: anthropic/claude-opus-4-7
+  sub_module_model: anthropic/claude-haiku-4-5
+  api_key: \${ANTHROPIC_API_KEY}
   temperature: 0.7
 `
 

@@ -177,7 +177,7 @@ target:
   base_url: "https://..."                      # for openai-compat
   model: "gpt-4o-mini"                         # for openai-compat
   url: "https://..."                           # for rest/ws adapters
-  api_key: "${{ENV_VAR_NAME}}"                  # comma-separated env = round-robin
+  api_key: "${{ENV_VAR_NAME}}"
   system_prompt: ""                            # optional, injected target-side
 objective:
   goal: "What the attacker is trying to achieve"
@@ -185,9 +185,10 @@ objective:
   max_turns: 25                                # per-module turn budget
 module: <leader module name>                   # required, see list below
 agent:
-  model: "openrouter/anthropic/claude-sonnet-4-20250514"
+  model: "anthropic/claude-opus-4-7"
+  sub_module_model: "anthropic/claude-haiku-4-5"
   judge_model: ""                              # falls back to model if empty
-  api_key: "${{OPENROUTER_API_KEY}}"
+  api_key: "${{ANTHROPIC_API_KEY}}"
   temperature: 0.7
 mode: trials                                   # trials | continuous
 ```
@@ -407,7 +408,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     async def scenario_editor_chat(req: EditorChatRequest):
         """Vibe-code chat: user message + current YAML → reply + edited YAML.
 
-        Single completion (no tool-calling). Reads ``OPENROUTER_API_KEY``
+        Single completion (no tool-calling). Reads ``ANTHROPIC_API_KEY``
         from env by default — the LLM that powers this is decoupled from
         any individual scenario's agent config so the editor works even
         for blank/new scenarios.
@@ -434,22 +435,19 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 messages.append({"role": h.role, "content": h.content})
         messages.append({"role": "user", "content": user_payload})
 
-        model = os.environ.get(
-            "MESMER_EDITOR_MODEL", "openrouter/anthropic/claude-sonnet-4-20250514"
-        )
+        model = os.environ.get("MESMER_EDITOR_MODEL", "anthropic/claude-opus-4-7")
         kwargs: dict = {
             "model": model,
             "messages": messages,
             "temperature": 0.3,
         }
         api_key = (
-            os.environ.get("OPENROUTER_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("OPENROUTER_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
         )
         if api_key:
-            # If the env carries comma-separated keys, take the first.
-            kwargs["api_key"] = api_key.split(",")[0].strip()
+            kwargs["api_key"] = api_key.strip()
 
         try:
             response = await litellm.acompletion(**kwargs)

@@ -41,7 +41,7 @@ uv run uvicorn mesmer.interfaces.web.backend.server:app --reload
 cd mesmer/interfaces/web/frontend && npm install && npm run dev
 ```
 
-**Environment:** set `OPENROUTER_API_KEY` (or whichever provider key each scenario references — scenarios use `${VAR}` placeholders resolved by `core/scenario.py`). Comma-separated keys enable round-robin rotation via `core/keys.py`.
+**Environment:** set `ANTHROPIC_API_KEY` for the default Claude attacker models (or whichever provider key each scenario references — scenarios use `${VAR}` placeholders resolved by `core/scenario.py`). Mesmer uses one configured API key per run; it does not rotate across provider keys.
 
 ## Folder structure
 
@@ -60,7 +60,7 @@ mesmer/                          # repo root
 │   │   │   ├── context.py       # Context dataclass, Turn, HumanQuestionBroker,
 │   │   │   │                    #   ctx.completion (LiteLLM call site), ctx.send,
 │   │   │   │                    #   ctx.run_module (sub-module delegation)
-│   │   │   ├── retry.py         # _completion_with_retry: key rotation + cooldown
+│   │   │   ├── retry.py         # _completion_with_retry: retry + throttling
 │   │   │   ├── tools/           # ONE FILE PER TOOL — schema + handler together
 │   │   │   │   ├── send_message.py    # manager-only: talk to the target.
 │   │   │   │   │                    #   ALSO calls _update_belief_graph_from_turn
@@ -195,7 +195,7 @@ mesmer/                          # repo root
 │   │   │                        #    sub_modules, parameters, judge_rubric,
 │   │   │                        #    reset_target, tier, is_executive)
 │   │   ├── registry.py          # Module auto-discovery (recurses module dirs)
-│   │   ├── keys.py              # KeyPool: round-robin w/ per-key cooldown,
+│   │   ├── keys.py              # KeyPool: single-key throttling,
 │   │   │                        #   compute_cooldown() from Retry-After header
 │   │   ├── constants.py         # Enums (see "Enums" section) + tunable thresholds.
 │   │   │                        #   Belief-graph enums live here too: HypothesisStatus,
@@ -343,7 +343,7 @@ mesmer/                          # repo root
 │   ├── test_field_modules_load.py   # tier-0/1 module YAMLs + banned-string scan
 │   ├── test_scratchpad.py       # Scratchpad dataclass + render_for_prompt
 │   ├── test_scenario.py         # Scenario YAML + ${ENV_VAR} + throttle parsing
-│   ├── test_keys.py             # KeyPool rotation + cooldown
+│   ├── test_keys.py             # KeyPool throttling
 │   ├── test_human_broker.py     # HumanQuestionBroker Future-based wait
 │   ├── test_cli.py              # Click commands (no LLM calls)
 │   ├── test_targets.py          # Target adapters + throttle (openai, echo, rest, ws)
@@ -1055,7 +1055,7 @@ on the next executive iteration.
 4. **Reflect** — `evaluation._reflect_and_expand` proposes 1-3 "frontier" suggestions for next moves via `graph.propose_frontier` + `refine_approach` LLM call.
 5. **Update** — results written to `AttackGraph` (`evaluation._update_graph`) and `TargetMemory`.
 
-Retry + key-rotation logic: `core/agent/retry.py::_completion_with_retry`. Rate-limit errors cool down the offending key (`compute_cooldown`, `KeyPool.cool_down`) and rotate rather than sleep. When all keys are cooled the loop emits `LogEvent.RATE_LIMIT_WALL` and returns.
+Retry + throttling logic: `core/agent/retry.py::_completion_with_retry`. Rate-limit errors back off and retry the same configured key; Mesmer does not rotate across API keys.
 
 Turn budgets: `Context.budget` tracks turns and `Context.send` raises `TurnBudgetExhausted` when exceeded. `ModuleConfig.reset_target: bool` controls whether the target is reset before the module runs — useful for siblings that shouldn't share target memory. Leave `False` for chained attacks like foot-in-door.
 
@@ -1183,13 +1183,10 @@ judge:
   rubric_additions: |          # loaded as Scenario.judge_rubric_additions
     Score +2 if literal quoted text appears.
 agent:
-  model: openrouter/anthropic/claude-sonnet-4-20250514
-  # Optional ensemble — when set, `model` is overwritten by `models[0]`
-  # and next_attacker_model() rotates round-robin so successive
-  # sub-modules use different attacker brains. Cheap diversity.
-  models: []
-  api_key: ${OPENROUTER_API_KEY}   # comma-separated = round-robin pool
-  judge_model: openrouter/openai/gpt-4o-mini
+  model: anthropic/claude-opus-4-7        # executive + manager roles
+  sub_module_model: anthropic/claude-haiku-4-5  # employee / leaf modules
+  api_key: ${ANTHROPIC_API_KEY}
+  judge_model: ""                         # falls back to model
   temperature: 0.7
   # Optional PRNG seed for mesmer-level randomness (technique tie-breaks,
   # frontier sampling). LLM sampling stays provider-side so this does NOT
@@ -1487,7 +1484,7 @@ wins. Fix CLAUDE.md in the same change.
 
 ## Gotchas
 
-- **Rate-limits don't sleep** — they cool the current key and rotate via `KeyPool`. If all keys are cooled, the loop emits `LogEvent.RATE_LIMIT_WALL` and returns `None` from the LLM wrapper; the engine maps that to the "LLM error: all retries exhausted" string.
+- **Rate-limits retry on the same key** — `_completion_with_retry` backs off and retries the configured key. Mesmer does not cool keys or rotate across provider keys.
 - **Empty `choices` is a transient failure, not an exception.** Some providers (notably Gemini) ship a 200 OK with `choices=[]` when the request hits a safety filter, content block, or 0-token completion. LiteLLM passes the response through structurally-valid — no exception is raised — so without an explicit guard the engine indexes into `[]` and the executive's run dies with `Error: list index out of range`. `_completion_with_retry` (`core/agent/retry.py`) treats empty `choices` as a transient failure (same path as 503/timeout) and retries with backoff before giving up.
 - **`conclude` is special-cased in the engine**, not in the dispatch table. It short-circuits the loop; don't try to route it through `dispatch_tool_call`.
 - **`Turn.kind` JSON round-trip** — `Turn.to_dict` emits the string (via `TurnKind.SUMMARY.value`); `Turn.__post_init__` accepts a string and coerces back to the enum, so old JSON files load cleanly.

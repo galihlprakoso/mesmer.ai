@@ -395,73 +395,79 @@ class TestTargetErrorDetection:
         assert data["is_error"] is True
 
 
-class TestAttackerModelRotation:
-    """P5 — attacker-model ensemble rotation via ctx.run_module(), and the
-    judge model staying stable regardless of the attacker rotation."""
+class TestRoleAwareModelRouting:
+    """Executive / manager contexts use Opus; employee contexts use Haiku."""
 
-    def _make_ensemble_ctx(self, models, judge_model=""):
+    def _make_model_ctx(self, judge_model=""):
         target = MagicMock()
         target.send = AsyncMock(return_value="ok")
         target.reset = AsyncMock(return_value=None)
         registry = MagicMock()
-        agent_config = AgentConfig(models=models, judge_model=judge_model, api_key="sk")
+        agent_config = AgentConfig(
+            model="anthropic/claude-opus-4-7",
+            sub_module_model="anthropic/claude-haiku-4-5",
+            judge_model=judge_model,
+            api_key="sk",
+        )
         return Context(
             target=target, registry=registry, agent_config=agent_config,
             objective="o", run_id="r",
         )
 
     def test_agent_model_returns_override_first(self):
-        ctx = self._make_ensemble_ctx(["a", "b"])
+        ctx = self._make_model_ctx()
         ctx.attacker_model_override = "b"
         assert ctx.agent_model == "b"
 
-    def test_agent_model_falls_back_to_config(self):
-        ctx = self._make_ensemble_ctx(["a", "b"])
-        assert ctx.agent_model == "a"  # config's current base
+    def test_executive_agent_model_uses_primary_model(self):
+        ctx = self._make_model_ctx()
+        assert ctx.agent_model == "anthropic/claude-opus-4-7"
+
+    def test_employee_agent_model_uses_sub_module_model(self):
+        ctx = self._make_model_ctx()
+        employee = ctx.child().child()
+        assert employee.agent_model == "anthropic/claude-haiku-4-5"
 
     def test_resolve_model_attacker_uses_override(self):
-        ctx = self._make_ensemble_ctx(["a", "b"])
+        ctx = self._make_model_ctx()
         ctx.attacker_model_override = "b"
         assert ctx._resolve_model("attacker") == "b"
 
     def test_resolve_model_judge_ignores_override(self):
         """Judge role must use judge_model (or config.model), never the
-        attacker override — stops the judge from drifting with rotation."""
-        ctx = self._make_ensemble_ctx(["a", "b", "c"], judge_model="judge-x")
+        attacker override."""
+        ctx = self._make_model_ctx(judge_model="judge-x")
         ctx.attacker_model_override = "b"
         assert ctx._resolve_model("judge") == "judge-x"
 
     def test_child_inherits_override_when_not_overridden_again(self):
-        ctx = self._make_ensemble_ctx(["a", "b"])
+        ctx = self._make_model_ctx()
         ctx.attacker_model_override = "b"
         child = ctx.child()
         assert child.attacker_model_override == "b"
 
     def test_child_accepts_explicit_override(self):
-        ctx = self._make_ensemble_ctx(["a", "b"])
+        ctx = self._make_model_ctx()
         child = ctx.child(attacker_model_override="b")
         assert child.attacker_model_override == "b"
 
     @pytest.mark.asyncio
-    async def test_run_module_rotates_and_binds_child(self):
-        """Running a sub-module advances the rotation and binds the chosen
-        model onto the child context."""
-        ctx = self._make_ensemble_ctx(["a", "b", "c"])
+    async def test_run_module_manager_uses_primary_model(self):
+        """Running a manager child keeps the primary Opus model."""
+        ctx = self._make_model_ctx()
         module = ModuleConfig(name="mod", description="t")
         ctx.registry.get = MagicMock(return_value=module)
 
         observed = []
 
         async def _fake_loop(mod, child_ctx, instruction, **kwargs):
-            observed.append(child_ctx.attacker_model_override)
+            observed.append(child_ctx.agent_model)
             return "done"
 
         with patch("mesmer.core.agent.run_react_loop", new=_fake_loop):
             await ctx.run_module("mod", "do")
-            await ctx.run_module("mod", "do")
-            await ctx.run_module("mod", "do")
 
-        assert observed == ["a", "b", "c"]
+        assert observed == ["anthropic/claude-opus-4-7"]
 
 
 class TestContextDepth:

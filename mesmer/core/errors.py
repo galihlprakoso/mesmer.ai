@@ -91,7 +91,7 @@ class ThrottleTimeout(MesmerError):
     throttle's ``max_wait_seconds`` budget.
 
     Carries ``gate`` — which constraint blocked us (``"max_concurrent"``,
-    ``"max_rpm"``, or ``"all_keys_cooled"``) — so ``execute_run``'s error
+    ``"max_rpm"``) — so ``execute_run``'s error
     surfacing gives operators an actionable message instead of a silent
     0-turn trial.
     """

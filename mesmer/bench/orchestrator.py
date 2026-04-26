@@ -125,10 +125,19 @@ class BenchAgentSpec:
     language — one shape, read once.
     """
 
-    model: str = "openrouter/deepseek/deepseek-r1"
+    model: str = "anthropic/claude-opus-4-7"
+    sub_module_model: str = "anthropic/claude-haiku-4-5"
+    judge_model: str = ""
     api_key: str = ""
     api_key_env: str = ""
+    api_base: str = ""
     temperature: float = 0.8
+    max_tokens: int | None = None
+    extra: dict = field(default_factory=dict)
+    max_context_tokens: int = 0
+    compression_keep_recent: int = 10
+    compression_target_ratio: float = 0.6
+    compression_model: str = ""
     # Every trial i gets seed = seed_base + i so reruns are reproducible.
     seed_base: int = 42
     # Declarative rate-limit policy. Shared across sibling bench trials
@@ -487,11 +496,13 @@ def _cell_as_json(c: BenchCellSummary) -> dict:
 
 
 def _resolve_env(value: str) -> str:
-    """Resolve ``${FOO}`` → ``os.environ['FOO']``. Mirrors scenario.py behaviour."""
+    """Resolve ``${FOO}`` recursively. Mirrors scenario.py behaviour."""
+    if isinstance(value, dict):
+        return {k: _resolve_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_env(v) for v in value]
     if not isinstance(value, str):
         return value
-    import re
-
     return re.sub(
         r"\$\{(\w+)\}",
         lambda m: os.environ.get(m.group(1), ""),
@@ -521,6 +532,19 @@ def load_spec(path: str | Path) -> BenchSpec:
     )
 
     targets: list[BenchTargetSpec] = []
+    target_extra_keys = {
+        "url",
+        "method",
+        "headers",
+        "body_template",
+        "response_path",
+        "send_template",
+        "receive",
+        "connect_signal",
+        "query_params",
+        "connect_timeout",
+        "receive_timeout",
+    }
     for t in data.get("targets", []) or []:
         t_throttle_raw = t.get("throttle")
         t_throttle: ThrottleConfig | None = None
@@ -530,6 +554,10 @@ def load_spec(path: str | Path) -> BenchSpec:
                 max_concurrent=t_throttle_raw.get("max_concurrent"),
                 max_wait_seconds=t_throttle_raw.get("max_wait_seconds", 0.0) or 0.0,
             )
+        extra = dict(t.get("extra", {}) or {})
+        for key in target_extra_keys:
+            if key in t:
+                extra[key] = t[key]
         targets.append(
             BenchTargetSpec(
                 id=t.get("id", ""),
@@ -538,7 +566,7 @@ def load_spec(path: str | Path) -> BenchSpec:
                 model=t.get("model", ""),
                 api_key=_resolve_env(t.get("api_key", "")),
                 api_key_env=t.get("api_key_env", ""),
-                extra=t.get("extra", {}) or {},
+                extra=_resolve_env(extra),
                 throttle=t_throttle,
             )
         )
@@ -554,9 +582,18 @@ def load_spec(path: str | Path) -> BenchSpec:
         )
     agent = BenchAgentSpec(
         model=a.get("model", BenchAgentSpec.model),
+        sub_module_model=a.get("sub_module_model", BenchAgentSpec.sub_module_model),
+        judge_model=str(a.get("judge_model", "") or ""),
         api_key=_resolve_env(a.get("api_key", "")),
         api_key_env=a.get("api_key_env", ""),
+        api_base=_resolve_env(a.get("api_base", "")),
         temperature=float(a.get("temperature", 0.8)),
+        max_tokens=a.get("max_tokens"),
+        extra=_resolve_env(a.get("extra", {}) or {}),
+        max_context_tokens=int(a.get("max_context_tokens", 0) or 0),
+        compression_keep_recent=int(a.get("compression_keep_recent", 10) or 10),
+        compression_target_ratio=float(a.get("compression_target_ratio", 0.6) or 0.6),
+        compression_model=str(a.get("compression_model", "") or ""),
         seed_base=int(a.get("seed_base", 42)),
         throttle=throttle,
     )
@@ -780,15 +817,27 @@ def build_scenario_for_row(
     attacker LLM has a concrete success criterion. Engine + judge stay
     scenario-agnostic; all dataset-specific framing lives in the spec.
     """
+    extra = target.extra or {}
     target_cfg = TargetConfig(
         adapter=target.adapter,
+        url=str(extra.get("url", "") or ""),
         base_url=target.base_url,
         model=target.model,
+        method=str(extra.get("method", "POST") or "POST"),
+        headers=dict(extra.get("headers", {}) or {}),
+        body_template=str(extra.get("body_template", "") or ""),
+        response_path=str(extra.get("response_path", "") or ""),
         api_key=target.api_key,
         api_key_env=target.api_key_env,
         system_prompt=row.pre_prompt,
         user_turn_suffix=row.post_prompt,
         throttle=target.throttle,
+        send_template=str(extra.get("send_template", '{"message": "{{message}}"}') or '{"message": "{{message}}"}'),
+        receive=extra.get("receive"),
+        connect_signal=extra.get("connect_signal"),
+        query_params=dict(extra.get("query_params", {}) or {}),
+        connect_timeout=float(extra.get("connect_timeout", 10.0) or 10.0),
+        receive_timeout=float(extra.get("receive_timeout", 90.0) or 90.0),
     )
 
     rendered_objective = _render_row_template(
@@ -804,8 +853,17 @@ def build_scenario_for_row(
 
     agent = AgentConfig(
         model=spec.agent.model,
+        sub_module_model=spec.agent.sub_module_model,
+        judge_model=spec.agent.judge_model,
         api_key=spec.agent.api_key,
+        api_base=spec.agent.api_base,
         temperature=spec.agent.temperature,
+        max_tokens=spec.agent.max_tokens,
+        extra=spec.agent.extra,
+        max_context_tokens=spec.agent.max_context_tokens,
+        compression_keep_recent=spec.agent.compression_keep_recent,
+        compression_target_ratio=spec.agent.compression_target_ratio,
+        compression_model=spec.agent.compression_model,
         throttle=spec.agent.throttle,
         seed=seed,
     )

@@ -4,9 +4,10 @@
 #   mesmer run scenarios/extract-system-prompt-ws.yaml --verbose
 #
 # Prerequisites:
-#   export OPENROUTER_API_KEY=your-key-here
+#   export ANTHROPIC_API_KEY=your-claude-key
 #
-# The agent (attacker brain) uses the free Nemotron model via OpenRouter.
+# The agent (attacker brain) uses Claude Opus 4.7 for executive / manager
+# reasoning and Claude Haiku 4.5 for leaf sub-modules.
 # The target is your WebSocket endpoint.
 #
 # This is a SIMPLE example — single-frame JSON request/response.
@@ -52,6 +53,7 @@ modules:
   - system-prompt-extraction
 
 agent:
-  model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
-  api_key: "${OPENROUTER_API_KEY}"
+  model: anthropic/claude-opus-4-7
+  sub_module_model: anthropic/claude-haiku-4-5
+  api_key: "${ANTHROPIC_API_KEY}"
   temperature: 0.7

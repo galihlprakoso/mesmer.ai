@@ -148,11 +148,8 @@
     <div class="detail-content">
       {#if !node._isLeaderOrchestrator}
         <section class="summary-card">
-          <div class="summary-label">{isFrontier(node) ? 'Proposed move' : 'Outcome'}</div>
+          <div class="summary-label">At a glance</div>
           <div class="summary-title">{outcomeTitle(node)}</div>
-          {#if !isFrontier(node) && node.leaked_info}
-            <div class="evidence-chip">Evidence captured</div>
-          {/if}
         </section>
       {/if}
 
@@ -167,7 +164,7 @@
       {:else if isFrontier(node)}
         {#if node.approach}
           <details class="detail-section" open>
-            <summary>Attempt Plan</summary>
+            <summary>Proposed Move</summary>
             <pre>{node.approach}</pre>
           </details>
         {/if}
@@ -175,7 +172,7 @@
       {:else}
         {#if node.module_output}
           <details class="detail-section" open>
-            <summary>Result</summary>
+            <summary>Report</summary>
             <!-- module_output is the manager's / sub-module's concluded
                  write-up. Render structured markdown, but keep raw HTML
                  disabled because this content is LLM-generated. -->
@@ -183,44 +180,52 @@
           </details>
         {/if}
 
-        {#if node.leaked_info}
+        {#if node.leaked_info || node.reflection}
           <details class="detail-section">
-            <summary>Evidence</summary>
-            <div class="leaked">{node.leaked_info}</div>
+            <summary>Judge Review</summary>
+            {#if node.leaked_info}
+              <div class="field-block">
+                <span class="field-label">Extracted signal</span>
+                <div class="leaked">{node.leaked_info}</div>
+              </div>
+            {/if}
+            {#if node.reflection}
+              <div class="field-block">
+                <span class="field-label">Score rationale</span>
+                <pre>{node.reflection}</pre>
+              </div>
+            {/if}
           </details>
         {/if}
 
-        {#if node.approach}
+        {#if node.approach || pairs.length}
           <details class="detail-section">
-            <summary>Attempt</summary>
-            <pre>{node.approach}</pre>
-          </details>
-        {/if}
-
-        {#if pairs.length}
-          <details class="detail-section">
-            <summary>Conversation</summary>
-            {#each pairs as p, i}
-              {#if p.sent}
-                <div class="msg me">
-                  <span class="lbl">attacker → target · turn {i + 1}</span>
-                  {p.sent}
-                </div>
-              {/if}
-              {#if p.got}
-                <div class="msg them">
-                  <span class="lbl">target → attacker</span>
-                  {p.got}
-                </div>
-              {/if}
-            {/each}
-          </details>
-        {/if}
-
-        {#if node.reflection}
-          <details class="detail-section">
-            <summary>Planning Notes</summary>
-            <pre>{node.reflection}</pre>
+            <summary>Execution Trace</summary>
+            {#if node.approach}
+              <div class="field-block">
+                <span class="field-label">Instruction</span>
+                <pre>{node.approach}</pre>
+              </div>
+            {/if}
+            {#if pairs.length}
+              <div class="field-block">
+                <span class="field-label">Target exchange</span>
+                {#each pairs as p, i}
+                  {#if p.sent}
+                    <div class="msg me">
+                      <span class="lbl">attacker → target · turn {i + 1}</span>
+                      {p.sent}
+                    </div>
+                  {/if}
+                  {#if p.got}
+                    <div class="msg them">
+                      <span class="lbl">target → attacker</span>
+                      {p.got}
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
           </details>
         {/if}
       {/if}
@@ -403,16 +408,19 @@
     line-height: 1.45;
     word-break: break-word;
   }
-  .evidence-chip {
-    display: inline-flex;
-    margin-top: 8px;
-    padding: 2px 6px;
-    border: 1px solid var(--phosphor);
-    border-radius: 3px;
-    color: var(--phosphor);
+  .field-block {
+    margin-bottom: 10px;
+  }
+  .field-block:last-child {
+    margin-bottom: 0;
+  }
+  .field-label {
+    display: block;
+    color: var(--text-muted);
     font-family: var(--font-pixel);
     font-size: 0.625rem;
     letter-spacing: 0.08em;
+    margin-bottom: 5px;
     text-transform: uppercase;
   }
 
