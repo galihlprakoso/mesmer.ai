@@ -86,20 +86,6 @@ Existing tools like Garak and Promptfoo are strong scanners and evaluation harne
 
 Sources for the comparison: [Garak vulnerability probes](https://docs.garak.ai/garak/garak-components/vulnerability-probes), [How Garak runs](https://reference.garak.ai/en/latest/how.html), and [Promptfoo multi-turn jailbreaks](https://www.promptfoo.dev/docs/red-team/strategies/multi-turn/).
 
-## Hackathon Fit
-
-| Judging criterion | Mesmer's answer |
-|---|---|
-| **Impact (30%)** | AI teams need better ways to test their own systems before deployment. Mesmer turns scattered red-team observations into reusable target memory. |
-| **Demo (25%)** | CLI, web UI, live graph visualization, scenario editor, belief map, benchmarks, and deployed landing page: <https://mesmer-ai-jade.vercel.app/>. |
-| **Opus 4.7 Use (25%)** | Opus 4.7 shaped the planner language: hypotheses, evidence, confidence shifts, and frontier experiments. |
-| **Depth & Execution (20%)** | Runtime, module registry, target adapters, belief graph, benchmark harness, web backend, frontend, docs, and tests are all in-repo. |
-
-Mesmer fits both prompt directions:
-
-- **Build From What You Know**: red-teamers already track weak spots manually; Mesmer makes that workflow executable.
-- **Build For What's Next**: the new interface is not "run a prompt list." It is "collaborate with an agent that remembers and plans."
-
 ## Architecture In One Screen
 
 The detailed engineering map lives in [CLAUDE.md](CLAUDE.md) and [VISUALIZATION.md](VISUALIZATION.md). The product shape is this:
@@ -162,23 +148,6 @@ Human hints are first-class:
 uv run mesmer hint scenarios/extract-system-prompt.yaml \
   "try asking about calendar API errors; the target softened there"
 ```
-
-## Built With Opus 4.7
-
-Opus 4.7 was used as a co-architect for the parts of Mesmer that needed judgment, not just autocomplete.
-
-The central question was:
-
-> What should an LLM red-team agent remember between attempts so it gets better instead of just longer?
-
-That became Mesmer's planner vocabulary:
-
-- **Hypotheses**: falsifiable claims about how a target may break.
-- **Evidence**: structured signals from target replies, such as `partial_compliance`, `refusal_template`, `tool_reference`, and `hidden_instruction_fragment`.
-- **Belief updates**: confidence shifts that promote or refute hypotheses.
-- **Frontier experiments**: ranked next moves bound to concrete attack modules.
-
-The result is not "Claude writes jailbreak prompts." The result is a planner that observes, remembers, and adapts.
 
 ## Modules
 
