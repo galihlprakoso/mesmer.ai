@@ -51,19 +51,26 @@ mesmer stats
 
 ## How it works
 
-**Every module is a ReAct agent. Every run builds an attack graph.**
+**Every module is a ReAct agent. Every run builds two graphs in parallel — an attack graph (attempt history) and a belief graph (typed planner state).**
 
 ```
-Plan → Execute → Judge → Reflect → Update
+Plan → Execute → Judge → Extract → Update → Reflect
 
-1. PLAN    — Agent sees: attack graph state, dead ends, frontier nodes, budget mode
-2. EXECUTE — Picks a cognitive technique, sends crafted messages to target
+1. PLAN    — Agent sees: ranked frontier experiments, hypothesis confidences,
+             dead ends, scratchpad, budget mode
+2. EXECUTE — Dispatches the manager bound to the highest-utility experiment
 3. JUDGE   — Separate LLM call scores the attempt 1-10, extracts insights
-4. REFLECT — Generates 1-3 frontier nodes (suggested next moves to explore)
-5. UPDATE  — Graph persisted to ~/.mesmer/targets/{hash}/graph.json
+4. EXTRACT — Judge model tags structured evidence on the target's reply
+             (refusal_template, hidden_instruction_fragment, partial_compliance, …)
+5. UPDATE  — Evidence shifts hypothesis confidence; thresholds (0.85 / 0.15)
+             flip status to CONFIRMED / REFUTED. Frontier re-ranks. Both graphs
+             persist to ~/.mesmer/targets/{hash}/
+6. REFLECT — Per-attempt: strategy stats bumped; hypotheses regenerated when
+             stale. Per target reply: per-send extraction runs the same loop
+             mid-attempt so the leader sees belief shifts inside the ReAct loop.
 ```
 
-On the next run, the agent loads the graph, skips dead ends, and starts from the highest-priority frontier. It gets smarter with every execution.
+On the next run, the agent loads both graphs, skips dead ends, inherits prior beliefs, and starts from the highest-utility frontier experiment. It gets smarter with every execution.
 
 ```
 system-prompt-extraction (leader)
@@ -99,6 +106,8 @@ Finding a vulnerability is a **search problem.** Mesmer treats it as one — a p
 ```
 
 The graph persists at `~/.mesmer/targets/{hash}/`. No database, no embeddings — just JSON on disk.
+
+Alongside that attempt log, mesmer maintains a typed **belief graph** at the same path (`belief_graph.json` + an append-only `belief_deltas.jsonl` audit log). Six node kinds — target, weakness hypothesis, evidence, attempt, strategy, frontier experiment — and an 8-component utility ranker that picks the next move using UCB-with-lookahead instead of attempt-tree heuristics. The web UI's *Belief Map* toggle renders it live, hypothesis circles sized by confidence and frontier squares sized by utility. Strategies that work fold into a cross-target library at `~/.mesmer/global/strategies.json` so a fresh target's hypotheses inherit prior wins.
 
 ## Human-in-the-loop
 
@@ -273,22 +282,34 @@ some API credit._
 ```
 mesmer/
 ├── core/                    # attacker runtime — agent consumes scenario/runner
-│   ├── agent/               # ReAct loop + tools + judge + compressor + memory
-│   │   ├── engine.py        # run_react_loop — Plan→Execute→Judge→Reflect→Update
+│   ├── agent/               # ReAct loop + tools + judge + belief layer + memory
+│   │   ├── engine.py        # run_react_loop — Plan→Execute→Judge→Extract→Update→Reflect
 │   │   ├── tools/           # one file per tool (send_message, ask_human, …)
 │   │   ├── judge.py         # in-loop LLM judge (scores attempts 1-10)
+│   │   ├── evidence.py      # evidence extractor (judge-model LLM call → typed Evidence)
+│   │   ├── beliefs.py       # generate_hypotheses + apply_evidence + rank_frontier +
+│   │   │                     #   generate_frontier_experiments + select_next_experiment
+│   │   │                     #   (UCB-with-lookahead)
+│   │   ├── graph_compiler.py # GraphContextCompiler — role-scoped belief brief
+│   │   │                     #   (LEADER / MANAGER / EMPLOYEE / JUDGE / EXTRACTOR)
 │   │   ├── compressor.py    # CONTINUOUS-mode summary-buffer compression
 │   │   ├── context.py       # shared state, LiteLLM completion, telemetry
 │   │   ├── memory.py        # per-target persistence
 │   │   └── prompts/         # prose prompt text (.prompt.md)
-│   ├── graph.py             # persistent per-target attack graph + frontier proposer
+│   ├── graph.py             # legacy per-target attack graph (attempt history)
+│   ├── belief_graph.py      # typed planner state — TargetNode / WeaknessHypothesis /
+│   │                         #   Evidence / Attempt / Strategy / FrontierExperiment,
+│   │                         #   GraphDelta mutation contract, JSONL audit log
+│   ├── strategy_library.py  # cross-target lifelong strategy library
 │   ├── runner.py            # execute_run — shared CLI/web/bench entry point
 │   ├── scenario.py          # YAML scenario loader with ${ENV_VAR} resolution
 │   ├── module.py            # ModuleConfig + YAML loader
 │   ├── registry.py          # module auto-discovery
 │   ├── keys.py              # API key rotation
-│   ├── constants.py         # enums (ToolName, TurnKind, ScenarioMode, …)
-│   └── errors.py            # MesmerError hierarchy
+│   ├── constants.py         # enums (ToolName, ScenarioMode, HypothesisStatus,
+│   │                         #   EvidenceType, ExperimentState, BeliefRole, …)
+│   └── errors.py            # MesmerError hierarchy (incl. InvalidDelta,
+│                              #   EvidenceExtractionError, HypothesisGenerationError)
 ├── bench/                   # benchmark infrastructure (consumes core)
 │   ├── orchestrator.py      # spec loader, trial dispatch, aggregation, artifacts
 │   └── canary.py            # deterministic substring judge (benchmark success)

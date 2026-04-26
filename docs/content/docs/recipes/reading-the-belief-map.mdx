@@ -1,0 +1,172 @@
+---
+title: Reading the belief map
+description: Operator's guide to the live Belief Map view — boards, the force-directed canvas, and the leader brief detail panel.
+---
+
+The web UI ships two graph views against the same target. The
+**Attack Graph** is the legacy attempt tree (what was tried, in what
+order, with what score). The **Belief Map** is the typed planner
+state — see [the belief graph concept](../concepts/belief-graph) for
+the data model. This recipe is about the UI itself: where to find it,
+what each shape means, and the workflows it unlocks.
+
+## Where to find it
+
+```bash
+uv run mesmer serve         # default: http://localhost:8000
+```
+
+Open a scenario in the graph layout (click any card on the scenario
+list, or use the URL `#/scenarios/{path}`). At the top of the graph
+area there's a **toggle pill** with two tabs: *Attack* and *Belief*.
+Click *Belief*. The toggle is purely a UI affordance — both graphs
+are persisted on disk and updated by the engine on every run. You're
+just choosing which lens to look through.
+
+If the panel says *"Pick a target to see its belief graph"*, the
+target hash hasn't been derived yet — make sure a scenario is
+selected (sidebar). If it says *"No belief graph saved for this
+target yet"*, this target has never run with the wiring. Hit **Run
+Attack** in the sidebar; the panel switches to *"Belief graph is
+initializing…"* during bootstrap and then the first nodes appear.
+
+## The Belief Map at a glance
+
+The view has three coordinated regions: the **chrome strip** at the
+top with live counts, the **force-directed canvas** in the centre,
+and the **inspector rail** on the right.
+
+```
+┌───────────────────────────────────────────────────────┐
+│ ● ● ●  belief map ▸ live   hyp 4/3  ev 7  fx 5/3  at 9│  ← chrome strip
+├──────────────────────────────────┬────────────────────┤
+│   ╲   ▲ supports                │ Frontier  Evidence │  ← rail tabs
+│  (●)──────────────────────(●)   │ ┌──────────────┐  │
+│  hypothesis            hypothesis│ │ format-shift │  │  ← inspector list
+│      ╲ refutes                  │ │ u=0.71       │  │     (frontier)
+│       ▲                         │ ├──────────────┤  │
+│       ┃                         │ │ authority…   │  │
+│      ▢ frontier (★ selected)    │ │ u=0.58       │  │
+│                                 │ └──────────────┘  │
+│   ◇ strategy        Legend  [─] │                    │
+└──────────────────────────────────┴────────────────────┘
+```
+
+Counts in the chrome strip read as `total / live`. So `hyp 4/3` means
+four hypotheses exist, three of them are still ACTIVE (one is
+CONFIRMED, REFUTED, or STALE); `fx 5/3` means five experiments exist,
+three are still PROPOSED.
+
+## The force-directed canvas
+
+Every typed node renders with a distinct shape — colour layers the
+status on top.
+
+| Shape | Node | Colour & sizing |
+|---|---|---|
+| Star | Target | Phosphor green; one per graph |
+| Circle | Hypothesis | **Size = confidence** (radius `12 + 12·c`). Colour by status — text-default = ACTIVE, phosphor = CONFIRMED, red = REFUTED, muted = STALE |
+| Triangle | Evidence | Phosphor = SUPPORTS, red = REFUTES, muted = NEUTRAL |
+| Square | Frontier experiment | **Size = utility** (radius `7 + 8·u`). Amber when PROPOSED or EXECUTING, muted when FULFILLED or DROPPED |
+| Diamond | Strategy | Violet |
+| Small dot | Attempt | Muted; the audit trail is intentionally de-emphasised |
+
+Edges are coloured by relationship: phosphor for *supports*, red for
+*refutes*, amber for *expands*, violet for *uses strategy*, muted
+for the audit links (`tests`, `observed`).
+
+The legend in the bottom-right collapses to a `?` chip; preference
+persists per browser. Pan + zoom via the standard D3 zoom behaviour
+— scroll-wheel to zoom, click-drag the empty canvas to pan.
+
+## The inspector rail
+
+Three tabs. One list each.
+
+**Frontier** — proposed experiments sorted by utility, top 12. Each
+row shows the module name, a `u=…` chip with the aggregate utility,
+and a one-line excerpt from the experiment's instruction. Click a
+row to select that node; the canvas highlights it. The selector's
+`★` pick (see [frontier-and-utility](../concepts/frontier-and-utility#ucb-with-lookahead))
+is whichever experiment is currently top of this list — the leader
+sees the same ranking.
+
+**Evidence** — newest evidence first, top 12. Rows show the signal
+type, the polarity tag (`supports` / `refutes` / `neutral`), the
+confidence delta `Δ=…` (always positive — sign comes from polarity),
+and an excerpt of the verbatim target fragment that motivated the
+label. This is your timeline for "why did the planner just shift
+beliefs?"
+
+**Strategy** — local strategies sorted by per-target success rate.
+Rows show the family, a `success/attempt` count chip, and a
+one-line `template_summary`. The cross-target lifetime counts live
+in [`~/.mesmer/global/strategies.json`](../concepts/frontier-and-utility#the-strategy-library);
+the rail shows local stats only.
+
+## The detail panel — and the live LEADER brief
+
+Click any node (canvas or rail) and the rail flips to a typed detail
+view. Hypotheses show claim + family + confidence + status + the
+strongest two evidences. Frontier nodes show the eight utility
+components broken out, the linked hypothesis and strategy, the
+expected signal. Evidence shows the verbatim fragment, polarity, and
+the confidence delta it triggered.
+
+Every detail panel exposes an expandable **Prompt Context** block
+near the bottom. That's the live `LEADER` brief from
+`GraphContextCompiler.compile(role=LEADER)` — the *exact* string the
+engine just injected into the running module's user prompt. It's the
+single most useful debugging surface in the app: what does the
+planner think it's looking at right now, and what move did it
+recommend?
+
+## Live polling
+
+While a run is executing (`runStatus === 'running'`) the panel
+re-fetches `/api/targets/{hash}/belief-graph` every 2.5 seconds. The
+endpoint serves the in-memory belief graph from the live `ctx` first
+(the runner only persists at run end), and falls back to the on-disk
+snapshot or delta-log replay otherwise. When no run is active you
+see whatever was on disk at the last run-end save.
+
+If you want to force a refresh between polls, the toolbar **Refresh**
+button does it directly. **Hide rail** collapses the inspector to
+give the canvas full bleed; the preference persists per browser.
+
+## Common operator workflows
+
+**Why did the planner pick *that* experiment?**
+Click the experiment in the Frontier rail. The detail panel breaks
+out all eight utility components — you'll see at a glance whether
+`expected_progress` is carrying the score, whether
+`dead_similarity` is dragging it down, or whether the UCB
+exploration bonus pushed a low-utility candidate to the top because
+its hypothesis is fresh. Cross-reference with the **Prompt Context**
+block to see exactly what the leader read.
+
+**Spotting a hypothesis drifting toward STALE.**
+Switch the rail to *Evidence*. If the timeline shows long stretches
+without evidence touching a particular hypothesis, that's the path to
+STALE — by default, three runs without supporting evidence demote an
+ACTIVE hypothesis. Selecting the hypothesis on the canvas shows
+`last_evidence_at`; older than two runs ago and you're heading
+there. A targeted [hint](../tutorials/iterating-with-hints) often
+revives it.
+
+**Strategy that consistently fails against this target.**
+Switch the rail to *Strategy* and look for rows with low `success /
+attempt` ratios. The detail panel shows `fails_against_traits` —
+which target traits the strategy has correlated with failures
+*locally*. The cross-target library may show the same strategy
+working elsewhere; the difference is exactly the kind of signal you
+write into the executive's scratchpad to bias future runs.
+
+## Related
+
+- [The belief graph](../concepts/belief-graph) — the data model the
+  Belief Map renders.
+- [Frontier experiments & utility](../concepts/frontier-and-utility)
+  — what utility means, how the selector picks the `★`.
+- [The web editor](./the-web-editor) — scenario-authoring side of the
+  same web UI.

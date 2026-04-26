@@ -240,18 +240,21 @@
     min-height: 0;
   }
 
-  /* Graph view toggle (Session 3): pill in the top-left of the graph
-     area lets the operator switch between the legacy AttackGraph and
-     the typed BeliefMap. Both backends run side-by-side; this toggle
-     is purely a UI affordance. */
+  /* Graph view toggle (Session 3): pill horizontally centered above the
+     canvas — anchors as the primary view-mode switch rather than
+     fighting for the top-left with each view's own toolbar. Both
+     backends run side-by-side; this toggle is purely a UI affordance. */
   .graph-view-toggle {
     position: absolute;
     top: 0.5rem;
-    left: 0.75rem;
-    z-index: 5;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 6;
     display: flex;
     gap: 0.25rem;
-    background: var(--surface-2, #181818);
+    background: color-mix(in srgb, var(--surface-2, #181818) 88%, transparent);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     border: 1px solid var(--border, #333);
     border-radius: 999px;
     padding: 2px;

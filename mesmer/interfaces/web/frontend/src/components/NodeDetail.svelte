@@ -68,37 +68,39 @@
       )
     : []
 
-  // Tab list — derived from what data is actually present on this node.
-  // Order matters: it's the default-pick precedence too (first tab wins).
-  // Output goes FIRST when present because it's the deliverable — the
-  // module's concluded write-up. For exploit-analysis specifically
-  // it's a markdown findings report, but every manager / sub-module's
-  // module_output is what the operator wants to read first; the
-  // probe-level detail (approach, exchange) is drill-down.
-  function computeTabs(n, p, cfg) {
-    if (!n) return []
-    const out = []
-    if (n._isLeaderOrchestrator) {
-      if (n._scenarioObjective) out.push({ key: 'objective', label: 'Objective' })
-      if (cfg) out.push({ key: 'config', label: 'Config' })
-      return out
-    }
-    if (n.module_output && !isFrontier(n)) out.push({ key: 'output', label: 'Output' })
-    if (n.leaked_info && !isFrontier(n)) out.push({ key: 'leaks', label: 'Leaks' })
-    if (n.approach) out.push({ key: 'approach', label: 'Approach' })
-    if (p.length) out.push({ key: 'exchange', label: 'Exchange' })
-    if (n.reflection && !isFrontier(n)) out.push({ key: 'reflection', label: 'Reflection' })
-    if (cfg) out.push({ key: 'config', label: 'Config' })
-    return out
+  function plainText(markdown) {
+    return (markdown || '')
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/[*_~>#-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
   }
 
-  let activeTab = null
-  $: tabs = computeTabs(node, pairs, moduleConfig)
-  // Default-pick / repair: when the tab list changes (different node, or
-  // moduleConfig finished loading) and the current activeTab isn't in
-  // the new list, jump to the first available.
-  $: if (tabs.length > 0 && !tabs.find(t => t.key === activeTab)) {
-    activeTab = tabs[0].key
+  function firstLine(text) {
+    return (text || '').split('\n').map(s => s.trim()).find(Boolean) || ''
+  }
+
+  function truncate(text, max = 180) {
+    const clean = plainText(text)
+    if (clean.length <= max) return clean
+    return clean.slice(0, max - 1).trimEnd() + '…'
+  }
+
+  function outcomeTitle(n) {
+    if (!n) return ''
+    if (isFrontier(n)) return truncate(n.approach, 120) || 'Proposed move'
+    const heading = firstLine(n.module_output || '')
+    if (heading) return truncate(heading, 120)
+    if (n.leaked_info) return truncate(n.leaked_info, 120)
+    return truncate(n.approach, 120) || 'Attempt recorded'
+  }
+
+  function scoreLabel(n) {
+    if (!n || isFrontier(n) || n._isLeaderOrchestrator) return ''
+    return Number.isFinite(n.score) ? `Score ${n.score}/10` : ''
   }
 </script>
 
@@ -116,7 +118,8 @@
       <button class="close-btn" on:click={close} aria-label="Close">&times;</button>
     </div>
 
-    <!-- Always-visible context: banners + status badge live ABOVE tabs
+    <!-- Always-visible context: banners + status badge live above the
+         expandable detail sections
          because they're frame-of-reference, not content. -->
     <div class="banners">
       {#if node._isLeaderOrchestrator}
@@ -135,63 +138,96 @@
       {#if !node._isLeaderOrchestrator && node.status}
         <div class="status-row">
           <span class="status-badge {node.status}">{node.status}</span>
+          {#if scoreLabel(node)}
+            <span class="score-pill">{scoreLabel(node)}</span>
+          {/if}
         </div>
       {/if}
     </div>
 
-    {#if tabs.length > 0}
-      <div class="tab-strip" role="tablist" aria-label="Node detail sections">
-        {#each tabs as t (t.key)}
-          <button
-            class="tab"
-            class:active={activeTab === t.key}
-            role="tab"
-            aria-selected={activeTab === t.key}
-            on:click={() => activeTab = t.key}
-          >{t.label}</button>
-        {/each}
-      </div>
+    <div class="detail-content">
+      {#if !node._isLeaderOrchestrator}
+        <section class="summary-card">
+          <div class="summary-label">{isFrontier(node) ? 'Proposed move' : 'Outcome'}</div>
+          <div class="summary-title">{outcomeTitle(node)}</div>
+          {#if !isFrontier(node) && node.leaked_info}
+            <div class="evidence-chip">Evidence captured</div>
+          {/if}
+        </section>
+      {/if}
 
-      <div class="tab-content">
-        {#if activeTab === 'objective'}
-          <pre>{node._scenarioObjective}</pre>
+      {#if node._isLeaderOrchestrator}
+        {#if node._scenarioObjective}
+          <details class="detail-section" open>
+            <summary>Objective</summary>
+            <pre>{node._scenarioObjective}</pre>
+          </details>
+        {/if}
 
-        {:else if activeTab === 'approach'}
-          <pre>{node.approach}</pre>
+      {:else if isFrontier(node)}
+        {#if node.approach}
+          <details class="detail-section" open>
+            <summary>Attempt Plan</summary>
+            <pre>{node.approach}</pre>
+          </details>
+        {/if}
 
-        {:else if activeTab === 'exchange'}
-          {#each pairs as p, i}
-            {#if p.sent}
-              <div class="msg me">
-                <span class="lbl">attacker → target · turn {i + 1}</span>
-                {p.sent}
-              </div>
-            {/if}
-            {#if p.got}
-              <div class="msg them">
-                <span class="lbl">target → attacker</span>
-                {p.got}
-              </div>
-            {/if}
-          {/each}
+      {:else}
+        {#if node.module_output}
+          <details class="detail-section" open>
+            <summary>Result</summary>
+            <!-- module_output is the manager's / sub-module's concluded
+                 write-up. Render structured markdown, but keep raw HTML
+                 disabled because this content is LLM-generated. -->
+            <div class="md-render">{@html marked.parse(node.module_output || '')}</div>
+          </details>
+        {/if}
 
-        {:else if activeTab === 'leaks'}
-          <div class="leaked">{node.leaked_info}</div>
+        {#if node.leaked_info}
+          <details class="detail-section">
+            <summary>Evidence</summary>
+            <div class="leaked">{node.leaked_info}</div>
+          </details>
+        {/if}
 
-        {:else if activeTab === 'reflection'}
-          <pre>{node.reflection}</pre>
+        {#if node.approach}
+          <details class="detail-section">
+            <summary>Attempt</summary>
+            <pre>{node.approach}</pre>
+          </details>
+        {/if}
 
-        {:else if activeTab === 'output'}
-          <!-- module_output is the manager's / sub-module's concluded
-               write-up. Many recent modules (exploit-analysis,
-               tool-extraction reports) emit structured markdown
-               with headings, lists, code blocks, tables — render
-               those richly. We DON'T enable raw-HTML passthrough
-               because the content is LLM-generated; marked drops
-               unknown tags safely by default. -->
-          <div class="md-render">{@html marked.parse(node.module_output || '')}</div>
+        {#if pairs.length}
+          <details class="detail-section">
+            <summary>Conversation</summary>
+            {#each pairs as p, i}
+              {#if p.sent}
+                <div class="msg me">
+                  <span class="lbl">attacker → target · turn {i + 1}</span>
+                  {p.sent}
+                </div>
+              {/if}
+              {#if p.got}
+                <div class="msg them">
+                  <span class="lbl">target → attacker</span>
+                  {p.got}
+                </div>
+              {/if}
+            {/each}
+          </details>
+        {/if}
 
-        {:else if activeTab === 'config' && moduleConfig}
+        {#if node.reflection}
+          <details class="detail-section">
+            <summary>Planning Notes</summary>
+            <pre>{node.reflection}</pre>
+          </details>
+        {/if}
+      {/if}
+
+      {#if moduleConfig}
+        <details class="detail-section">
+          <summary>Module Definition</summary>
           <div class="config-tag">
             {moduleConfig.name} · T{moduleConfig.tier ?? tierOf(moduleConfig.name)}
           </div>
@@ -217,9 +253,9 @@
               <span class="sub-modules-val">{moduleConfig.sub_modules.join(', ')}</span>
             </div>
           {/if}
-        {/if}
-      </div>
-    {/if}
+        </details>
+      {/if}
+    </div>
   </aside>
 {/if}
 
@@ -277,12 +313,18 @@
   }
   .close-btn:hover { color: var(--text); }
 
-  /* ---------- banners + status (above tabs) ---------- */
+  /* ---------- banners + status ---------- */
   .banners {
     padding: 10px 16px 0;
     flex-shrink: 0;
   }
-  .status-row { margin: 4px 0 0 0; }
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0 0 0;
+    flex-wrap: wrap;
+  }
   .status-badge {
     display: inline-flex;
     align-items: center;
@@ -319,48 +361,59 @@
     color: var(--text-muted);
   }
 
-  /* ---------- tab strip ---------- */
-  .tab-strip {
-    flex-shrink: 0;
-    display: flex;
-    gap: 2px;
-    margin: 12px 16px 0;
-    padding-bottom: 4px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .tab-strip::-webkit-scrollbar { display: none; }
-  .tab {
-    flex-shrink: 0;
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
+  .score-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 3px;
     font-family: var(--font-pixel);
-    font-size: 0.6875rem;
-    font-weight: 400;
-    padding: 6px 11px;
-    cursor: pointer;
-    border-radius: 3px 3px 0 0;
-    text-transform: uppercase;
+    font-size: 0.625rem;
     letter-spacing: 0.08em;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    transition: color 120ms, border-color 120ms;
-  }
-  .tab:hover { color: var(--text); }
-  .tab.active {
-    color: var(--phosphor);
-    border-bottom-color: var(--phosphor);
-    text-shadow: var(--phosphor-glow);
+    text-transform: uppercase;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
   }
 
-  /* ---------- tab content ---------- */
-  .tab-content {
+  .detail-content {
     flex: 1;
     overflow-y: auto;
     padding: 12px 16px 24px;
     font-size: 12px;
+  }
+
+  .summary-card {
+    background: hsla(155 100% 42% / 0.06);
+    border: 1px solid hsla(155 100% 42% / 0.28);
+    border-radius: 5px;
+    padding: 9px 10px;
+    margin-bottom: 10px;
+  }
+  .summary-label {
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 5px;
+  }
+  .summary-title {
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.45;
+    word-break: break-word;
+  }
+  .evidence-chip {
+    display: inline-flex;
+    margin-top: 8px;
+    padding: 2px 6px;
+    border: 1px solid var(--phosphor);
+    border-radius: 3px;
+    color: var(--phosphor);
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 
   pre {
@@ -377,7 +430,7 @@
     line-height: 1.55;
   }
 
-  /* ---------- Markdown rendering for the Output tab ----------
+  /* ---------- Markdown rendering for module output ----------
      Modules emit structured markdown reports (exploit-analysis is the
      canonical example, but tool-extraction / system-prompt-extraction
      also frequently emit headers + lists). The styles below give those
@@ -506,7 +559,7 @@
     margin-top: 0;
   }
 
-  /* ---------- nested config <details> (still useful inside Config tab) */
+  /* ---------- progressive disclosure sections ---------- */
   details {
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
@@ -541,7 +594,24 @@
     overflow-y: auto;
   }
 
-  /* ---------- config tab content ---------- */
+  .detail-section {
+    margin-bottom: 8px;
+  }
+  .detail-section > summary {
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 4px 0;
+  }
+  .detail-section[open] > summary {
+    color: var(--phosphor);
+    text-shadow: var(--phosphor-glow);
+    margin-bottom: 8px;
+  }
+
+  /* ---------- module definition content ---------- */
   .config-tag {
     display: inline-block;
     font-family: var(--mono);

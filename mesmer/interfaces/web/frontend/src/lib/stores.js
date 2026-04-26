@@ -60,6 +60,13 @@ export const selectedTargetHash = derived(
 /** Selected graph node (for detail panel) */
 export const selectedNode = writable(null)
 
+/**
+ * Selected belief-graph node — distinct from `selectedNode` because
+ * belief-graph nodes carry a different schema (kind / claim / utility /
+ * polarity / etc.) than the legacy `AttackNode`. Drives BeliefNodeDetail.
+ */
+export const selectedBeliefNode = writable(null)
+
 /** Bottom-panel display preference: 'autonomous' | 'co-op'.
  *  Frontend-only UI toggle. The backend executive ALWAYS has a chat
  *  surface available (the synthesized executive owns ask_human /

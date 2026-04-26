@@ -62,12 +62,33 @@ mesmer/                          # repo root
 │   │   │   │                    #   ctx.run_module (sub-module delegation)
 │   │   │   ├── retry.py         # _completion_with_retry: key rotation + cooldown
 │   │   │   ├── tools/           # ONE FILE PER TOOL — schema + handler together
-│   │   │   │   ├── send_message.py    # manager-only: talk to the target
+│   │   │   │   ├── send_message.py    # manager-only: talk to the target.
+│   │   │   │   │                    #   ALSO calls _update_belief_graph_from_turn
+│   │   │   │   │                    #   on every successful target reply so
+│   │   │   │   │                    #   evidence/confidence/frontier-rank update
+│   │   │   │   │                    #   mid-attempt; surfaces a "Belief evidence
+│   │   │   │   │                    #   updated:" trailer in the tool_result so
+│   │   │   │   │                    #   the model sees belief shifts inline.
+│   │   │   │   │                    #   Uses ctx._belief_evidence_turn_indexes
+│   │   │   │   │                    #   to dedupe with module-level extraction.
 │   │   │   │   ├── ask_human.py       # executive-only: blocking question
 │   │   │   │   ├── talk_to_operator.py # executive-only: non-blocking chat reply
 │   │   │   │   ├── update_scratchpad.py # executive-only: rewrite persisted notes
 │   │   │   │   ├── conclude.py  # no handler — engine short-circuits
-│   │   │   │   ├── sub_module.py # dynamic: executes sub-module + judge + graph
+│   │   │   │   ├── sub_module.py # dynamic: executes sub-module + judge + graph.
+│   │   │   │   │                #   _auto_bind_experiment_id resolves the
+│   │   │   │   │                #   belief-graph dispatch contract at the tool
+│   │   │   │   │                #   boundary EVEN when the leader forgets the
+│   │   │   │   │                #   experiment_id arg — scans for a PROPOSED
+│   │   │   │   │                #   FrontierExperiment matching the dispatched
+│   │   │   │   │                #   module and binds the highest-utility one.
+│   │   │   │   │                #   Applies FrontierUpdateStateDelta(EXECUTING)
+│   │   │   │   │                #   before the run, threads active_experiment_id
+│   │   │   │   │                #   through ctx.run_module so deeply-nested
+│   │   │   │   │                #   employees still know which experiment they
+│   │   │   │   │                #   test. Calls _update_belief_graph at the end
+│   │   │   │   │                #   with extractor-tail slicing so per-send
+│   │   │   │   │                #   extraction isn't double-counted.
 │   │   │   │   ├── base.py      # shared tool_result() helper
 │   │   │   │   └── __init__.py  # build_tool_list (gates on is_executive),
 │   │   │   │                    #   dispatch_tool_call, _BUILTIN_HANDLERS
@@ -88,7 +109,14 @@ mesmer/                          # repo root
 │   │   │   ├── judge.py         # in-loop LLM judge: evaluate_attempt,
 │   │   │   │                    #   refine_approach, generate_frontier, JudgeResult
 │   │   │   ├── evaluation.py    # _judge_module_result, _update_graph,
-│   │   │   │                    #   _reflect_and_expand — post-delegation pipeline
+│   │   │   │                    #   _reflect_and_expand — post-delegation pipeline.
+│   │   │   │                    #   Also: _update_belief_graph (per-attempt
+│   │   │   │                    #   pipeline — Attempt + StrategyUpdateStats +
+│   │   │   │                    #   extractor + apply_evidence + frontier
+│   │   │   │                    #   regen + rank), _update_belief_graph_from_turn
+│   │   │   │                    #   (per-send pipeline used by send_message —
+│   │   │   │                    #   NO Attempt node, just live evidence + ranks),
+│   │   │   │                    #   _outcome_for (judge_score → AttemptOutcome).
 │   │   │   ├── compressor.py    # CONTINUOUS-mode summary-buffer compression
 │   │   │   ├── memory.py        # TargetMemory (per-target persistence),
 │   │   │   │                    #   GlobalMemory (cross-target stats), run_id
@@ -98,18 +126,34 @@ mesmer/                          # repo root
 │   │   │   │                    #   one judge-model LLM call → list[Evidence]; raises
 │   │   │   │                    #   EvidenceExtractionError on failure (boundary
 │   │   │   │                    #   contract — engine catches in Session 2).
-│   │   │   ├── beliefs.py       # belief-graph hypothesis layer (Session 1 parallel) —
-│   │   │   │                    #   generate_hypotheses (LLM, raises HypothesisGenerationError),
-│   │   │   │                    #   apply_evidence_to_beliefs (pure: evidence → confidence/
-│   │   │   │                    #   status deltas with threshold flips), rank_frontier
-│   │   │   │                    #   (pure: 8-component utility ranker, weights from
-│   │   │   │                    #   DEFAULT_UTILITY_WEIGHTS).
-│   │   │   ├── graph_compiler.py # belief-graph context renderer (Session 1 parallel) —
+│   │   │   ├── beliefs.py       # belief-graph hypothesis layer —
+│   │   │   │                    #   generate_hypotheses (LLM, raises
+│   │   │   │                    #   HypothesisGenerationError),
+│   │   │   │                    #   apply_evidence_to_beliefs (pure: evidence →
+│   │   │   │                    #   confidence/status deltas with threshold flips),
+│   │   │   │                    #   rank_frontier (pure: 8-component utility
+│   │   │   │                    #   ranker, weights from DEFAULT_UTILITY_WEIGHTS),
+│   │   │   │                    #   generate_frontier_experiments (DETERMINISTIC
+│   │   │   │                    #   bridge from hypotheses → fx_… experiments
+│   │   │   │                    #   using _FAMILY_MODULE_HINTS +
+│   │   │   │                    #   _FAMILY_EXPECTED_SIGNALS lookups + module
+│   │   │   │                    #   scoring against the registry; emits
+│   │   │   │                    #   StrategyCreateDelta + FrontierCreateDelta),
+│   │   │   │                    #   select_next_experiment (UCB layer 1 + depth-2
+│   │   │   │                    #   belief-state lookahead with progressive
+│   │   │   │                    #   widening — _support_probability +
+│   │   │   │                    #   _simulated_utility + _simulated_second_step_value,
+│   │   │   │                    #   tunable via lookahead_weight / rollout_branching).
+│   │   │   ├── graph_compiler.py # belief-graph context renderer —
 │   │   │   │                    #   GraphContextCompiler.compile(role=, module_name=,
-│   │   │   │                    #   active_experiment_id=, token_budget=). One brief per
-│   │   │   │                    #   BeliefRole (LEADER/MANAGER/EMPLOYEE/JUDGE/EXTRACTOR);
-│   │   │   │                    #   pure renderer, no LLM, soft-trims trailing sections
-│   │   │   │                    #   when token_budget is set.
+│   │   │   │                    #   active_experiment_id=, available_modules=,
+│   │   │   │                    #   token_budget=). One brief per BeliefRole
+│   │   │   │                    #   (LEADER/MANAGER/EMPLOYEE/JUDGE/EXTRACTOR);
+│   │   │   │                    #   pure renderer, no LLM, soft-trims trailing
+│   │   │   │                    #   sections. Leader brief flags the
+│   │   │   │                    #   select_next_experiment() pick with ★ and
+│   │   │   │                    #   constrains the experiment list to the
+│   │   │   │                    #   leader's available manager set when passed.
 │   │   │   └── __init__.py      # re-exports public agent surface
 │   │   ├── graph.py             # AttackGraph, AttackNode, classify + propose_frontier
 │   │   │                        #   + learned-experience queries (winning_modules,
@@ -132,7 +176,16 @@ mesmer/                          # repo root
 │   │   │                        #   bootstraps ctx.scratchpad from graph's latest
 │   │   │                        #   conversation_history + scratchpad.md, and at
 │   │   │                        #   run end records the executive's own execution
-│   │   │                        #   as an AttackNode with source=LEADER
+│   │   │                        #   as an AttackNode with source=LEADER. Belief-
+│   │   │                        #   graph wiring: loads/saves belief_graph.json
+│   │   │                        #   + belief_deltas.jsonl alongside the legacy
+│   │   │                        #   files, seeds declared_system_prompt trait,
+│   │   │                        #   bootstraps hypotheses (LLM) AND frontier
+│   │   │                        #   experiments (deterministic via
+│   │   │                        #   generate_frontier_experiments scoped to
+│   │   │                        #   entry.sub_module_names) before the first
+│   │   │                        #   leader prompt, folds per-target Strategy
+│   │   │                        #   nodes into the global library at run end.
 │   │   ├── scenario.py          # YAML scenario loader, ${ENV_VAR} resolution,
 │   │   │                        #   Scenario/AgentConfig/TargetConfig/Objective.
 │   │   │                        #   Hard-fails legacy "module: <name>" — current
@@ -432,7 +485,8 @@ log doubles as the recovery log. Apply paths deep-copy on insert so a
 delta object's payload stays pristine after the graph mutates the
 copy in place.
 
-**Three pure-ish operations on the graph**:
+**Five pure-ish operations on the graph** (one LLM-driven, four
+deterministic):
 
 1. **`agent/evidence.py::extract_evidence`** — one judge-model LLM
    call per attempt → list[Evidence]. Categories are scenario-agnostic
@@ -443,9 +497,8 @@ copy in place.
    of the resulting `confidence_delta` comes from
    `EVIDENCE_TYPE_WEIGHTS` × extractor confidence; sign comes from
    polarity, applied in step 2. Failures raise
-   `EvidenceExtractionError` — caught at the engine boundary in
-   Session 2, leaves the run going with empty evidence on that
-   iteration.
+   `EvidenceExtractionError` — caught at the engine boundary, leaves
+   the run going with empty evidence on that iteration.
 
 2. **`agent/beliefs.py::apply_evidence_to_beliefs`** — pure, no LLM.
    Walks Evidence list and emits `HypothesisUpdateConfidenceDelta`
@@ -469,11 +522,69 @@ copy in place.
    fulfilled experiments; cap on the comparison window keeps ranking
    O(1) per experiment.
 
+4. **`agent/beliefs.py::generate_frontier_experiments`** — pure, no
+   LLM. Bridges hypotheses → dispatchable `fx_…` experiments using
+   two scenario-agnostic lookup tables: `_FAMILY_MODULE_HINTS` (which
+   modules best test which family — `format-shift` →
+   `format-shift, prefix-commitment, delimiter-injection`, etc.) and
+   `_FAMILY_EXPECTED_SIGNALS` (one-line description of the target
+   behaviour to watch for). For each ACTIVE hypothesis missing a
+   frontier, picks the top-N modules by family score
+   (`_module_score_for_family`: family-name match + hint position +
+   token Jaccard against the registry's module description, minus a
+   tier penalty), then emits `StrategyCreateDelta` (deduped by
+   `(family, template_summary)`) + `FrontierCreateDelta` per
+   pairing. Critical bridge: hypotheses come from an LLM, but the
+   PLANNER QUEUE is reducer-owned and auditable — the LLM never
+   invents the `fx_…` ids the leader has to dispatch.
+
+5. **`agent/beliefs.py::select_next_experiment`** — pure, no LLM.
+   Two-step belief-state lookahead. Layer 1 is UCB on top of the
+   utility ranker:
+
+       layer1(fx) = fx.utility + c · sqrt(log(N + 1) / (n_h + 1))
+
+   Layer 2 (when ≥ 2 proposed experiments exist) simulates a
+   target-query-free SUPPORTS/REFUTES rollout for each candidate:
+   `p_support × value_after_support + (1 - p_support) ×
+   value_after_refute` where `p_support = _support_probability(fx)`
+   blends utility / strategy_prior / novelty into [0.1, 0.9], and
+   each branch's "value" is the best second-step UCB-augmented
+   utility under the simulated belief state with progressive
+   widening capped by `DEFAULT_ROLLOUT_BRANCHING`. Tunable via
+   `lookahead_depth` (default 2) and `lookahead_weight` (default
+   0.4). The compiler's leader brief flags the selector's pick
+   with `★`.
+
 Hypothesis generation (`agent/beliefs.py::generate_hypotheses`) is
-the fourth operation but it's LLM-driven and used sparingly — at
-run boot to seed the active list, and on demand when the extractor
-keeps returning NEUTRAL evidence (no fit). Failures raise
-`HypothesisGenerationError`.
+the only LLM-driven operation; used sparingly — at run boot to seed
+the active list, and on demand when the extractor keeps returning
+NEUTRAL evidence (no fit). Failures raise `HypothesisGenerationError`.
+
+**Per-send live evidence extraction.** `tools/send_message.py`
+calls `evaluation._update_belief_graph_from_turn(ctx, ...)` after
+every successful target reply (the `is_error` path is skipped to
+avoid scoring infrastructure glitches as evidence). That helper:
+
+- builds a synthetic single-turn `Attempt` with `experiment_id` /
+  `tested_hypothesis_ids` resolved from `ctx.active_experiment_id`;
+- runs the extractor on this one exchange, applies any resulting
+  `EvidenceCreateDelta`s, runs `apply_evidence_to_beliefs`,
+  re-ranks the frontier;
+- records the turn index in `ctx._belief_evidence_turn_indexes`
+  so the module-level `_update_belief_graph` doesn't double-count
+  this transcript slice when the sub-module concludes;
+- returns the applied evidence list, which `send_message` summarises
+  inline as a "Belief evidence updated:" trailer in the tool result
+  so the leader/manager sees mid-attempt belief shifts inside the
+  ReAct loop, not just after delegation returns.
+
+The `_belief_evidence_turn_indexes` set is shared by reference
+across `Context.child()`, so the bookkeeping survives nested
+delegations. `_update_belief_graph` accepts
+`extractor_messages_sent` / `extractor_target_responses` to feed
+the extractor only the *unprocessed* tail (turns NOT already
+covered by per-send extraction).
 
 **Context injection** lives in `agent/graph_compiler.py`:
 `GraphContextCompiler(graph).compile(role=BeliefRole.X, ...)` emits
@@ -499,7 +610,12 @@ a role-scoped Markdown decision brief. Roles:
 
 - Session 1 shipped `belief_graph.py`, `agent/evidence.py`,
   `agent/beliefs.py`, `agent/graph_compiler.py`, four
-  `.prompt.md` files, and 86 unit tests as the foundation.
+  `.prompt.md` files, and the foundation tests
+  (`test_belief_graph.py` 34, `test_evidence_extractor.py` 12,
+  `test_beliefs.py` 29, `test_graph_compiler.py` 19,
+  `test_strategy_library.py` 21, `test_belief_graph_wiring.py` 13 —
+  128 in dedicated files plus integration-related additions across
+  existing files).
 
 - **Session 2 wired the foundation into the running agent.** Live
   runs now build and use the belief graph:
@@ -534,59 +650,97 @@ a role-scoped Markdown decision brief. Roles:
     section. `engine.run_react_loop` appends it to every module's
     user content alongside the legacy `## Attack Intelligence` block
     (additive — both views show, leader picks the more useful slice).
-  - `Context.belief_graph` is propagated through `child()` by
-    reference, mirroring how `ctx.graph` flows. Legacy callers that
-    omit it pass `None`; every belief-graph hook checks
-    `ctx.belief_graph is None` and no-ops, so nothing in the existing
-    test suite breaks (758 / 758 still passing after Session 2).
+  - `Context.belief_graph` and `Context.active_experiment_id` and
+    `Context._belief_evidence_turn_indexes` are all propagated
+    through `child()` by reference, mirroring how `ctx.graph` flows.
+    Legacy callers that omit them pass `None` / empty default; every
+    belief-graph hook checks `ctx.belief_graph is None` and no-ops.
 
-  The legacy `AttackGraph` is still authoritative for frontier
-  scoring + propose_frontier / refine_approach / TIER_GATE telemetry.
+  The legacy `AttackGraph` is still authoritative for the legacy
+  `propose_frontier` / `refine_approach` / TIER_GATE telemetry path.
   The belief graph runs *alongside* it, not instead — so a single
-  failed extractor call can't strand the planner. Session 2.5
-  decides per-component whether to remove the legacy reads (start
-  with the leader brief replacement, since the belief brief carries
-  the same semantics).
+  failed extractor call can't strand the planner.
 
-- **Session 2.5 (shipped)** — `experiment_id` parameter is now part
-  of every sub-module dispatch tool's schema (see
-  `core/registry.py::as_tools`). When the leader passes it,
-  `evaluation._update_belief_graph` resolves the FrontierExperiment
-  and ties the resulting Attempt to ONE hypothesis (the experiment's)
-  + ONE strategy (when set), and the AttemptCreateDelta apply path
-  auto-promotes the experiment to FULFILLED. Hallucinated
-  `experiment_id` values fall back to the active-hypothesis fan-out
-  with a `BELIEF_DELTA` diagnostic — graceful, the run continues.
-  Leader prompt's "Required Action" section now explicitly
-  instructs the model to pass `experiment_id="<fx_…>"` as a tool
-  argument.
+- **Session 2.5 + auto-binding (shipped)** —
+  - `core/registry.py::as_tools` adds an `experiment_id` parameter
+    to every sub-module dispatch tool's OpenAI function schema.
+  - `tools/sub_module.handle::_auto_bind_experiment_id` resolves
+    the contract at the tool boundary EVEN WHEN THE LEADER FORGETS:
+    if `experiment_id` is missing, the helper scans for a PROPOSED
+    `FrontierExperiment` whose `module` matches the dispatched
+    function name and binds the highest-utility one. Diagnostic is
+    logged as `BELIEF_DELTA` ("auto-bound …"). This means the
+    `fx_…` linkage works even with weaker models that ignore the
+    Required Action instruction.
+  - When dispatch resolves an experiment, the tool boundary applies
+    `FrontierUpdateStateDelta(state=EXECUTING)` BEFORE the run
+    starts so the BeliefMap and the planner brief reflect "this
+    experiment is in flight". The state then transitions to
+    FULFILLED via the `AttemptCreateDelta` apply path when the
+    sub-module concludes.
+  - `_update_belief_graph` resolves the experiment, ties the
+    resulting Attempt to ONE hypothesis + ONE strategy, and
+    additionally emits `StrategyUpdateStatsDelta(success_inc=1 if
+    outcome ∈ {LEAK, OBJECTIVE_MET} else 0, attempt_inc=1)` so the
+    per-target Strategy node accumulates calibrated wins/losses
+    that Session 4B's run-end merge folds into the global library.
+  - Leader prompt's "Required Action" section explicitly
+    instructs the model to pass `experiment_id="<fx_…>"` as a tool
+    argument; auto-binding catches the case when it doesn't.
 
-- **Session 3 (shipped)** — web UI belief map. New backend route
-  `GET /api/targets/{hash}/belief-graph` returns the typed graph
-  snapshot (or 404 with "Belief graph not found"). New Svelte
-  component `frontend/src/components/BeliefMap.svelte` renders the
-  graph as a D3 force-directed layout: hypotheses sized by
-  confidence (large circles), evidence triangles with
-  support/refute color, frontier squares sized by utility, strategy
-  diamonds, attempts dots (de-emphasised). Click any node for a
-  detail panel. The App-level toggle (`graph-view-toggle` pill in
-  the top-left of the graph area) switches between the legacy
-  AttackGraph view and the BeliefMap view; both data sources run
-  side-by-side at the backend layer.
+- **Session 3 + dashboard panels (shipped)** —
+  - Backend `GET /api/targets/{hash}/belief-graph` returns
+    `{graph, stats, prompt_context}`. During a live run the route
+    serves the in-memory `current_ctx.belief_graph` first (the
+    runner only persists at run-end), and falls back to the
+    on-disk snapshot or delta-log replay otherwise. The
+    `prompt_context` field is the LEADER brief from
+    `GraphContextCompiler.compile(role=LEADER, token_budget=1200)`
+    so the UI can show the operator the actual brief the leader
+    is reading.
+  - `frontend/src/components/BeliefMap.svelte` renders three
+    concurrent views inside one panel:
+    - **Boards row** (top): three reactive lists computed from the
+      graph snapshot — Frontier Board (proposed experiments sorted
+      by utility), Evidence Timeline (newest evidence first), and
+      Strategy Library (per-target strategies sorted by local
+      success rate). Clicking any row selects that node.
+    - **D3 force-directed graph** (center): hypotheses sized by
+      confidence, evidence triangles polarity-colored, frontier
+      squares sized by utility, strategy diamonds, attempt dots
+      de-emphasised. Edges colored by relationship kind.
+    - **Detail panel** (right, when a node is selected): typed
+      field-by-field rows for the selected node, plus an
+      expandable "Prompt Context" `<details>` showing the live
+      leader brief (the same string the engine just injected into
+      the running module's user prompt).
+  - Live polling: while `$runStatus === 'running'` the component
+    re-fetches every 2.5s. Initial-state messaging:
+    "Belief graph is initializing…" while the runner is still in
+    bootstrap, "No belief graph saved for this target yet." for
+    targets that have never run with the wiring, "Pick a target
+    to see its belief graph." when no target is selected.
+  - `lib/stores.js::selectedTargetHash` derives the hash from the
+    `selectedScenario` path × the `scenarios` list. The
+    `App.svelte` toggle pill (Attack ↔ Belief) switches between
+    the legacy `AttackGraph.svelte` tree and the BeliefMap dashboard.
 
-- **Session 4A (shipped)** — shallow UCT/MCTS selector layered on
-  the utility ranker.
-  `agent/beliefs.py::select_next_experiment(graph, exploration_c=1.2)`
-  picks the highest-scoring PROPOSED experiment using
-  `score = utility + c * sqrt(log(N + 1) / (n_h + 1))` where N is
-  the total attempt count and n_h counts attempts that already
-  tested the experiment's hypothesis. The bonus rewards
-  under-tested hypotheses without overruling a clear
-  exploit-utility lead. The compiler's "Recommended Experiments"
-  section flags the planner's pick with `★`; the leader is free to
-  override (advisory marker, not a hard rule). The selector is pure
-  — no LLM, no I/O — so automated callers can step the agent
-  without leader intervention.
+- **Session 4A + lookahead (shipped)** —
+  `agent/beliefs.py::select_next_experiment(graph, exploration_c=1.2,
+  lookahead_depth=2, lookahead_weight=0.4, rollout_branching=2)`.
+  Layer 1 is the same UCB the original Session 4A spec described:
+  `utility + c · sqrt(log(N + 1) / (n_h + 1))`. Layer 2 (when ≥ 2
+  proposed experiments exist) adds a target-query-free belief-state
+  rollout: simulate SUPPORTS (confidence + 0.18) and REFUTES
+  (confidence − 0.12) outcomes, each weighted by
+  `_support_probability(fx)` (a [0.1, 0.9] blend of utility,
+  strategy_prior, novelty), then estimate the second-step value
+  as the best remaining UCB-augmented utility under the simulated
+  belief. Progressive widening caps each branch at
+  `rollout_branching` candidates so the lookahead stays O(N²) over
+  the proposed set, not exponential. The compiler's "Recommended
+  Experiments" section still flags the selector's pick with `★`;
+  the leader is free to override.
 
 - **Session 4B (shipped)** — cross-target strategy library at
   `~/.mesmer/global/strategies.json` (atomic write, schema-versioned).
@@ -598,7 +752,8 @@ a role-scoped Markdown decision brief. Roles:
   `merge_per_target_strategies` / `retrieve_strategies_for_bootstrap`
   / `render_for_prompt`. At run end, the runner folds this run's
   per-target Strategy nodes (those with `attempt_count > 0`) into
-  the library — counters add, traits dedupe-merge.
+  the library — counters add (driven by `StrategyUpdateStatsDelta`
+  emissions during the run), traits dedupe-merge.
   `generate_hypotheses` retrieves family-matching entries at
   bootstrap time and renders them into the
   generate_hypotheses_user prompt as a `## Cross-target strategy
@@ -606,12 +761,14 @@ a role-scoped Markdown decision brief. Roles:
   worked against prior targets.
 
 The graph is now a complete planner substrate — typed beliefs +
-evidence-driven updates + utility ranker + UCB selector +
-cross-target lifelong memory + role-scoped briefs. The legacy
-`AttackGraph` still records attempt history for audit and powers
-the legacy frontier proposer; both run side-by-side, each readable
-from a different graph view in the UI. **786 tests pass** across
-the original 583 + 203 new tests covering every Session.
+evidence-driven updates (per-attempt AND per-send) + deterministic
+frontier generator + utility ranker + UCB-with-lookahead selector +
+cross-target lifelong memory + role-scoped briefs + auto-binding
+dispatch contract. The legacy `AttackGraph` still records attempt
+history for audit and powers the legacy frontier proposer; both
+run side-by-side, each readable from a different graph view in the
+UI. **790 tests pass** across the original 583 + 207 new tests
+covering every Session.
 
 References (from the plan in
 `.ideation/nodes/cognitive-hacking-toolkit/mesmer/plans/refined-graph-plan.md`):
