@@ -25,7 +25,11 @@ import json
 import time
 from typing import TYPE_CHECKING, Callable
 
-from mesmer.core.agent.prompt import _build_graph_context, _budget_banner
+from mesmer.core.agent.prompt import (
+    _build_belief_context,
+    _build_graph_context,
+    _budget_banner,
+)
 from mesmer.core.agent.prompts import CONTINUATION_PREAMBLE
 from mesmer.core.agent.retry import _completion_with_retry
 from mesmer.core.agent.tools import build_tool_list, dispatch_tool_call
@@ -244,13 +248,23 @@ async def run_react_loop(
                 "## Learned Experience (from prior attempts against this target)\n" + experience
             )
 
-    # Inject graph context (frontier + dead ends + tier ladder) — this is
-    # the leader-specific planning signal. Sub-modules see it too but
-    # typically act on their own system_prompt; the experience block above
-    # is the part that changes their behaviour.
-    graph_context = _build_graph_context(ctx)
-    if graph_context:
-        user_content_parts.append(f"## Attack Intelligence\n{graph_context}")
+    # Belief Attack Graph brief — typed planner state (Session 2 wiring).
+    # Renders the role-scoped decision brief for the running module:
+    # LEADER sees full belief landscape + ranked experiments + dead zones,
+    # MANAGER sees only its assignment, EMPLOYEE sees a focused job
+    # description. Empty string when ctx.belief_graph is None (legacy
+    # callers) or empty (brand-new target before bootstrap).
+    belief_context = _build_belief_context(ctx, module)
+    if belief_context:
+        user_content_parts.append(belief_context)
+    else:
+        # Legacy fallback only. Once the typed belief graph can render a
+        # decision brief, do not also inject the old module-first frontier
+        # summary; competing planner contracts made the leader ignore
+        # `experiment_id` and fall back to `frontier_id`.
+        graph_context = _build_graph_context(ctx)
+        if graph_context:
+            user_content_parts.append(f"## Attack Intelligence\n{graph_context}")
 
     # Conversation history framing differs based on target session state.
     #

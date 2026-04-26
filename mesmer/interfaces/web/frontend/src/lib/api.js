@@ -68,3 +68,17 @@ export async function listModules() {
   const res = await fetch('/api/modules')
   return unwrap(res)
 }
+
+/**
+ * Fetch the typed Belief Attack Graph snapshot for a target.
+ *
+ * Returns `{graph: <serialized BeliefGraph>, stats: <counts>,
+ * prompt_context: <current leader brief>}` on success.
+ * Throws "Belief graph not found" when the target has never
+ * been run with belief-graph wiring (the file is created on first
+ * successful save in `runner.execute_run`).
+ */
+export async function getBeliefGraph(targetHash) {
+  const res = await fetch(`/api/targets/${encodeURIComponent(targetHash)}/belief-graph`)
+  return unwrap(res)
+}

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mesmer.core.agent.context import Turn
+from mesmer.core.belief_graph import BeliefGraph
 from mesmer.core.constants import TurnKind
 from mesmer.core.graph import AttackGraph, hash_target
 
@@ -146,6 +147,71 @@ class TargetMemory:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.graph_path.write_text(graph.to_json())
 
+    # --- Belief Attack Graph (Session 2 wiring) ---
+
+    @property
+    def belief_graph_path(self) -> Path:
+        """Belief graph snapshot — typed planner state.
+
+        Sibling of ``graph_path``; the legacy AttackGraph keeps its own
+        file. Both load/save independently so the belief graph can be
+        deleted (or rebuilt from the delta log) without touching the
+        legacy attempt history.
+        """
+        return self.base_dir / "belief_graph.json"
+
+    @property
+    def belief_deltas_path(self) -> Path:
+        """Belief graph append-only delta log.
+
+        Each line is one ``GraphDelta`` serialised to JSON. Replayed
+        via :meth:`BeliefGraph.replay` if the snapshot ever corrupts.
+        """
+        return self.base_dir / "belief_deltas.jsonl"
+
+    def load_belief_graph(self) -> BeliefGraph:
+        """Load the persisted belief graph or return a fresh one.
+
+        Falls back to delta-log replay when the snapshot is missing or
+        unparseable but the log exists. Returns an empty
+        :class:`BeliefGraph` (just the singleton TargetNode) when
+        neither file exists — fresh runs against a new target.
+        """
+        if self.belief_graph_path.exists():
+            try:
+                return BeliefGraph.from_json(self.belief_graph_path.read_text())
+            except (json.JSONDecodeError, KeyError, ValueError):
+                pass
+        if self.belief_deltas_path.exists():
+            try:
+                return BeliefGraph.replay(self.belief_deltas_path, target_hash=self.target_hash)
+            except (json.JSONDecodeError, KeyError, ValueError):
+                pass
+        return BeliefGraph(target_hash=self.target_hash)
+
+    def save_belief_graph(self, graph: BeliefGraph) -> None:
+        """Write snapshot + append unsaved deltas to the JSONL log.
+
+        Delegates to ``BeliefGraph.save`` which clears the in-memory
+        delta queue after writing — calling this twice in a row is a
+        no-op for the JSONL file (snapshot is rewritten, log is
+        unchanged).
+        """
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        graph.save(self.belief_graph_path, delta_log_path=self.belief_deltas_path)
+
+    def delete_belief_graph(self) -> None:
+        """Wipe both the snapshot and the delta log.
+
+        Used by the runner when ``--fresh`` is set so a clean run
+        starts without prior beliefs. The legacy ``--fresh`` already
+        bypasses the AttackGraph load; this gives the belief graph
+        the same affordance.
+        """
+        for p in (self.belief_graph_path, self.belief_deltas_path):
+            if p.exists():
+                p.unlink()
+
     def load_profile(self) -> str | None:
         """Return the human-readable profile.md, if present.
 
@@ -232,6 +298,7 @@ class TargetMemory:
         consolidated arc.
         """
         import time as _time
+
         self.base_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "saved_at": _time.time(),
@@ -262,14 +329,16 @@ class TargetMemory:
                 # Turn.__post_init__ coerces the kind string (or missing value
                 # from older JSON files) into TurnKind. Unknown kind values
                 # raise ValueError — caught below and the row is dropped.
-                turns.append(Turn(
-                    sent=str(item.get("sent", "") or ""),
-                    received=str(item.get("received", "") or ""),
-                    module=str(item.get("module", "") or ""),
-                    timestamp=float(item.get("timestamp") or 0.0),
-                    is_error=bool(item.get("is_error", False)),
-                    kind=TurnKind(item.get("kind") or TurnKind.EXCHANGE.value),
-                ))
+                turns.append(
+                    Turn(
+                        sent=str(item.get("sent", "") or ""),
+                        received=str(item.get("received", "") or ""),
+                        module=str(item.get("module", "") or ""),
+                        timestamp=float(item.get("timestamp") or 0.0),
+                        is_error=bool(item.get("is_error", False)),
+                        kind=TurnKind(item.get("kind") or TurnKind.EXCHANGE.value),
+                    )
+                )
             except (TypeError, ValueError):
                 continue
         return turns

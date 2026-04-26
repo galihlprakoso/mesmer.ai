@@ -12,15 +12,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from mesmer.core.constants import NodeSource, NodeStatus, ScenarioMode
+from mesmer.core.constants import LogEvent, NodeSource, NodeStatus, ScenarioMode
 from mesmer.core.agent.context import Context, HumanQuestionBroker, RunTelemetry
+from mesmer.core.belief_graph import NodeKind, Strategy, TargetTraitsUpdateDelta
+from mesmer.core.errors import HypothesisGenerationError, InvalidDelta
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent import LogFn, run_react_loop
+from mesmer.core.agent.beliefs import (
+    generate_frontier_experiments,
+    generate_hypotheses,
+    rank_frontier,
+)
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id
 from mesmer.core.agent.prompts import EXECUTIVE_SYSTEM as _DEFAULT_EXECUTIVE_PROMPT
 from mesmer.core.module import ModuleConfig, SubModuleEntry
 from mesmer.core.registry import Registry
 from mesmer.core.scenario import load_scenario, AgentConfig, Scenario
+from mesmer.core.strategy_library import (
+    load_library,
+    merge_per_target_strategies,
+    save_library,
+)
 
 # Default module paths — relative to project root
 BUILTIN_MODULES = Path(__file__).parent.parent.parent / "modules"
@@ -114,9 +126,7 @@ async def execute_run(
     # Seed the PRNG if either the CLI or the scenario provided one. Order
     # of precedence: explicit config.seed > scenario.agent.seed. A None
     # seed leaves ``random`` untouched so legacy runs are unaffected.
-    effective_seed = (
-        config.seed if config.seed is not None else scenario.agent.seed
-    )
+    effective_seed = config.seed if config.seed is not None else scenario.agent.seed
     if effective_seed is not None:
         random.seed(effective_seed)
 
@@ -154,8 +164,7 @@ async def execute_run(
     if missing:
         available = ", ".join(sorted(registry.modules.keys()))
         raise ValueError(
-            f"Scenario modules not found in registry: {missing}. "
-            f"Available: {available}"
+            f"Scenario modules not found in registry: {missing}. Available: {available}"
         )
 
     # Synthesize the scenario-scoped executive. It exists only in memory
@@ -164,9 +173,7 @@ async def execute_run(
     # scenario stem so leader-verdict nodes in graph.json are
     # attributable to the right scenario when multiple scenarios run
     # against the same target.
-    scenario_stem = (
-        Path(config.scenario_path).stem if config.scenario_path else "scenario"
-    )
+    scenario_stem = Path(config.scenario_path).stem if config.scenario_path else "scenario"
     executive_name = f"{scenario_stem}:executive"
     entry = ModuleConfig(
         name=executive_name,
@@ -192,6 +199,29 @@ async def execute_run(
 
     graph.ensure_root()
     graph.run_counter += 1
+
+    # Belief Attack Graph — typed planner state. Loaded alongside the legacy
+    # AttackGraph; --fresh wipes both so a clean run starts without prior
+    # beliefs OR prior attempt history. The graph singleton TargetNode is
+    # created in BeliefGraph.__post_init__ even on a fresh load.
+    if config.fresh:
+        memory.delete_belief_graph()
+        belief_graph = memory.load_belief_graph()
+    else:
+        belief_graph = memory.load_belief_graph()
+
+    # Seed target traits from the scenario's declared system_prompt so the
+    # extractor / hypothesis generator have something to anchor on for a
+    # never-before-seen target. Latest-wins on the trait key, so re-seeding
+    # in subsequent runs simply refreshes from the latest scenario YAML.
+    declared_system_prompt = (scenario.target.system_prompt or "").strip()
+    if declared_system_prompt:
+        belief_graph.apply(
+            TargetTraitsUpdateDelta(
+                traits={"declared_system_prompt": declared_system_prompt},
+                run_id=run_id,
+            )
+        )
 
     # Add human hints to graph
     all_hints = list(config.hints)
@@ -230,6 +260,7 @@ async def execute_run(
         success_signals=scenario.objective.success_signals,
         max_turns=max_turns,
         graph=graph,
+        belief_graph=belief_graph,
         run_id=run_id,
         human_broker=config.human_broker,
         target_memory=memory,
@@ -275,15 +306,19 @@ async def execute_run(
     # on_graph_update fires BEFORE log so the graph ref is set before broadcast
     actual_log = log
     if log and on_graph_update:
+
         def _log_with_graph(event: str, detail: str = ""):
             if event == "graph_update":
                 on_graph_update(graph)
             log(event, detail)
+
         actual_log = _log_with_graph
     elif on_graph_update:
+
         def _graph_only_log(event: str, detail: str = ""):
             if event == "graph_update":
                 on_graph_update(graph)
+
         actual_log = _graph_only_log
 
     # Bind the log onto the Context so every :meth:`Context.completion`
@@ -291,6 +326,57 @@ async def execute_run(
     # LLM_COMPLETION event without needing the caller to thread ``log``
     # through every signature. child() propagates this onto sub-contexts.
     ctx.log = actual_log
+
+    # Belief-graph bootstrap. If the active hypothesis list is empty
+    # (fresh target, or every prior hypothesis got CONFIRMED / REFUTED /
+    # STALE) ask the generator for a fresh slate. One judge-model LLM
+    # call; failures degrade gracefully — the run still proceeds, the
+    # planner just operates without any seeded hypotheses for now.
+    if not belief_graph.active_hypotheses():
+        try:
+            bootstrap_deltas = await generate_hypotheses(
+                ctx,
+                graph=belief_graph,
+                objective=scenario.objective.goal or "",
+                run_id=run_id,
+            )
+            for d in bootstrap_deltas:
+                belief_graph.apply(d)
+            if actual_log is not None and bootstrap_deltas:
+                actual_log(
+                    LogEvent.HYPOTHESIS_CREATED.value,
+                    f"bootstrapped {len(bootstrap_deltas)} hypotheses",
+                )
+        except HypothesisGenerationError as e:
+            # Boundary catch — extractor / generator failures are
+            # best-effort. Log and continue.
+            if actual_log is not None:
+                actual_log(LogEvent.JUDGE_ERROR.value, f"hypothesis bootstrap: {e}")
+
+    # Materialise hypothesis → experiment frontiers before the first leader
+    # prompt. Without this, the belief graph has claims but no `fx_...`
+    # dispatch contract for the LLM to follow.
+    try:
+        frontier_deltas = generate_frontier_experiments(
+            belief_graph,
+            registry=registry,
+            available_modules=entry.sub_module_names,
+            run_id=run_id,
+        )
+        for d in frontier_deltas:
+            belief_graph.apply(d)
+        rank_delta = rank_frontier(belief_graph, run_id=run_id)
+        if rank_delta.rankings:
+            belief_graph.apply(rank_delta)
+        frontier_count = sum(1 for d in frontier_deltas if d.kind.value == "frontier_create")
+        if actual_log is not None and frontier_count:
+            actual_log(
+                LogEvent.FRONTIER_RANKED.value,
+                f"bootstrapped {frontier_count} belief frontier experiment(s)",
+            )
+    except InvalidDelta as e:
+        if actual_log is not None:
+            actual_log(LogEvent.BELIEF_DELTA.value, f"frontier bootstrap rejected: {e}")
 
     # Run
     try:
@@ -312,10 +398,9 @@ async def execute_run(
     # it without having to know the leader's module name. Parent = most
     # recent non-leader node produced during this run_id, else root.
     _leader_peer_nodes = [
-        n for n in graph.nodes.values()
-        if n.run_id == run_id
-        and n.module != "root"
-        and not n.is_leader_verdict
+        n
+        for n in graph.nodes.values()
+        if n.run_id == run_id and n.module != "root" and not n.is_leader_verdict
     ]
     if _leader_peer_nodes:
         _leader_parent = max(_leader_peer_nodes, key=lambda n: n.timestamp)
@@ -331,15 +416,11 @@ async def execute_run(
         approach=scenario.objective.goal or f"{entry.name} run",
         module_output=result or "",
         leaked_info=ctx.objective_met_fragment or "",
-        reflection=(
-            "objective_met=true" if objective_met else "objective_met=false"
-        ),
+        reflection=("objective_met=true" if objective_met else "objective_met=false"),
         # Explicit status skips auto_classify — we already know the
         # outcome from ctx.objective_met, no need for the similarity
         # heuristic to second-guess it.
-        status=(
-            NodeStatus.PROMISING.value if objective_met else NodeStatus.DEAD.value
-        ),
+        status=(NodeStatus.PROMISING.value if objective_met else NodeStatus.DEAD.value),
         score=10 if objective_met else 1,
         run_id=run_id,
         source=NodeSource.LEADER.value,
@@ -347,6 +428,34 @@ async def execute_run(
 
     # Save graph + memory
     memory.save_graph(graph)
+    # Persist the belief graph's current snapshot + append unsaved deltas
+    # to the JSONL log. ``save_belief_graph`` clears the in-memory delta
+    # queue after writing, so a second save is a no-op for the JSONL file.
+    memory.save_belief_graph(belief_graph)
+    # Session 4B — fold this run's per-target Strategy nodes into the
+    # cross-target library so future targets benefit from what worked
+    # against this one. Only Strategies with ``attempt_count > 0`` are
+    # merged; un-tried ones carry no cross-target signal.
+    try:
+        library = load_library()
+        target_strategies = [
+            n for n in belief_graph.iter_nodes(NodeKind.STRATEGY) if isinstance(n, Strategy)
+        ]
+        if target_strategies:
+            merge_per_target_strategies(
+                library,
+                target_strategies,
+                target_traits=dict(belief_graph.target.traits),
+            )
+            save_library(library)
+            if actual_log is not None:
+                actual_log(
+                    LogEvent.GRAPH_UPDATE.value,
+                    f"strategy library merged {len(target_strategies)} strategies",
+                )
+    except Exception as e:  # noqa: BLE001 — library is best-effort
+        if actual_log is not None:
+            actual_log(LogEvent.GRAPH_UPDATE.value, f"strategy library merge failed: {e}")
     memory.save_run_log(run_id, ctx.turns)
     # C8 — persist the rolling CONTINUOUS conversation for the next invocation.
     # TRIALS never writes it (sibling rollouts have no shared arc to resume).
@@ -414,15 +523,17 @@ def list_scenarios(directory: str | Path) -> list[dict]:
                     continue
 
                 s = load_scenario(str(f))
-                scenarios.append({
-                    "path": str(f),
-                    "name": s.name,
-                    "description": s.description,
-                    "target_adapter": s.target.adapter,
-                    "target_url": s.target.url or s.target.base_url or s.target.model or "",
-                    "modules": list(s.modules),
-                    "max_turns": s.objective.max_turns,
-                })
+                scenarios.append(
+                    {
+                        "path": str(f),
+                        "name": s.name,
+                        "description": s.description,
+                        "target_adapter": s.target.adapter,
+                        "target_url": s.target.url or s.target.base_url or s.target.model or "",
+                        "modules": list(s.modules),
+                        "max_turns": s.objective.max_turns,
+                    }
+                )
             except Exception:
                 pass  # silently skip unparseable files
     return scenarios
@@ -432,7 +543,7 @@ def list_modules(extra_paths: list[str] | None = None) -> list[dict]:
     """List all available modules."""
     registry = Registry()
     registry.auto_discover(BUILTIN_MODULES)
-    for p in (extra_paths or []):
+    for p in extra_paths or []:
         registry.auto_discover(p)
     return registry.list_modules()
 
@@ -448,12 +559,26 @@ def list_targets() -> list[dict]:
         if not d.is_dir():
             continue
         graph_path = d / "graph.json"
-        info = {"hash": d.name, "has_graph": graph_path.exists()}
+        belief_graph_path = d / "belief_graph.json"
+        belief_deltas_path = d / "belief_deltas.jsonl"
+        info = {
+            "hash": d.name,
+            "has_graph": graph_path.exists(),
+            "has_belief_graph": belief_graph_path.exists() or belief_deltas_path.exists(),
+        }
         if graph_path.exists():
             try:
                 g = AttackGraph.from_json(graph_path.read_text())
                 info["stats"] = g.stats()
                 info["runs"] = g.run_counter
+            except Exception:
+                pass
+        if belief_graph_path.exists():
+            try:
+                from mesmer.core.belief_graph import BeliefGraph
+
+                bg = BeliefGraph.from_json(belief_graph_path.read_text())
+                info["belief_stats"] = bg.stats()
             except Exception:
                 pass
         targets.append(info)

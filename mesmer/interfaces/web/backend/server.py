@@ -44,6 +44,7 @@ FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 # Request / response models
 # ---------------------------------------------------------------------------
 
+
 class RunRequest(BaseModel):
     scenario_path: str
     model: str | None = None
@@ -222,6 +223,7 @@ outside it, no backticks. Schema:
 # App factory
 # ---------------------------------------------------------------------------
 
+
 def create_app(scenario_dir: str = ".") -> FastAPI:
     """Create the FastAPI app with all routes."""
 
@@ -282,9 +284,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 # render a tier badge. Multi-manager scenarios just preview
                 # the first; the executive itself has no meaningful tier.
                 first_mod = s.modules[0] if s.modules else None
-                item["module_tier"] = (
-                    registry.tier_of(first_mod) if first_mod else None
-                )
+                item["module_tier"] = registry.tier_of(first_mod) if first_mod else None
             except Exception:
                 # _list_scenarios already filters obviously broken files,
                 # but if env-var resolution fails (missing API key) we
@@ -434,7 +434,9 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 messages.append({"role": h.role, "content": h.content})
         messages.append({"role": "user", "content": user_payload})
 
-        model = os.environ.get("MESMER_EDITOR_MODEL", "openrouter/anthropic/claude-sonnet-4-20250514")
+        model = os.environ.get(
+            "MESMER_EDITOR_MODEL", "openrouter/anthropic/claude-sonnet-4-20250514"
+        )
         kwargs: dict = {
             "model": model,
             "messages": messages,
@@ -481,6 +483,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     async def get_module(name: str):
         from mesmer.core.registry import Registry
         from mesmer.core.runner import BUILTIN_MODULES
+
         registry = Registry()
         registry.auto_discover(BUILTIN_MODULES)
         mod = registry.get(name)
@@ -513,6 +516,42 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 "stats": g.stats(),
             }
         except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.get("/api/targets/{target_hash}/belief-graph")
+    async def get_target_belief_graph(target_hash: str):
+        """Return the typed Belief Attack Graph snapshot for a target.
+
+        Same shape contract as ``get_target_graph`` (a wrapping object
+        with ``graph`` + ``stats`` keys) so the frontend can pick the
+        same handler shape for both views. Returns 404 when neither the
+        snapshot nor the delta log exists yet — the frontend treats
+        this as "no beliefs yet, render empty state".
+        """
+        from mesmer.core.belief_graph import BeliefGraph
+
+        target_dir = Path.home() / ".mesmer" / "targets" / target_hash
+        snapshot_path = target_dir / "belief_graph.json"
+        deltas_path = target_dir / "belief_deltas.jsonl"
+        if not snapshot_path.exists() and not deltas_path.exists():
+            return JSONResponse({"error": "Belief graph not found"}, status_code=404)
+        try:
+            if snapshot_path.exists():
+                bg = BeliefGraph.from_json(snapshot_path.read_text())
+            else:
+                bg = BeliefGraph.replay(deltas_path, target_hash=target_hash)
+            from mesmer.core.agent.graph_compiler import GraphContextCompiler
+            from mesmer.core.constants import BeliefRole
+
+            return {
+                "graph": json.loads(bg.to_json()),
+                "stats": bg.stats(),
+                "prompt_context": GraphContextCompiler(bg).compile(
+                    role=BeliefRole.LEADER,
+                    token_budget=1200,
+                ),
+            }
+        except Exception as e:  # noqa: BLE001 — surface load errors to UI
             return JSONResponse({"error": str(e)}, status_code=400)
 
     # ----- API: Stats -----
@@ -587,12 +626,14 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                     on_ctx_ready=_on_ctx_ready,
                 )
                 bus.set_graph(result.graph)
-                run_state.update({
-                    "status": "completed",
-                    "result": result.result,
-                    "run_id": result.run_id,
-                    "graph_stats": result.graph.stats(),
-                })
+                run_state.update(
+                    {
+                        "status": "completed",
+                        "result": result.result,
+                        "run_id": result.run_id,
+                        "graph_stats": result.graph.stats(),
+                    }
+                )
                 bus.emit_status(
                     "completed",
                     result=result.result,
@@ -707,9 +748,13 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         ):
             ts = time.time()
             memory.append_chat("user", message, ts)
-            current_ctx.operator_messages.append({
-                "role": "user", "content": message, "timestamp": ts,
-            })
+            current_ctx.operator_messages.append(
+                {
+                    "role": "user",
+                    "content": message,
+                    "timestamp": ts,
+                }
+            )
             bus.log_fn(LogEvent.OPERATOR_MESSAGE.value, message)
             return {"queued": True, "reply": None, "tool_trace": [], "updated_scratchpad": None}
 
@@ -721,7 +766,9 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
 
         try:
             result = await run_leader_chat(
-                scenario, memory, message,
+                scenario,
+                memory,
+                message,
                 on_tool_call=_broadcast_tool_call,
             )
         except Exception as e:
@@ -750,6 +797,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         agent_config = scenario.agent
 
         import litellm
+
         litellm.suppress_debug_info = True
 
         prompt = f"""You are debriefing a human operator after an AI red-teaming run.
@@ -785,11 +833,14 @@ Return as JSON array of strings."""
                 questions = [line.strip() for line in content.split("\n") if line.strip()]
             return {"questions": questions}
         except Exception as e:
-            return {"questions": [
-                "What patterns did you notice in the target's responses?",
-                "Any specific target behavior that seemed exploitable?",
-                "What should we try differently next run?",
-            ], "error": str(e)}
+            return {
+                "questions": [
+                    "What patterns did you notice in the target's responses?",
+                    "Any specific target behavior that seemed exploitable?",
+                    "What should we try differently next run?",
+                ],
+                "error": str(e),
+            }
 
     # ----- WebSocket -----
 

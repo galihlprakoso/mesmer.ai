@@ -1,10 +1,11 @@
 <script>
   import { onMount, onDestroy } from 'svelte'
   import { connect, disconnect, onMessage } from './lib/ws.js'
-  import { handleMessage, modulesDrawerOpen, selectedNode, isRunning, mode } from './lib/stores.js'
+  import { handleMessage, modulesDrawerOpen, selectedNode, isRunning, mode, selectedTargetHash } from './lib/stores.js'
   import { currentRoute } from './lib/router.js'
   import Sidebar from './components/Sidebar.svelte'
   import AttackGraph from './components/AttackGraph.svelte'
+  import BeliefMap from './components/BeliefMap.svelte'
   import NodeDetail from './components/NodeDetail.svelte'
   import ActivityPanel from './components/ActivityPanel.svelte'
   import CoPilotChat from './components/CoPilotChat.svelte'
@@ -15,6 +16,11 @@
 
   let unsubscribe
   let sidebarOpen = false
+  // Graph view toggle: 'attack' shows the legacy AttackGraph (attempt
+  // history tree); 'belief' shows the typed Belief Attack Graph (the
+  // planner's belief landscape). Both run side-by-side at the data
+  // level — the toggle just picks which one to render.
+  let graphView = 'attack'
   // Default the bottom (chat) panel open — under the executive layer
   // every run is conversational by default; the chat IS the primary
   // operator surface during runs. Operator can still collapse via
@@ -51,7 +57,34 @@
   <main class="main">
     <div class="center-area">
       <div class="graph-area">
-        <AttackGraph />
+        <div class="graph-view-toggle" role="tablist" aria-label="Graph view">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={graphView === 'attack'}
+            class="view-tab"
+            class:active={graphView === 'attack'}
+            on:click={() => (graphView = 'attack')}
+          >
+            Attack Graph
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={graphView === 'belief'}
+            class="view-tab"
+            class:active={graphView === 'belief'}
+            on:click={() => (graphView = 'belief')}
+          >
+            Belief Map
+          </button>
+        </div>
+
+        {#if graphView === 'attack'}
+          <AttackGraph />
+        {:else}
+          <BeliefMap targetHash={$selectedTargetHash} />
+        {/if}
 
         <button
           type="button"
@@ -205,6 +238,40 @@
     flex: 1;
     display: flex;
     min-height: 0;
+  }
+
+  /* Graph view toggle (Session 3): pill in the top-left of the graph
+     area lets the operator switch between the legacy AttackGraph and
+     the typed BeliefMap. Both backends run side-by-side; this toggle
+     is purely a UI affordance. */
+  .graph-view-toggle {
+    position: absolute;
+    top: 0.5rem;
+    left: 0.75rem;
+    z-index: 5;
+    display: flex;
+    gap: 0.25rem;
+    background: var(--surface-2, #181818);
+    border: 1px solid var(--border, #333);
+    border-radius: 999px;
+    padding: 2px;
+  }
+  .graph-view-toggle .view-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    padding: 0.25rem 0.7rem;
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    letter-spacing: 0.04em;
+  }
+  .graph-view-toggle .view-tab:hover {
+    color: var(--text);
+  }
+  .graph-view-toggle .view-tab.active {
+    color: var(--bg-secondary, #000);
+    background: var(--phosphor);
   }
 
   /* Bottom panel: same width-trick on the vertical axis. */

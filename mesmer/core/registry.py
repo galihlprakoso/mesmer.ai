@@ -144,6 +144,19 @@ class Registry:
                                     "attempt not on the frontier list."
                                 ),
                             },
+                            "experiment_id": {
+                                "type": "string",
+                                "description": (
+                                    "If this call executes a Recommended Experiment "
+                                    "from the Belief Attack Graph (see the brief in your "
+                                    "user prompt), pass the experiment id (`fx_…`) here. "
+                                    "The resulting Attempt will link explicitly to that "
+                                    "experiment's hypothesis and strategy, so the planner "
+                                    "tracks belief shifts precisely. Omit only when no "
+                                    "recommended experiment fits — and prefer adding a "
+                                    "new hypothesis over freelancing."
+                                ),
+                            },
                         },
                         "required": ["instruction"],
                     },
