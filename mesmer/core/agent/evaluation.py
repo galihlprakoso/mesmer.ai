@@ -23,6 +23,7 @@ when this pipeline runs.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mesmer.core.agent.context import Turn
@@ -326,6 +327,8 @@ async def _update_belief_graph(
     module_output: str = "",
     experiment_id: str | None = None,
     available_modules: list[str] | tuple[str, ...] | None = None,
+    extractor_messages_sent: list[str] | None = None,
+    extractor_target_responses: list[str] | None = None,
 ) -> "_BeliefAttempt | None":
     """Mirror an attempt into the typed Belief Attack Graph and run the
     post-attempt belief pipeline.
@@ -468,11 +471,21 @@ async def _update_belief_graph(
             log(LogEvent.BELIEF_DELTA.value, f"strategy-stats rejected: {e}")
 
     # Step 2: extractor (LLM call). active hypotheses are passed
-    # through so the extractor can tag evidence against them.
+    # through so the extractor can tag evidence against them. When
+    # per-send extraction already handled some turns, the caller passes
+    # only the remaining transcript slice here to avoid double-counting
+    # evidence.
+    extractor_attempt = attempt
+    if extractor_messages_sent is not None or extractor_target_responses is not None:
+        extractor_attempt = replace(
+            attempt,
+            messages_sent=list(extractor_messages_sent or []),
+            target_responses=list(extractor_target_responses or []),
+        )
     try:
         evidences = await extract_evidence(
             ctx,
-            attempt=attempt,
+            attempt=extractor_attempt,
             active_hypotheses=active,
         )
     except EvidenceExtractionError as e:
@@ -547,6 +560,102 @@ async def _update_belief_graph(
             log(LogEvent.BELIEF_DELTA.value, f"frontier-rank rejected: {e}")
 
     return attempt
+
+
+async def _update_belief_graph_from_turn(
+    ctx: "Context",
+    *,
+    module_name: str,
+    message_sent: str,
+    target_response: str,
+    turn_index: int,
+    log: "LogFn",
+) -> list:
+    """Extract and apply belief evidence immediately after one target reply.
+
+    This is the per-interaction counterpart to :func:`_update_belief_graph`.
+    It intentionally does **not** create an Attempt node: the module-level
+    Attempt is still recorded when the sub-module concludes. Evidence rows
+    use the synthetic attempt id as a forward reference, which
+    ``EvidenceCreateDelta`` already permits.
+    """
+    bg = ctx.belief_graph
+    if bg is None or not target_response.strip():
+        return []
+
+    from mesmer.core.agent.beliefs import apply_evidence_to_beliefs, rank_frontier
+    from mesmer.core.agent.evidence import extract_evidence
+    from mesmer.core.belief_graph import FrontierExperiment
+
+    active = bg.active_hypotheses()
+    if not active:
+        return []
+
+    resolved_experiment: FrontierExperiment | None = None
+    experiment_id = getattr(ctx, "active_experiment_id", None)
+    if experiment_id:
+        candidate = bg.nodes.get(experiment_id)
+        if isinstance(candidate, FrontierExperiment):
+            resolved_experiment = candidate
+
+    if resolved_experiment is not None:
+        tested_ids = [resolved_experiment.hypothesis_id]
+        used_strategy_id = resolved_experiment.strategy_id
+    else:
+        tested_ids = [h.id for h in active]
+        used_strategy_id = None
+
+    observation = make_attempt(
+        module=module_name,
+        approach=message_sent[:100] or module_name,
+        experiment_id=resolved_experiment.id if resolved_experiment is not None else None,
+        messages_sent=[message_sent],
+        target_responses=[target_response],
+        judge_score=0,
+        objective_progress=0.0,
+        outcome=AttemptOutcome.PARTIAL.value,
+        reflection="per-send observation",
+        tested_hypothesis_ids=tested_ids,
+        used_strategy_id=used_strategy_id,
+        run_id=ctx.run_id,
+    )
+
+    try:
+        evidences = await extract_evidence(ctx, attempt=observation, active_hypotheses=active)
+    except EvidenceExtractionError as e:
+        log(LogEvent.EVIDENCE_EXTRACT_ERROR.value, f"turn {turn_index}: {e}")
+        return []
+
+    applied = []
+    for ev in evidences:
+        try:
+            bg.apply(EvidenceCreateDelta(evidence=ev, run_id=ctx.run_id))
+            applied.append(ev)
+        except InvalidDelta as e:
+            log(LogEvent.BELIEF_DELTA.value, f"turn-evidence rejected: {e}")
+
+    if not applied:
+        return []
+
+    for d in apply_evidence_to_beliefs(bg, applied, run_id=ctx.run_id):
+        try:
+            bg.apply(d)
+        except InvalidDelta as e:
+            log(LogEvent.BELIEF_DELTA.value, f"turn-belief-delta rejected: {e}")
+
+    rank_delta = rank_frontier(bg, run_id=ctx.run_id)
+    if rank_delta.rankings:
+        try:
+            bg.apply(rank_delta)
+        except InvalidDelta as e:
+            log(LogEvent.BELIEF_DELTA.value, f"turn-frontier-rank rejected: {e}")
+
+    getattr(ctx, "_belief_evidence_turn_indexes", set()).add(turn_index)
+    log(
+        LogEvent.EVIDENCE_EXTRACTED.value,
+        f"{len(applied)} evidence(s) from target turn {turn_index + 1}",
+    )
+    return applied
 
 
 async def _reflect_and_expand(
@@ -696,5 +805,6 @@ __all__ = [
     "_judge_module_result",
     "_update_graph",
     "_update_belief_graph",
+    "_update_belief_graph_from_turn",
     "_reflect_and_expand",
 ]

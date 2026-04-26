@@ -524,11 +524,36 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
 
         Same shape contract as ``get_target_graph`` (a wrapping object
         with ``graph`` + ``stats`` keys) so the frontend can pick the
-        same handler shape for both views. Returns 404 when neither the
-        snapshot nor the delta log exists yet — the frontend treats
-        this as "no beliefs yet, render empty state".
+        same handler shape for both views. During a live run the graph
+        is served from ``current_ctx`` first because the runner only
+        persists ``belief_graph.json`` at run completion. Returns 404
+        when neither live state nor persisted state exists yet.
         """
         from mesmer.core.belief_graph import BeliefGraph
+        from mesmer.core.agent.graph_compiler import GraphContextCompiler
+        from mesmer.core.constants import BeliefRole
+
+        def _payload(bg: BeliefGraph):
+            return {
+                "graph": json.loads(bg.to_json()),
+                "stats": bg.stats(),
+                "prompt_context": GraphContextCompiler(bg).compile(
+                    role=BeliefRole.LEADER,
+                    token_budget=1200,
+                ),
+            }
+
+        live_graph = current_ctx.belief_graph if current_ctx is not None else None
+        live_hash = (
+            current_ctx.target_memory.target_hash
+            if current_ctx is not None and current_ctx.target_memory is not None
+            else (live_graph.target_hash if live_graph is not None else None)
+        )
+        if live_graph is not None and live_hash == target_hash:
+            try:
+                return _payload(live_graph)
+            except Exception as e:  # noqa: BLE001 — surface load errors to UI
+                return JSONResponse({"error": str(e)}, status_code=400)
 
         target_dir = Path.home() / ".mesmer" / "targets" / target_hash
         snapshot_path = target_dir / "belief_graph.json"
@@ -540,17 +565,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 bg = BeliefGraph.from_json(snapshot_path.read_text())
             else:
                 bg = BeliefGraph.replay(deltas_path, target_hash=target_hash)
-            from mesmer.core.agent.graph_compiler import GraphContextCompiler
-            from mesmer.core.constants import BeliefRole
-
-            return {
-                "graph": json.loads(bg.to_json()),
-                "stats": bg.stats(),
-                "prompt_context": GraphContextCompiler(bg).compile(
-                    role=BeliefRole.LEADER,
-                    token_budget=1200,
-                ),
-            }
+            return _payload(bg)
         except Exception as e:  # noqa: BLE001 — surface load errors to UI
             return JSONResponse({"error": str(e)}, status_code=400)
 

@@ -794,6 +794,10 @@ def rank_frontier(
 # dominating exploitative picks. Tunable per-call via
 # ``select_next_experiment(exploration_c=...)``.
 DEFAULT_EXPLORATION_C = 1.2
+DEFAULT_LOOKAHEAD_WEIGHT = 0.35
+DEFAULT_ROLLOUT_BRANCHING = 3
+_SIM_SUPPORT_DELTA = 0.16
+_SIM_REFUTE_DELTA = 0.12
 
 
 def _hypothesis_visit_count(graph: BeliefGraph, hypothesis_id: str) -> int:
@@ -816,24 +820,128 @@ def _total_attempt_count(graph: BeliefGraph) -> int:
     return sum(1 for _ in graph.iter_nodes(NodeKind.ATTEMPT))
 
 
+def _ucb_bonus(
+    *,
+    total_attempts: int,
+    hypothesis_visits: int,
+    exploration_c: float,
+) -> float:
+    if total_attempts <= 0:
+        return 0.0
+    return exploration_c * math.sqrt(math.log(total_attempts + 1.0) / (hypothesis_visits + 1.0))
+
+
+def _support_probability(exp: FrontierExperiment) -> float:
+    """Cheap world-model prior for the two-outcome lookahead rollout."""
+    utility = max(0.0, min(1.0, exp.utility))
+    strategy = max(0.0, min(1.0, exp.strategy_prior or 0.5))
+    novelty = max(0.0, min(1.0, exp.novelty or 0.5))
+    return max(0.1, min(0.9, 0.35 + 0.35 * utility + 0.2 * strategy + 0.1 * novelty))
+
+
+def _simulated_utility(
+    exp: FrontierExperiment,
+    *,
+    confidence: float,
+    weights: dict[str, float] | None = None,
+) -> float:
+    w = dict(DEFAULT_UTILITY_WEIGHTS)
+    if weights:
+        w.update(weights)
+    components = {
+        "expected_progress": 0.3 + 0.6 * confidence,
+        "information_gain": 1.0 - abs(2.0 * confidence - 1.0),
+        "hypothesis_confidence": confidence,
+        "novelty": exp.novelty,
+        "strategy_prior": exp.strategy_prior or 0.5,
+        "transfer_value": exp.transfer_value,
+        "query_cost": exp.query_cost or 0.3,
+        "repetition_penalty": exp.repetition_penalty,
+        "dead_similarity": exp.dead_similarity,
+    }
+    return sum(w.get(k, 0.0) * v for k, v in components.items())
+
+
+def _simulated_second_step_value(
+    graph: BeliefGraph,
+    *,
+    first: FrontierExperiment,
+    proposed: list[FrontierExperiment],
+    confidence_overrides: dict[str, float],
+    total_attempts_after_first: int,
+    exploration_c: float,
+    rollout_branching: int,
+) -> float:
+    candidates = [
+        exp
+        for exp in proposed
+        if exp.id != first.id and exp.hypothesis_id == first.hypothesis_id
+    ]
+    if not candidates or rollout_branching <= 0:
+        h = graph.nodes.get(first.hypothesis_id)
+        if not isinstance(h, WeaknessHypothesis):
+            return 0.0
+        conf = confidence_overrides.get(first.hypothesis_id, h.confidence)
+        # Expansion fallback: estimate the value of generating one local
+        # refinement after this experiment. High-information, novel,
+        # strategy-backed branches get useful continuation value even before
+        # a concrete child frontier exists.
+        return 0.75 * _simulated_utility(first, confidence=conf)
+
+    scored: list[float] = []
+    for exp in candidates:
+        h = graph.nodes.get(exp.hypothesis_id)
+        if not isinstance(h, WeaknessHypothesis):
+            continue
+        conf = confidence_overrides.get(exp.hypothesis_id, h.confidence)
+        visits = _hypothesis_visit_count(graph, exp.hypothesis_id)
+        if exp.hypothesis_id == first.hypothesis_id:
+            visits += 1
+        scored.append(
+            _simulated_utility(exp, confidence=conf)
+            + _ucb_bonus(
+                total_attempts=total_attempts_after_first,
+                hypothesis_visits=visits,
+                exploration_c=exploration_c,
+            )
+        )
+    scored.sort(reverse=True)
+    if not scored:
+        return 0.0
+    # Progressive widening: at depth 2 we estimate the next layer from the
+    # best few candidates rather than pretending the whole frontier expands.
+    return max(scored[:rollout_branching])
+
+
 def select_next_experiment(
     graph: BeliefGraph,
     *,
     exploration_c: float = DEFAULT_EXPLORATION_C,
+    lookahead_depth: int = 2,
+    lookahead_weight: float = DEFAULT_LOOKAHEAD_WEIGHT,
+    rollout_branching: int = DEFAULT_ROLLOUT_BRANCHING,
 ) -> FrontierExperiment | None:
     """Pick the next :class:`FrontierExperiment` to dispatch.
 
-    Uses a shallow UCB rule on top of the utility ranker:
+    Uses UCB on top of the utility ranker, then optionally performs a
+    depth-2 cheap rollout over the existing frontier:
 
         choice_score(fx) = fx.utility
                          + c * sqrt(log(N + 1) / (n_h + 1))
+                         + lookahead_weight * E[best_next_score]
 
     Where ``N`` is the total attempt count across the graph and
     ``n_h`` is the number of attempts that have already tested
     ``fx.hypothesis_id``. The +1 smoothing keeps the bonus finite for
     fresh hypotheses (n_h = 0) without diverging when N is small.
 
-    Returns the experiment with the highest ``choice_score`` from
+    The rollout is target-query-free. It simulates SUPPORTS / REFUTES
+    evidence against the tested hypothesis, updates confidence in that
+    imaginary branch, then asks which second experiment would be best
+    under that belief state. This is not full MCTS; it is the bounded
+    belief-state scheduler described in the plan.
+
+    Returns the experiment with the highest score from
     those still in :attr:`ExperimentState.PROPOSED`. Returns ``None``
     when no proposed experiments exist.
 
@@ -858,13 +966,43 @@ def select_next_experiment(
         return None
 
     total_attempts = _total_attempt_count(graph)
-    log_n = math.log(total_attempts + 1)
 
     best: tuple[FrontierExperiment, float] | None = None
     for exp in proposed:
+        h = graph.nodes.get(exp.hypothesis_id)
+        if not isinstance(h, WeaknessHypothesis):
+            continue
         n_h = _hypothesis_visit_count(graph, exp.hypothesis_id)
-        ucb_bonus = exploration_c * math.sqrt(log_n / (n_h + 1.0))
-        score = exp.utility + ucb_bonus
+        score = exp.utility + _ucb_bonus(
+            total_attempts=total_attempts,
+            hypothesis_visits=n_h,
+            exploration_c=exploration_c,
+        )
+        if lookahead_depth >= 2 and lookahead_weight > 0 and len(proposed) > 1:
+            p_support = _support_probability(exp)
+            support_conf = max(0.0, min(1.0, h.confidence + _SIM_SUPPORT_DELTA))
+            refute_conf = max(0.0, min(1.0, h.confidence - _SIM_REFUTE_DELTA))
+            support_value = _simulated_second_step_value(
+                graph,
+                first=exp,
+                proposed=proposed,
+                confidence_overrides={exp.hypothesis_id: support_conf},
+                total_attempts_after_first=total_attempts + 1,
+                exploration_c=exploration_c,
+                rollout_branching=rollout_branching,
+            )
+            refute_value = _simulated_second_step_value(
+                graph,
+                first=exp,
+                proposed=proposed,
+                confidence_overrides={exp.hypothesis_id: refute_conf},
+                total_attempts_after_first=total_attempts + 1,
+                exploration_c=exploration_c,
+                rollout_branching=rollout_branching,
+            )
+            score += lookahead_weight * (
+                p_support * support_value + (1.0 - p_support) * refute_value
+            )
         if best is None or score > best[1]:
             best = (exp, score)
     return best[0] if best else None
@@ -872,6 +1010,8 @@ def select_next_experiment(
 
 __all__ = [
     "DEFAULT_EXPLORATION_C",
+    "DEFAULT_LOOKAHEAD_WEIGHT",
+    "DEFAULT_ROLLOUT_BRANCHING",
     "apply_evidence_to_beliefs",
     "generate_frontier_experiments",
     "generate_hypotheses",

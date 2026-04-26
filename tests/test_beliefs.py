@@ -621,6 +621,64 @@ def test_select_next_experiment_high_utility_overrides_ucb() -> None:
     assert pick.id == f_a.id
 
 
+def test_select_next_experiment_depth_two_prefers_branch_with_good_followup() -> None:
+    """A modest first move can beat a slightly better one-shot move when it
+    opens a strong second experiment under the same hypothesis."""
+    from mesmer.core.belief_graph import FrontierRankDelta
+
+    g = BeliefGraph()
+    h_chain = make_hypothesis(
+        claim="chain", description="d", family="format-shift", confidence=0.5
+    )
+    h_single = make_hypothesis(
+        claim="single", description="d", family="authority-bias", confidence=0.5
+    )
+    g.apply(HypothesisCreateDelta(hypothesis=h_chain))
+    g.apply(HypothesisCreateDelta(hypothesis=h_single))
+
+    first = make_frontier(
+        hypothesis_id=h_chain.id,
+        module="format-shift",
+        instruction="first",
+        expected_signal="e",
+    )
+    one_shot = make_frontier(
+        hypothesis_id=h_single.id,
+        module="authority-bias",
+        instruction="single",
+        expected_signal="e",
+    )
+    for f in (first, one_shot):
+        g.apply(FrontierCreateDelta(experiment=f))
+
+    g.apply(
+        FrontierRankDelta(
+            rankings={
+                first.id: {
+                    "utility": 0.50,
+                    "information_gain": 1.0,
+                    "novelty": 1.0,
+                    "strategy_prior": 0.9,
+                    "transfer_value": 0.8,
+                    "query_cost": 0.1,
+                },
+                one_shot.id: {
+                    "utility": 0.53,
+                    "information_gain": 0.1,
+                    "novelty": 0.1,
+                    "strategy_prior": 0.2,
+                    "query_cost": 0.1,
+                },
+            }
+        )
+    )
+
+    depth_one = select_next_experiment(g, exploration_c=0.0, lookahead_depth=1)
+    depth_two = select_next_experiment(g, exploration_c=0.0, lookahead_depth=2)
+    assert depth_one is not None and depth_one.id == one_shot.id
+    assert depth_two is not None and depth_two.id == first.id
+
+
 def test_select_next_experiment_zero_attempts_no_division_error() -> None:
     """N = 0, n_h = 0 → log(1) / 1 = 0; bonus is 0; pure utility ordering."""
     from mesmer.core.belief_graph import FrontierRankDelta

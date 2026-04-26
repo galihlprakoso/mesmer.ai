@@ -22,6 +22,7 @@
   import { onDestroy, onMount } from 'svelte'
   import * as d3 from 'd3'
   import { getBeliefGraph } from '../lib/api.js'
+  import { runStatus } from '../lib/stores.js'
 
   /** @type {string|null} */
   export let targetHash = null
@@ -39,6 +40,7 @@
   let selectedNode = null
   let simulation = null
   let zoomBehavior = null
+  let pollTimer = null
 
   // Color palette aligned with AttackGraph.svelte to keep the two
   // views visually consistent. Status semantics mostly transfer:
@@ -101,10 +103,13 @@
       // measure container dimensions.
       requestAnimationFrame(render)
     } catch (e) {
-      errorMsg = e.message
-      graph = null
-      stats = null
-      promptContext = ''
+      const initializing = e.message === 'Belief graph not found' && $runStatus === 'running'
+      errorMsg = initializing ? '' : e.message
+      if (!graph || !initializing) {
+        graph = null
+        stats = null
+        promptContext = ''
+      }
     } finally {
       loading = false
     }
@@ -390,12 +395,21 @@
 
   onMount(() => {
     load()
+    pollTimer = setInterval(() => {
+      if (targetHash && $runStatus === 'running') {
+        load()
+      }
+    }, 2500)
     const ro = new ResizeObserver(() => render())
     if (containerEl) ro.observe(containerEl)
-    return () => ro.disconnect()
+    return () => {
+      if (pollTimer) clearInterval(pollTimer)
+      ro.disconnect()
+    }
   })
 
   onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer)
     simulation?.stop()
   })
 
@@ -422,7 +436,15 @@
   {:else if errorMsg}
     <div class="status error">{errorMsg}</div>
   {:else if !graph}
-    <div class="status">Pick a target to see its belief graph.</div>
+    <div class="status">
+      {#if targetHash && $runStatus === 'running'}
+        Belief graph is initializing…
+      {:else if targetHash}
+        No belief graph saved for this target yet.
+      {:else}
+        Pick a target to see its belief graph.
+      {/if}
+    </div>
   {:else}
     <div class="stats">
       {#if stats}

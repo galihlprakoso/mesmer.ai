@@ -273,6 +273,7 @@ class Context:
         # Internal — set by child()
         _turns: list[Turn] | None = None,
         _module_log: list[ModuleRun] | None = None,
+        _belief_evidence_turn_indexes: set[int] | None = None,
         _target_reset_at: int = 0,
     ):
         self.target = target
@@ -321,6 +322,11 @@ class Context:
         # Shared across parent/child — same list reference
         self.turns: list[Turn] = _turns if _turns is not None else []
         self.module_log: list[ModuleRun] = _module_log if _module_log is not None else []
+        self._belief_evidence_turn_indexes: set[int] = (
+            _belief_evidence_turn_indexes
+            if _belief_evidence_turn_indexes is not None
+            else set()
+        )
 
         # P0 — target memory reset tracking.
         #   target_fresh_session: True when this module entered with a fresh
@@ -674,6 +680,7 @@ class Context:
             scenario_mode=self.scenario_mode,  # inherit CONTINUOUS/TRIALS
             _turns=self.turns,  # same list reference
             _module_log=self.module_log,  # shared log
+            _belief_evidence_turn_indexes=self._belief_evidence_turn_indexes,
             _target_reset_at=self._target_reset_at,
         )
         # Telemetry rolls up to the run — every sub-module's LLM usage

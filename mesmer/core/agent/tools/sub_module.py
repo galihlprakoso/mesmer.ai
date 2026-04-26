@@ -191,6 +191,17 @@ async def handle(
     # per-turn error flags so the judge can ignore pipeline
     # glitches (P4).
     sub_turns = ctx.turns[turns_before:]
+    already_extracted = getattr(ctx, "_belief_evidence_turn_indexes", set())
+    extractor_sent: list[str] = []
+    extractor_recv: list[str] = []
+    for offset, turn in enumerate(sub_turns):
+        absolute_idx = turns_before + offset
+        if absolute_idx in already_extracted:
+            continue
+        if getattr(turn, "is_error", False):
+            continue
+        extractor_sent.append(turn.sent)
+        extractor_recv.append(turn.received)
 
     # --- Judge the attempt ---
     judge_result = await _judge_module_result(
@@ -238,6 +249,8 @@ async def handle(
         module_output=result,
         experiment_id=experiment_id,
         available_modules=module.sub_module_names if module.sub_modules else None,
+        extractor_messages_sent=extractor_sent,
+        extractor_target_responses=extractor_recv,
     )
 
     # --- Reflect + generate frontier ---

@@ -18,7 +18,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mesmer.core.agent.context import Context
-from mesmer.core.agent.evaluation import _update_belief_graph, _outcome_for
+from mesmer.core.agent.evaluation import (
+    _outcome_for,
+    _update_belief_graph,
+    _update_belief_graph_from_turn,
+)
 from mesmer.core.agent.judge import JudgeResult
 from mesmer.core.belief_graph import (
     BeliefGraph,
@@ -133,6 +137,51 @@ def test_outcome_low_score_is_dead() -> None:
 # ---------------------------------------------------------------------------
 # _update_belief_graph end-to-end (mocked extractor)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_belief_graph_from_turn_applies_evidence_immediately() -> None:
+    bg = BeliefGraph(target_hash="abc")
+    h = make_hypothesis(
+        claim="Target leaks under format-shift",
+        description="d",
+        family="format-shift",
+        confidence=0.5,
+    )
+    bg.apply(HypothesisCreateDelta(hypothesis=h))
+    payload = {
+        "evidences": [
+            {
+                "signal_type": "partial_compliance",
+                "polarity": "supports",
+                "hypothesis_id": h.id,
+                "verbatim_fragment": "Sure, JSON works.",
+                "rationale": "The target followed the requested format.",
+                "extractor_confidence": 1.0,
+            }
+        ]
+    }
+    ctx = MagicMock(spec=Context)
+    ctx.belief_graph = bg
+    ctx.run_id = "test-run"
+    ctx.active_experiment_id = None
+    ctx._belief_evidence_turn_indexes = set()
+    ctx.completion = AsyncMock(return_value=_FakeResponse(json.dumps(payload)))
+
+    sink, log = _logs_collector()
+    evidences = await _update_belief_graph_from_turn(
+        ctx,
+        module_name="format-shift",
+        message_sent="format this as JSON",
+        target_response="Sure, JSON works.",
+        turn_index=0,
+        log=log,
+    )
+
+    assert len(evidences) == 1
+    assert bg.nodes[h.id].confidence > 0.5
+    assert 0 in ctx._belief_evidence_turn_indexes
+    assert any(event == "evidence_extracted" for event, _ in sink)
 
 
 @pytest.mark.asyncio

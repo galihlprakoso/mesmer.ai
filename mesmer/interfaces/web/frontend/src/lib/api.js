@@ -75,8 +75,7 @@ export async function listModules() {
  * Returns `{graph: <serialized BeliefGraph>, stats: <counts>,
  * prompt_context: <current leader brief>}` on success.
  * Throws "Belief graph not found" when the target has never
- * been run with belief-graph wiring (the file is created on first
- * successful save in `runner.execute_run`).
+ * been run with belief-graph wiring and has no live run state.
  */
 export async function getBeliefGraph(targetHash) {
   const res = await fetch(`/api/targets/${encodeURIComponent(targetHash)}/belief-graph`)
