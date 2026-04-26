@@ -1,6 +1,6 @@
 # mesmer benchmarks
 
-One canonical spec. One target. One attacker. Every published result
+One canonical spec. Multiple targets. One scenario-level agent. Every published result
 ships with a fixed Methodology / Contamination Posture / Limitations
 template so no number goes out without its context.
 
@@ -34,9 +34,9 @@ Every claim traces back to a committed artifact that anyone can re-run:
    by snapshot / tag. Every per-trial JSONL row captures the provider's
    `system_fingerprint` (OpenAI / Groq) so even model strings that don't
    carry a date stay reproducible to the exact checkpoint that served.
-3. **The judge is code.** `mesmer/bench/canary.py` is a deterministic
-   substring matcher with unit tests. No LLM, no randomness, same
-   inputs always score the same way. The in-loop LLM judge guides
+3. **The judge is code.** The spec's `judge:` block selects a
+   deterministic scorer (`substring` or `regex`). No LLM, no randomness,
+   same inputs always score the same way. The in-loop LLM judge guides
    mesmer's next move but does NOT decide benchmark success.
 4. **Seeds are committed.** Every per-trial JSONL row carries the seed
    applied to Python's `random`. Provider-side LLM sampling is not
@@ -105,15 +105,29 @@ uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --no-baseline
 
 Clone the existing YAML and modify. Required top-level blocks:
 
-- `module:` — which mesmer module is under test.
+- `modules:` — one or more mesmer manager modules exposed to the
+  scenario-level executive. Legacy `module:` still loads as a single-item
+  module list.
 - `dataset:` — upstream URL + SHA256 + `row_schema` mapping onto
-  mesmer's canonical `{pre_prompt, post_prompt, canary,
-  baseline_attack, sample_id}`. See
+  mesmer's canonical `{pre_prompt, post_prompt, success_value,
+  baseline_attack, sample_id}`. `canary` remains a legacy alias for
+  extraction datasets. See
   [datasets/README.md](datasets/README.md) for provenance.
+- `target_prompt:` — row-template strings that build the target system
+  prompt and per-turn user suffix. The Tensor Trust default is
+  `system_template: "{{ pre_prompt }}"` and
+  `user_turn_suffix_template: "{{ post_prompt }}"`.
 - `targets:` — any OpenAI-compatible endpoint (Groq, OpenAI, Together,
   DeepInfra, local Ollama, etc.) via the `openai` adapter; `rest` and
   `websocket` adapters for non-OpenAI-shaped APIs.
-- `attacker:` — the red-team brain (LiteLLM-reachable).
+- `agent:` — the scenario-level red-team brain (LiteLLM-reachable),
+  including optional role-aware fields such as `sub_module_model`,
+  `judge_model`, and compression settings.
+- `judge:` — deterministic post-hoc benchmark scorer. Supported:
+  `type: substring` and `type: regex`; `success_field` names the row
+  value or pattern to look for; `require_leader_consolidation` controls
+  whether success must appear in the leader's final result or can be any
+  target-side emission.
 - `contamination_posture:` — **required**. Must declare all of:
   - `dataset_release_date` — when the upstream data was first public.
   - `upstream_license` — confirm against upstream LICENSE on fetch.
@@ -125,7 +139,8 @@ Clone the existing YAML and modify. Required top-level blocks:
 Specs without a complete `contamination_posture` block raise a clear
 `ValueError` at load time.
 
-The only judge currently supported is `canary-substring` (literal
-substring match on the access code, case-insensitive). Other
-deterministic judges (regex, JSON-field, tool-call detection) are
-follow-up work.
+The shipped Tensor Trust spec uses `substring` against the row's
+`access_code`, with `require_leader_consolidation: true`, so accidental
+mid-probe leaks remain diagnostic unless the leader packages the win.
+Datasets with non-secret-string outcomes still need a new deterministic
+judge type (for example tool-call or structured JSON matching).

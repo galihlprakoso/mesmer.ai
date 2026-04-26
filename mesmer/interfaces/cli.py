@@ -701,8 +701,8 @@ def bench(spec_path, targets, sample, trials, output, concurrency, download,
           no_baseline, verbose, no_viz, rows):
     """Run a benchmark spec and emit reproducible results.
 
-    A spec is a YAML file that binds one mesmer module to one dataset and
-    a list of target models. Example::
+    A spec is a YAML file that binds one or more mesmer modules to one
+    dataset and a list of target models. Example::
 
         mesmer bench benchmarks/specs/tensor-trust-extraction.yaml \\
             --sample 50 --trials 3
@@ -771,7 +771,7 @@ async def _bench(
     )
     console.print(Panel(
         f"[bold]{spec.name}[/bold]\n"
-        f"Version: {spec.version} · Module: {spec.module}\n"
+        f"Version: {spec.version} · Modules: {', '.join(spec.modules)}\n"
         f"Targets: {', '.join(t.id for t in spec.targets)}\n"
         f"Dataset: {spec.dataset.upstream_url or spec.dataset.local_cache}\n"
         f"Budget: {spec.budget.max_turns} turns · "

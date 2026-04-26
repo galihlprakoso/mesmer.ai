@@ -211,7 +211,8 @@ objective:
     - "system prompt"
     - "instructions"
 
-module: system-prompt-extraction
+modules:
+  - system-prompt-extraction
 
 agent:
   # Executive + manager modules use Opus 4.7.
@@ -263,37 +264,37 @@ agent:
 ## Benchmarks
 
 Mesmer ships a reproducible benchmark suite so claims in this README are
-numbers, not vibes. Each spec binds one module to one real public dataset,
-fires trials against a list of target models, and writes a versioned JSONL
-+ summary.json + Markdown table.
+numbers, not vibes. Each spec binds one or more manager modules to one
+real public dataset, fires trials against a list of target models, and
+writes a versioned JSONL + summary.json + Markdown table.
 
 ```bash
 # Fast smoke (2-3 rows, 1 trial):
-uv run mesmer bench benchmarks/specs/tensor-trust-extraction-smoke.yaml
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --sample 3 --trials 1
 
 # Iteration run on the full spec (50 rows × 3 trials):
-uv run mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml --sample 50
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --sample 50
 
 # Publication run (full dataset):
-uv run mesmer bench benchmarks/specs/tensor-trust-extraction-v1.yaml
+uv run mesmer bench benchmarks/specs/tensor-trust-extraction.yaml --sample 0
 ```
 
 ### Current specs
 
-| Spec | Module | Dataset | Rows |
+| Spec | Modules | Dataset | Rows |
 |---|---|---|---|
-| [`tensor-trust-extraction-v1`](benchmarks/specs/tensor-trust-extraction-v1.yaml) | `system-prompt-extraction` | [Tensor Trust extraction-robustness v1](benchmarks/datasets/README.md#tensor-trust--extraction_robustness_datasetjsonl) (ICLR 2024) | 569 real player-crafted defenses |
+| [`tensor-trust-extraction`](benchmarks/specs/tensor-trust-extraction.yaml) | `target-profiler`, `system-prompt-extraction` | [Tensor Trust extraction-robustness v1](benchmarks/datasets/README.md#tensor-trust--extraction_robustness_datasetjsonl) (ICLR 2024) | 569 real player-crafted defenses |
 
 Every spec has **two arms**:
 
 - **mesmer** — the full multi-turn ReAct loop attacks the defense (that's the product under test).
 - **baseline** — the dataset's own single-turn `attack` field is replayed against the same target. Apples-to-apples control, so the published delta (*"multi-turn mesmer +33pp over single-turn baseline"*) is a meaningful scientific claim rather than a marketing one.
 
-Judging is **deterministic** — a ~40-line canary-substring matcher in
-[`mesmer/bench/canary.py`](mesmer/bench/canary.py) with full
-unit-test coverage. The in-loop LLM judge guides mesmer's next move but
-does **not** decide benchmark success. Datasets are SHA-pinned, model
-snapshots are pinned, seeds are committed. Full reproducibility contract:
+Judging is **deterministic** — the spec's `judge:` block selects a
+code scorer such as `substring` or `regex`. The in-loop LLM judge guides
+mesmer's next move but does **not** decide benchmark success. Datasets
+are SHA-pinned, model snapshots are pinned, seeds are committed. Full
+reproducibility contract:
 [`benchmarks/README.md`](benchmarks/README.md).
 
 ### Published results

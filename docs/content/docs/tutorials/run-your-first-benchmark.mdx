@@ -107,7 +107,9 @@ single file with vendored D3 if you ran with `--offline`).
 ```yaml
 name: "My corp — extraction"
 version: v1
-module: system-prompt-extraction
+modules:
+  - target-profiler
+  - system-prompt-extraction
 
 dataset:
   upstream_url: https://my-cdn.internal/canary-set-v3.jsonl
@@ -116,8 +118,17 @@ dataset:
   expected_rows: 120
   row_schema:
     pre_prompt: pre_prompt
-    canary: secret_token
+    success_value: secret_token
     sample_id: id
+
+target_prompt:
+  system_template: "{{ pre_prompt }}"
+  user_turn_suffix_template: ""
+
+judge:
+  type: substring
+  success_field: success_value
+  require_leader_consolidation: true
 
 targets:
   - id: prod-claude
