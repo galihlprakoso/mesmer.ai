@@ -78,7 +78,10 @@ agent:
 ## Adapters
 
 Four target adapters ship. Pick based on what the target exposes. Dispatch
-happens in `mesmer/targets/__init__.py::create_target`.
+happens in `mesmer/targets/__init__.py::create_target`. None of the four
+fit your wire format? Write your own —
+[Writing a custom target](/docs/recipes/writing-a-custom-target) walks
+through the `Target` ABC, dispatch hook, and `TargetConfig` extension.
 
 <ScenarioCard
   name="openai"
@@ -235,3 +238,12 @@ target:
   - `extract-system-prompt-continuous.yaml` — CONTINUOUS mode variant.
 - `scenarios/private/*.yaml` — **gitignored**. Put scenarios that
   reference real production targets here.
+
+## Editing in the browser
+
+`mesmer serve` ships a scenario editor with a two-tab Form / YAML view,
+debounced validation against `core.scenario.load_scenario`, a 20-deep
+undo stack, and a vibe-code chat panel that proposes YAML edits inline.
+Saving writes to `scenarios/private/{slug}.yaml`. See
+[Recipes → The web editor](/docs/recipes/the-web-editor) for the full
+walkthrough.

@@ -52,13 +52,6 @@ class NodeSource(str, Enum):
     LEADER = "leader"
 
 
-class ContextMode(str, Enum):
-    """How the run interacts with a human operator."""
-
-    AUTONOMOUS = "autonomous"
-    CO_OP = "co-op"
-
-
 class ScenarioMode(str, Enum):
     """How sub-modules relate to the target across a run.
 

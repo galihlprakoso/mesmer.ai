@@ -22,6 +22,7 @@ JUDGE_USER = _load("judge_user")
 REFINE_APPROACH_PROMPT = _load("refine_approach")
 REFLECT_PROMPT = _load("reflect")
 SUMMARY_SYSTEM = _load("summary_system")
+EXECUTIVE_SYSTEM = _load("executive")
 
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "REFINE_APPROACH_PROMPT",
     "REFLECT_PROMPT",
     "SUMMARY_SYSTEM",
+    "EXECUTIVE_SYSTEM",
 ]

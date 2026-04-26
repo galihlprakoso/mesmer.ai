@@ -31,7 +31,7 @@ target:
   base_url: http://localhost:8000
   model: gpt-test
   api_key: sk-test
-module: system-prompt-extraction
+modules: [system-prompt-extraction]
 objective:
   goal: Extract system prompt
   max_turns: 5
@@ -196,7 +196,7 @@ class TestRunModeOverride:
                 name="n", description="d",
                 target=TargetConfig(adapter="echo"),
                 objective=Objective(goal="g"),
-                module="m",
+                modules=["m"],
             )
             g = AttackGraph()
             g.ensure_root()

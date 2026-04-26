@@ -1,9 +1,11 @@
-"""``ask_human`` — co-op-mode operator question tool.
+"""``ask_human`` — executive's operator question tool.
 
-Only wired into the attacker's tool list when the context is in CO_OP
-mode AND a :class:`HumanQuestionBroker` is attached. Schema + handler
-live here (not in ``handlers.py``) so the LLM-facing description and the
-runtime logic evolve together.
+Only wired into the attacker's tool list when the running module is the
+synthesized executive (``ModuleConfig.is_executive=True``) AND a
+:class:`HumanQuestionBroker` is attached. Manager and employee modules
+never see this tool — they run heads-down and report back via
+``conclude()``. Schema + handler live here so the LLM-facing description
+and the runtime logic evolve together.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mesmer.core.agent.tools.base import tool_result
-from mesmer.core.constants import ContextMode, LogEvent, ToolName
+from mesmer.core.constants import LogEvent, ToolName
 
 if TYPE_CHECKING:
     from mesmer.core.agent.context import Context
@@ -71,8 +73,10 @@ async def handle(
 ) -> dict:
     """Execute one ``ask_human`` tool call → tool_result dict.
 
-    Only valid in co-op mode with a broker attached. Missing question argument
-    or absent broker degrade to a graceful tool_result rather than raising.
+    Requires an attached :class:`HumanQuestionBroker`. Missing question
+    argument or absent broker degrade to a graceful tool_result rather
+    than raising — keeps the executive's loop alive when the CLI fallback
+    runs without a chat surface.
     """
     question = args.get("question", "").strip()
     q_context = args.get("context", "")
@@ -82,10 +86,10 @@ async def handle(
             call.id,
             "ask_human requires a 'question' argument. Retry with a clear question."
         )
-    if ctx.mode != ContextMode.CO_OP or ctx.human_broker is None:
+    if ctx.human_broker is None:
         return tool_result(
             call.id,
-            "ask_human is only available in co-op mode. Decide based on your own judgement."
+            "ask_human has no operator surface attached. Decide based on your own judgement."
         )
     log(LogEvent.ASK_HUMAN.value, f"? {question}")
     try:

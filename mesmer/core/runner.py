@@ -12,11 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from mesmer.core.constants import ContextMode, NodeSource, NodeStatus, ScenarioMode
+from mesmer.core.constants import NodeSource, NodeStatus, ScenarioMode
 from mesmer.core.agent.context import Context, HumanQuestionBroker, RunTelemetry
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent import LogFn, run_react_loop
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id
+from mesmer.core.agent.prompts import EXECUTIVE_SYSTEM as _DEFAULT_EXECUTIVE_PROMPT
+from mesmer.core.module import ModuleConfig, SubModuleEntry
 from mesmer.core.registry import Registry
 from mesmer.core.scenario import load_scenario, AgentConfig, Scenario
 
@@ -36,7 +38,6 @@ class RunConfig:
     fresh: bool = False
     extra_module_paths: list[str] = field(default_factory=list)
     output_path: str | None = None
-    mode: str = ContextMode.AUTONOMOUS.value  # ContextMode or 'plan'
     human_broker: "HumanQuestionBroker | None" = None
     # Per-invocation ScenarioMode override (--mode on the CLI). When None,
     # the scenario YAML's mode field wins. Set to ScenarioMode.TRIALS or
@@ -145,11 +146,39 @@ async def execute_run(
     if on_pool_ready is not None and agent_config.pool is not None:
         on_pool_ready(agent_config.pool)
 
-    # Check entry module exists
-    entry = registry.get(scenario.module)
-    if entry is None:
+    # Validate every manager named in scenario.modules is in the registry
+    # before synthesizing the executive — otherwise the executive's tool
+    # list would silently miss managers and the operator would only find
+    # out mid-run.
+    missing = [name for name in scenario.modules if registry.get(name) is None]
+    if missing:
         available = ", ".join(sorted(registry.modules.keys()))
-        raise ValueError(f"Module '{scenario.module}' not found. Available: {available}")
+        raise ValueError(
+            f"Scenario modules not found in registry: {missing}. "
+            f"Available: {available}"
+        )
+
+    # Synthesize the scenario-scoped executive. It exists only in memory
+    # for this run — never written to disk, never registered, never
+    # discoverable by ``Registry.auto_discover``. The name carries the
+    # scenario stem so leader-verdict nodes in graph.json are
+    # attributable to the right scenario when multiple scenarios run
+    # against the same target.
+    scenario_stem = (
+        Path(config.scenario_path).stem if config.scenario_path else "scenario"
+    )
+    executive_name = f"{scenario_stem}:executive"
+    entry = ModuleConfig(
+        name=executive_name,
+        description=f"Scenario-scoped executive for {scenario.name}.",
+        theory="Coordinates manager modules and converses with the operator.",
+        system_prompt=scenario.leader_prompt or _DEFAULT_EXECUTIVE_PROMPT,
+        sub_modules=[SubModuleEntry(name=n) for n in scenario.modules],
+        judge_rubric="",
+        reset_target=False,
+        tier=0,
+        is_executive=True,
+    )
 
     # Create target
     target = create_target(scenario.target)
@@ -202,7 +231,6 @@ async def execute_run(
         max_turns=max_turns,
         graph=graph,
         run_id=run_id,
-        mode=config.mode,
         human_broker=config.human_broker,
         target_memory=memory,
         judge_rubric_additions=scenario.judge_rubric_additions,
@@ -228,15 +256,15 @@ async def execute_run(
         if output:
             ctx.scratchpad.set(node.module, output)
 
-    # Persistent leader-scratchpad slot. The leader's slot is the only one
-    # the framework leaves empty after the conversation_history loop above
-    # (leader-verdict nodes are excluded at source), so the on-disk
-    # scratchpad.md content is the canonical contents — overwrite cleanly.
-    # Edited via the leader's update_scratchpad tool and via the operator
+    # Persistent executive-scratchpad slot. The executive's slot is the only
+    # one the framework leaves empty after the conversation_history loop
+    # above (leader-verdict nodes are excluded at source), so the on-disk
+    # scratchpad.md content is canonical — overwrite cleanly. Edited via
+    # the executive's ``update_scratchpad`` tool and via the operator
     # through the web UI's leader-chat.
     scratchpad_md = memory.load_scratchpad()
     if scratchpad_md is not None:
-        ctx.scratchpad.set(scenario.module, scratchpad_md)
+        ctx.scratchpad.set(executive_name, scratchpad_md)
 
     # Fire ctx-ready hook AFTER seeding so the web backend's hold-onto-ctx
     # grab gets a fully populated context (operator_messages queue ready).
@@ -374,10 +402,15 @@ def list_scenarios(directory: str | Path) -> list[dict]:
                 with open(f) as fh:
                     data = yaml.safe_load(fh)
 
-                # A valid scenario must have these keys
+                # A valid scenario must have these keys. Accept either the
+                # current ``modules:`` list or the legacy ``module:`` string
+                # so the listing UI keeps working during the migration
+                # window — load_scenario itself enforces the new schema.
                 if not isinstance(data, dict):
                     continue
-                if not all(k in data for k in ("target", "objective", "module")):
+                if not all(k in data for k in ("target", "objective")):
+                    continue
+                if "modules" not in data and "module" not in data:
                     continue
 
                 s = load_scenario(str(f))
@@ -387,7 +420,7 @@ def list_scenarios(directory: str | Path) -> list[dict]:
                     "description": s.description,
                     "target_adapter": s.target.adapter,
                     "target_url": s.target.url or s.target.base_url or s.target.model or "",
-                    "module": s.module,
+                    "modules": list(s.modules),
                     "max_turns": s.objective.max_turns,
                 })
             except Exception:

@@ -29,7 +29,7 @@ from mesmer.core.agent.tools import (
     update_scratchpad,
 )
 from mesmer.core.agent.tools.base import tool_result
-from mesmer.core.constants import ContextMode, ToolName
+from mesmer.core.constants import ToolName
 
 if TYPE_CHECKING:
     from mesmer.core.agent.context import Context
@@ -50,25 +50,36 @@ _BUILTIN_HANDLERS = {
 
 
 def build_tool_list(module: ModuleConfig, ctx: Context) -> list[dict]:
-    """Assemble the OpenAI ``tools=`` list for a leader module + context.
+    """Assemble the OpenAI ``tools=`` list for a module + context.
 
-    Order matters only for prompt compactness — the LLM sees all schemas
+    Two roles, two tool shapes (gated by ``module.is_executive``):
+
+      - **Executive** (synthesized at run start, always at depth=0): owns
+        the operator conversation. Gets ``ask_human``,
+        ``talk_to_operator``, ``update_scratchpad``, and dispatch tools
+        for every manager in ``module.sub_modules``. **Does NOT get
+        ``send_message``** — the executive never talks to the target
+        directly; that's a manager's job.
+      - **Manager / employee** (registry-loaded, ``is_executive=False``):
+        runs heads-down. Gets ``send_message`` to attack the target plus
+        any sub-module dispatch tools. **Does NOT get ``ask_human`` /
+        ``talk_to_operator`` / ``update_scratchpad``** — only the
+        executive talks to the operator.
+
+    Order matters only for prompt compactness; the LLM sees all schemas
     at once. Sub-module tools come first because they're the meaningful
-    attack surface; built-ins round out the toolbox.
+    attack surface.
     """
     tools: list[dict] = []
     if module.sub_modules:
         tools.extend(ctx.registry.as_tools(module.sub_module_names))
-    tools.append(send_message.SCHEMA)
-    tools.append(conclude.SCHEMA)
-    if ctx.mode == ContextMode.CO_OP and ctx.human_broker is not None:
+    if module.is_executive:
         tools.append(ask_human.SCHEMA)
-    # Leader-only persistent-notes + operator-chat tools. Gated on depth==0
-    # because sub-module slots are auto-managed (no manual writes) and the
-    # operator counterpart is the leader, not the techniques it delegates to.
-    if ctx.depth == 0:
-        tools.append(update_scratchpad.SCHEMA)
         tools.append(talk_to_operator.SCHEMA)
+        tools.append(update_scratchpad.SCHEMA)
+    else:
+        tools.append(send_message.SCHEMA)
+    tools.append(conclude.SCHEMA)
     return tools
 
 

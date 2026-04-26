@@ -1,0 +1,104 @@
+---
+title: Your first attack
+description: Run mesmer against an OpenAI-compatible model and read the resulting graph in 10 minutes.
+---
+
+You have an OpenRouter (or any OpenAI-compatible) API key and Python
+≥ 3.10. By the end of this page you have a saved attack graph at
+`~/.mesmer/`, a verbatim system-prompt leak, and the muscle memory to
+point mesmer at any other target.
+
+## 1. Install
+
+```bash
+pip install uv
+git clone https://github.com/galihlprakoso/mesmer.ai.git
+cd mesmer.ai
+uv sync
+```
+
+`uv` is canonical here — `uv.lock` is committed and `uv sync` reads it
+deterministically. If you already have your own venv, `pip install -e .`
+works too.
+
+## 2. Set keys
+
+```bash
+export OPENROUTER_API_KEY="sk-or-…"
+# Comma-separated keys round-robin automatically:
+# export OPENROUTER_API_KEY="sk-or-aaa,sk-or-bbb"
+```
+
+## 3. Run the shipped scenario
+
+```bash
+uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
+```
+
+You'll see five things scroll past in this order:
+
+1. `[ load scenario ]` — YAML parsed, `${OPENROUTER_API_KEY}` resolved.
+2. `[ hydrate graph ]` — fresh target → empty graph; subsequent runs
+   show `N nodes / M frontier`.
+3. `[ PHASE 1 RECON ]` — `target-profiler` writes a dossier.
+4. `[ PHASE 2 PLAN ]` — `attack-planner` reads the dossier + any prior
+   wins, emits a step list.
+5. `[ PHASE 3 EXECUTE ]` — leader fires technique sub-modules in tier
+   order (T0 first), judge scores each attempt 1-10, you usually see
+   `OBJECTIVE SIGNAL` and `objective_met=true` within 3-8 turns.
+
+If the run aborts on a 401, you set the wrong env var. If it hangs, the
+target is rate-limiting — see [Recipes → Throttling](/docs/recipes/throttling).
+
+## 4. Read what just happened
+
+```bash
+uv run mesmer graph show scenarios/extract-system-prompt.yaml
+```
+
+Each row is one `AttackNode`: the module, its judge score, lifecycle
+status (`FRONTIER` / `ALIVE` / `PROMISING` / `DEAD`), and who
+proposed it (`AGENT` / `JUDGE` / `HUMAN` / `LEADER`). Find the
+`source: LEADER` row at the bottom — that's the run verdict, the only
+node whose `module_output` was scanned by the canary judge in benchmark
+mode.
+
+## 5. Open the live web UI
+
+```bash
+uv run mesmer serve
+```
+
+Visit `http://localhost:8000`. You'll see:
+
+- Your scenario in the list (left).
+- The attack graph as a D3 tree (centre) — leader as a blue diamond,
+  sub-modules as circles colour-coded by tier and status, the leader
+  verdict as a green square.
+- A node-detail panel (right) — click any node for the full delegate
+  prompt, target turns, judge verdict, and concluded text.
+
+The web UI uses the same `~/.mesmer/` JSON the CLI just wrote — there
+is one source of truth.
+
+## 6. Re-run, observe the warm start
+
+```bash
+uv run mesmer run scenarios/extract-system-prompt.yaml
+```
+
+Note `[ hydrate graph ]` now reports nodes from the previous run, and
+the planner's first step bypasses techniques marked DEAD last time. The
+scratchpad pre-loads with prior `target-profiler` and `attack-planner`
+outputs (latest wins per slot) — modules see them in their `## Scratchpad`
+block.
+
+To wipe state: `mesmer graph reset scenarios/extract-system-prompt.yaml`,
+or pass `--fresh` to bypass loading without deleting.
+
+## What's next
+
+- Wrap a custom HTTP API → [Attack your own app](/docs/tutorials/attack-your-own-app)
+- Hit a streaming chat → [Attack a WebSocket chat](/docs/tutorials/attack-a-websocket-chat)
+- Run a benchmark → [Run your first benchmark](/docs/tutorials/run-your-first-benchmark)
+- Course-correct with hints → [Iterating with hints](/docs/tutorials/iterating-with-hints)

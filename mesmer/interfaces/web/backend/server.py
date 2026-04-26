@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from mesmer.core.agent.context import Context, HumanQuestionBroker
 from mesmer.core.agent.parsing import parse_llm_json
-from mesmer.core.constants import ContextMode, LogEvent, ScenarioMode
+from mesmer.core.constants import LogEvent, ScenarioMode
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory
 from mesmer.core.registry import Registry
@@ -50,7 +50,6 @@ class RunRequest(BaseModel):
     max_turns: int | None = None
     hints: list[str] = []
     fresh: bool = False
-    mode: str = ContextMode.AUTONOMOUS.value  # ContextMode value (autonomous/co-op)
     # Optional ScenarioMode override ("trials" or "continuous"). None = honour
     # the YAML's mode field. Mirrors the CLI --mode flag.
     scenario_mode: str | None = None
@@ -279,7 +278,13 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 memory = TargetMemory(s.target)
                 item["target_hash"] = memory.target_hash
                 item["has_graph"] = memory.exists()
-                item["module_tier"] = registry.tier_of(s.module)
+                # Tier of the FIRST manager in the list — used by the UI to
+                # render a tier badge. Multi-manager scenarios just preview
+                # the first; the executive itself has no meaningful tier.
+                first_mod = s.modules[0] if s.modules else None
+                item["module_tier"] = (
+                    registry.tier_of(first_mod) if first_mod else None
+                )
             except Exception:
                 # _list_scenarios already filters obviously broken files,
                 # but if env-var resolution fails (missing API key) we
@@ -314,7 +319,8 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                     "success_signals": s.objective.success_signals,
                     "max_turns": s.objective.max_turns,
                 },
-                "module": s.module,
+                "modules": list(s.modules),
+                "leader_prompt": s.leader_prompt,
                 "agent": {
                     "model": s.agent.model,
                 },
@@ -531,7 +537,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             )
 
         bus.clear_history()
-        run_state.update({"status": "running", "scenario": req.scenario_path, "mode": req.mode})
+        run_state.update({"status": "running", "scenario": req.scenario_path})
 
         # Fresh broker per run — prior questions can't outlive a run.
         current_broker = HumanQuestionBroker(on_question=_broadcast_question)
@@ -550,7 +556,6 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             max_turns_override=req.max_turns,
             hints=req.hints,
             fresh=req.fresh,
-            mode=req.mode,
             human_broker=current_broker,
             scenario_mode_override=scenario_mode_override,
         )
@@ -558,7 +563,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         async def _run():
             nonlocal current_ctx, current_scenario_path
             try:
-                bus.emit_status("running", scenario=req.scenario_path, mode=req.mode)
+                bus.emit_status("running", scenario=req.scenario_path)
 
                 def _on_graph_update(graph):
                     bus.set_graph(graph)

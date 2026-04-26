@@ -3,10 +3,13 @@
   "pages": [
     "index",
     "getting-started",
-    "concepts",
+    "tutorials",
+    "recipes",
+    "techniques",
     "modules",
     "scenarios",
     "benchmarks",
+    "concepts",
     "cli"
   ]
 }

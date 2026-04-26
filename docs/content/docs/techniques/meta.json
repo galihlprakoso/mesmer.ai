@@ -1,0 +1,21 @@
+{
+  "title": "Techniques",
+  "pages": [
+    "index",
+    "direct-ask",
+    "instruction-recital",
+    "indirect-recital",
+    "format-shift",
+    "prefix-commitment",
+    "delimiter-injection",
+    "role-impersonation",
+    "fake-function-injection",
+    "hallucinated-tool-probing",
+    "foot-in-door",
+    "authority-bias",
+    "anchoring",
+    "narrative-transport",
+    "pragmatic-reframing",
+    "cognitive-overload"
+  ]
+}

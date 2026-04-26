@@ -46,7 +46,9 @@
     <span class="badge badge-adapter">{scenario.target_adapter}</span>
     <span class="badge badge-module" style="--tier: {tierColor}">
       <span class="tier-dot"></span>
-      {scenario.module}
+      {(scenario.modules && scenario.modules.length)
+        ? scenario.modules.join(' + ')
+        : (scenario.module || '—')}
     </span>
     {#if scenario.max_turns}
       <span class="meta-turns">{scenario.max_turns} turns</span>

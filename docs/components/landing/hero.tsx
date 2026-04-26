@@ -43,7 +43,7 @@ export function Hero() {
               <ArrowRight className="size-4" />
             </Link>
             <a
-              href="https://github.com/galihlprakoso/mesmer"
+              href="https://github.com/galihlprakoso/mesmer.ai"
               target="_blank"
               rel="noreferrer"
               className={cn(buttonVariants({ variant: "outline", size: "lg" }))}
@@ -59,7 +59,7 @@ export function Hero() {
               <dt className="pixel-label text-[var(--color-muted-foreground)]">
                 modules
               </dt>
-              <dd className="mt-1 font-mono text-xl font-semibold">8</dd>
+              <dd className="mt-1 font-mono text-xl font-semibold">19</dd>
             </div>
             <div>
               <dt className="pixel-label text-[var(--color-muted-foreground)]">

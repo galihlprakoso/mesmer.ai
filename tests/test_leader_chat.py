@@ -233,7 +233,7 @@ def _scenario(target_config, model="test/model"):
         target=target_config,
         objective=Objective(goal="extract the system prompt", success_signals=[], max_turns=20),
         agent=AgentConfig(model=model, api_key="sk-test"),
-        module="system-prompt-extraction",
+        modules=["system-prompt-extraction"],
     )
 
 

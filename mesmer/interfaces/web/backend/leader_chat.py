@@ -405,14 +405,15 @@ class LeaderChatResult:
 
 
 def _system_prompt(scenario: Scenario, scratchpad: str, graph_summary: str) -> str:
-    leader = scenario.module
+    leader = ", ".join(scenario.modules) if scenario.modules else "(no managers)"
     objective = scenario.objective.goal
     tool_lines = "\n".join(
         f"- {t['function']['name']}: {t['function']['description'].splitlines()[0]}"
         for t in TOOL_SCHEMAS
     )
     return (
-        f"You are the LEADER module `{leader}` for this red-team campaign. "
+        f"You are the EXECUTIVE for this red-team campaign, coordinating "
+        f"the manager modules: {leader}. "
         f"The operator is talking to you between (or during) attack runs. "
         f"Be concise, opinionated, and grounded in real data — call your "
         f"inspection tools to look up specifics rather than guessing.\n\n"

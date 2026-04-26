@@ -14,7 +14,6 @@ from mesmer.core.constants import (
     TARGET_ERROR_MARKERS,
     BudgetMode,
     CompletionRole,
-    ContextMode,
     LogEvent,
     ScenarioMode,
     TurnKind,
@@ -257,7 +256,6 @@ class Context:
         max_turns: int | None = None,
         graph: AttackGraph | None = None,
         run_id: str = "",
-        mode: str = ContextMode.AUTONOMOUS.value,
         human_broker: HumanQuestionBroker | None = None,
         target_memory: "TargetMemory | None" = None,
         operator_messages: list[dict] | None = None,
@@ -283,7 +281,6 @@ class Context:
         # The API key used on the most recent completion() call. Set by
         # completion(), read by the retry loop to cool down rate-limited keys.
         self._last_key_used: str = ""
-        self.mode = mode
         self.human_broker = human_broker
         # TargetMemory handle — bound on the top-level context only, propagated
         # via child() so leader-only tools (update_scratchpad) can persist
@@ -334,8 +331,8 @@ class Context:
         # Scenario-level execution mode. Determines whether sub-modules are
         # independent trials (default, TRIALS) or moves inside one continuous
         # target conversation (CONTINUOUS). Propagated unchanged to child
-        # contexts. Distinct from ``self.mode`` — that controls human co-op
-        # framing (autonomous vs co-op), this controls target memory semantics.
+        # contexts. Concerns target memory semantics; chat / autonomy mode
+        # is now driven entirely by ``ModuleConfig.is_executive``.
         self.scenario_mode: ScenarioMode = scenario_mode
 
         # Per-run telemetry accumulator (tokens + LLM wall-clock). The
@@ -635,7 +632,6 @@ class Context:
             max_turns=max_turns,
             graph=self.graph,               # shared graph
             run_id=self.run_id,
-            mode=self.mode,                 # mode inherited
             human_broker=self.human_broker, # broker shared
             target_memory=self.target_memory,  # handle shared (sub-modules
                                                # don't write to it, but the
@@ -678,11 +674,12 @@ class Context:
     ) -> str:
         """Ask the human a question and await their answer.
 
-        Only usable in co-op mode with a broker attached. In autonomous mode,
-        returns an empty string so modules that optimistically call it degrade
-        gracefully rather than blocking forever.
+        Only usable when a broker is attached (the executive's run-time
+        wiring binds one; autonomous CLI fallback runs leave it ``None``).
+        Without a broker, returns an empty string so optimistic callers
+        degrade gracefully rather than blocking forever.
         """
-        if self.mode != ContextMode.CO_OP or self.human_broker is None:
+        if self.human_broker is None:
             return ""
         qid = self.human_broker.create_question(
             question=question,

@@ -49,23 +49,28 @@ prompt, and how the leader composes it.
 
 ## The shipped tiers
 
-The 16 modules ship in five categories:
+The 19 modules ship in five categories:
 
-- **Leader** (`modules/attacks/`, T0 orchestrator) — 1 module.
+- **Leader** (`modules/attacks/`, T0 orchestrator) — 2 modules.
   [`system-prompt-extraction`](/docs/modules/system-prompt-extraction)
-  is the only leader that ships today.
+  for hidden-instruction extraction; `tool-extraction` for
+  function-catalog disclosure against function-calling agents.
 - **Profiler** (`modules/profilers/`, T0) — `target-profiler`: layered
   identity → defence-shape → policy-surface recon.
 - **Planner** (`modules/planners/`, T0) — `attack-planner`: reads the
   dossier + learned experience, emits an ordered plan. Pure reasoning,
   no target contact.
-- **Field** (`modules/techniques/field/`, T0/T1) — 6 payload-shape
-  techniques: `direct-ask`, `instruction-recital`, `format-shift`
-  (T0), `prefix-commitment`, `delimiter-injection`,
-  `role-impersonation` (T1).
+- **Field** (`modules/techniques/field/`, T0/T1) — 9 payload-shape
+  and structural techniques: `direct-ask`, `instruction-recital`,
+  `indirect-recital`, `format-shift` (T0), `prefix-commitment`,
+  `delimiter-injection`, `role-impersonation`, `fake-function-injection`,
+  `hallucinated-tool-probing` (T1).
 - **Cognitive / linguistic / psychological** (T2) — 6 cognitive-science
   techniques: `foot-in-door`, `authority-bias`, `anchoring`,
   `narrative-transport`, `pragmatic-reframing`, `cognitive-overload`.
+
+For per-technique guidance — when each pays off, when it doesn't, and
+the worked example — see [Techniques](/docs/techniques).
 
 See [TAPER tier ladder](/docs/concepts/taper-tiers) for what the tiers
 mean and how the frontier gate uses them.
@@ -87,6 +92,33 @@ mean and how the frontier gate uses them.
 
 Sub-modules are listed in YAML as a `sub_modules:` array. The nested
 loop is automatic — you don't write Python to wire them.
+
+### Sub-module entries — strings or dicts
+
+`sub_modules:` accepts two forms. Use the bare-string shorthand for the
+common case; switch to the dict form when you need a per-entry flag.
+
+```yaml
+sub_modules:
+  - target-profiler              # bare string — shorthand
+  - name: attack-planner
+    see_siblings: true           # inject sibling roster into this module's prompt
+  - name: my-future-recon
+    call_siblings: true          # parsed but not yet wired — reserved
+```
+
+`see_siblings: true` makes the framework inject a `## Available modules
+(siblings in this leader)` block — name + description + theory of every
+sibling — into the sub-module's instruction. The `attack-planner`
+module needs this so it can name specific siblings in its plan;
+without it the planner would have to be hardcoded to a known module
+list. Use `see_siblings` for any sub-module that *reasons about which
+siblings to recommend*; leave it false for techniques that just probe
+the target.
+
+`call_siblings: true` is parsed (it's a real `SubModuleEntry` field)
+but the runtime doesn't expose siblings as callable tools yet. Reserved
+for future use.
 
 ## Writing your own
 

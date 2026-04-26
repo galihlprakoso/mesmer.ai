@@ -100,6 +100,14 @@ class ModuleConfig:
     reset_target: bool = False
     # Attack cost bucket — see class docstring for semantics.
     tier: int = DEFAULT_TIER
+    # Marks the synthesized scenario-scoped executive that runs at depth=0.
+    # Set True only by ``runner.execute_run`` when it builds the in-memory
+    # ModuleConfig for the executive — never authored in YAML, never set on
+    # registry-loaded managers. Drives tool-list gating in
+    # ``agent/tools/__init__.py::build_tool_list``: executives get
+    # ``ask_human`` / ``talk_to_operator`` / ``update_scratchpad`` and lose
+    # ``send_message``; non-executives are the inverse.
+    is_executive: bool = False
 
     def __post_init__(self) -> None:
         # Coerce any plain strings that tests or callers pass directly.

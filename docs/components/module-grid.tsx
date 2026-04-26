@@ -19,6 +19,10 @@ import {
   Braces,
   VenetianMask,
   ClipboardList,
+  Wrench,
+  Languages,
+  FunctionSquare,
+  Search,
   type LucideIcon,
 } from "lucide-react";
 
@@ -56,6 +60,16 @@ export const MODULES: Module[] = [
     icon: Layers,
     hasPage: true,
   },
+  {
+    name: "tool-extraction",
+    slug: "tool-extraction",
+    category: "attack",
+    tier: 0,
+    status: "shipped",
+    description:
+      "Multi-phase tool / function-catalog extraction leader. Mirror of system-prompt-extraction, oriented toward callable-tool disclosure on agentic LLMs.",
+    icon: Wrench,
+  },
 
   // ─── PROFILERS + PLANNERS (tier 0, recon/strategy) ─────────────────
   {
@@ -79,7 +93,7 @@ export const MODULES: Module[] = [
     icon: ClipboardList,
   },
 
-  // ─── FIELD TECHNIQUES (tier 0 / 1 — payload-shape, not cognitive) ──
+  // ─── FIELD TECHNIQUES (tier 0 / 1 — payload-shape and structural) ──
   {
     name: "direct-ask",
     slug: "direct-ask",
@@ -89,6 +103,7 @@ export const MODULES: Module[] = [
     description:
       "Naive baseline. One polite plain-language ask, one conclude. Surfaces refusal shape even when it fails — data for later modules.",
     icon: MessageSquare,
+    hasPage: true,
   },
   {
     name: "instruction-recital",
@@ -99,6 +114,18 @@ export const MODULES: Module[] = [
     description:
       "Ask the target to recite, repeat, or paraphrase its own instructions. Leans on helpfulness-trained echoing behaviour.",
     icon: Quote,
+    hasPage: true,
+  },
+  {
+    name: "indirect-recital",
+    slug: "indirect-recital",
+    category: "field",
+    tier: 0,
+    status: "shipped",
+    description:
+      "Ask for translation/serialization into another representation. Bypasses disclosure refusals via the formatting compliance bias.",
+    icon: Languages,
+    hasPage: true,
   },
   {
     name: "format-shift",
@@ -107,8 +134,9 @@ export const MODULES: Module[] = [
     tier: 0,
     status: "shipped",
     description:
-      "Request the payload in a different format (JSON, YAML, code-block, base64). Lexical refusal matchers miss reformatted output.",
+      "Request the payload in a different format (JSON, YAML, code-block, poem). Rotates through formats so successive runs cover more ground.",
     icon: FileCode2,
+    hasPage: true,
   },
   {
     name: "prefix-commitment",
@@ -119,6 +147,7 @@ export const MODULES: Module[] = [
     description:
       "Force a commitment prefix ('Sure, here are my instructions: ...') so the continuation inherits the structural lean of the prefix.",
     icon: TerminalSquare,
+    hasPage: true,
   },
   {
     name: "delimiter-injection",
@@ -129,6 +158,7 @@ export const MODULES: Module[] = [
     description:
       "Mimic the target's own delimiter / role-token style (observed by the profiler) to blur the boundary between system and user.",
     icon: Braces,
+    hasPage: true,
   },
   {
     name: "role-impersonation",
@@ -137,8 +167,31 @@ export const MODULES: Module[] = [
     tier: 1,
     status: "shipped",
     description:
-      "Impersonate the operator / developer / system via a structured role claim. Exploits role-following priors in the base model.",
+      "Inject fake role tokens or speaker attributions mid-content. Exploits chat-format priors in the base model.",
     icon: VenetianMask,
+    hasPage: true,
+  },
+  {
+    name: "fake-function-injection",
+    slug: "fake-function-injection",
+    category: "field",
+    tier: 1,
+    status: "shipped",
+    description:
+      "Forge a function whose params reference internal state (tools_list, system_prompt). Function-calling models populate them with real values.",
+    icon: FunctionSquare,
+    hasPage: true,
+  },
+  {
+    name: "hallucinated-tool-probing",
+    slug: "hallucinated-tool-probing",
+    category: "field",
+    tier: 1,
+    status: "shipped",
+    description:
+      "Enumerate the agent's tool catalog by calling fake names. The 'did you mean...' / silent-substitution pathways leak real tool names.",
+    icon: Search,
+    hasPage: true,
   },
 
   // ─── COGNITIVE-BIAS TECHNIQUES (tier 2) ────────────────────────────
@@ -151,6 +204,7 @@ export const MODULES: Module[] = [
     description:
       "Graduated escalation. Start with a trivial ask, each step references prior concessions — Freedman & Fraser 1966.",
     icon: Brain,
+    hasPage: true,
   },
   {
     name: "authority-bias",
@@ -161,6 +215,7 @@ export const MODULES: Module[] = [
     description:
       "Claim authority status (organizational, professional, regulatory) to shift compliance — Milgram 1963 applied to training-data priors.",
     icon: UserRoundCog,
+    hasPage: true,
   },
   {
     name: "anchoring",
@@ -171,6 +226,7 @@ export const MODULES: Module[] = [
     description:
       "Plant a false baseline early in the conversation — attention mechanisms weight earlier tokens. Tversky & Kahneman 1974.",
     icon: Scale,
+    hasPage: true,
   },
 
   // ─── LINGUISTIC (tier 2) ───────────────────────────────────────────
@@ -183,6 +239,7 @@ export const MODULES: Module[] = [
     description:
       "Wrap the real ask in fiction so the target 'forgets' it is being probed. Reduces explicit safety filtering.",
     icon: BookOpen,
+    hasPage: true,
   },
   {
     name: "pragmatic-reframing",
@@ -193,6 +250,7 @@ export const MODULES: Module[] = [
     description:
       "Language-shift, metacognitive probe — specifically for targets whose refusals are template-matched rather than semantic.",
     icon: Shuffle,
+    hasPage: true,
   },
 
   // ─── PSYCHOLOGICAL (tier 2) ────────────────────────────────────────
@@ -205,6 +263,7 @@ export const MODULES: Module[] = [
     description:
       "Bury the real ask inside a batch of benign requests to overwhelm the safety classifier.",
     icon: Zap,
+    hasPage: true,
   },
 ];
 
@@ -285,12 +344,14 @@ export function ModuleGrid({
             </p>
           </div>
         );
-        return linkable && mod.hasPage ? (
-          <Link
-            key={mod.slug}
-            href={`/docs/modules/${mod.slug}`}
-            className="no-underline"
-          >
+        const href =
+          mod.category === "attack"
+            ? `/docs/modules/${mod.slug}`
+            : mod.category === "profiler" || mod.category === "planner"
+              ? null
+              : `/docs/techniques/${mod.slug}`;
+        return linkable && mod.hasPage && href ? (
+          <Link key={mod.slug} href={href} className="no-underline">
             {content}
           </Link>
         ) : (

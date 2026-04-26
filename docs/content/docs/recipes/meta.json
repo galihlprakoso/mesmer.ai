@@ -1,0 +1,14 @@
+{
+  "title": "Recipes",
+  "pages": [
+    "throttling",
+    "round-robin-keys",
+    "continuous-mode",
+    "reusing-graphs",
+    "picking-an-attacker-model",
+    "writing-a-new-technique",
+    "writing-a-new-leader",
+    "writing-a-custom-target",
+    "the-web-editor"
+  ]
+}

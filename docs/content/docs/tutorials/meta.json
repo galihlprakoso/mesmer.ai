@@ -1,0 +1,11 @@
+{
+  "title": "Tutorials",
+  "pages": [
+    "your-first-attack",
+    "attack-your-own-app",
+    "attack-a-websocket-chat",
+    "attack-a-local-model",
+    "run-your-first-benchmark",
+    "iterating-with-hints"
+  ]
+}

@@ -77,43 +77,41 @@ class TestBroker:
 # Context.ask_human
 # ---------------------------------------------------------------------------
 
-def _make_ctx(mode="autonomous", broker=None):
+def _make_ctx(broker=None):
     return Context(
         target=MagicMock(send=AsyncMock(return_value="reply")),
         registry=MagicMock(),
         agent_config=AgentConfig(model="test/model"),
-        mode=mode,
         human_broker=broker,
     )
 
 
 class TestContextAskHuman:
+    """``ctx.ask_human`` is gated only on broker presence.
+
+    The legacy ``ContextMode`` enum was removed when the executive layer
+    landed — the executive is the only module with ``ask_human`` in its
+    tool list, and it always has a broker bound when it runs through
+    a chat-capable surface (web UI). CLI fallback runs leave the broker
+    ``None``, so the call degrades to an empty string.
+    """
+
     @pytest.mark.asyncio
-    async def test_autonomous_returns_empty_no_broker(self):
-        ctx = _make_ctx(mode="autonomous")
+    async def test_no_broker_returns_empty(self):
+        ctx = _make_ctx()
         result = await ctx.ask_human("Should I continue?")
         assert result == ""
 
     @pytest.mark.asyncio
-    async def test_autonomous_with_broker_still_skips(self):
-        """Even if a broker exists, ask_human in autonomous mode is a no-op."""
+    async def test_with_broker_awaits_answer(self):
         broker = HumanQuestionBroker()
-        ctx = _make_ctx(mode="autonomous", broker=broker)
-        result = await ctx.ask_human("Hi?")
-        assert result == ""
-        assert broker.pending_count == 0
-
-    @pytest.mark.asyncio
-    async def test_coop_mode_awaits_answer(self):
-        broker = HumanQuestionBroker()
-        ctx = _make_ctx(mode="co-op", broker=broker)
+        ctx = _make_ctx(broker=broker)
 
         async def _ask():
             return await ctx.ask_human("What next?", timeout=2.0)
 
         task = asyncio.create_task(_ask())
         await asyncio.sleep(0.01)
-        # The broker should have exactly one pending question
         assert broker.pending_count == 1
         qid = list(broker._pending.keys())[0]
         broker.answer(qid, "try anchoring")
@@ -121,18 +119,17 @@ class TestContextAskHuman:
         assert result == "try anchoring"
 
     @pytest.mark.asyncio
-    async def test_coop_timeout_returns_fallback(self):
+    async def test_with_broker_timeout_returns_fallback(self):
         broker = HumanQuestionBroker()
-        ctx = _make_ctx(mode="co-op", broker=broker)
+        ctx = _make_ctx(broker=broker)
         result = await ctx.ask_human("?", timeout=0.05)
         # Context swallows timeout and returns a fallback string so the loop
         # keeps going instead of crashing.
         assert "no response" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_child_context_inherits_mode_and_broker(self):
+    async def test_child_context_inherits_broker(self):
         broker = HumanQuestionBroker()
-        parent = _make_ctx(mode="co-op", broker=broker)
+        parent = _make_ctx(broker=broker)
         child = parent.child()
-        assert child.mode == "co-op"
         assert child.human_broker is broker

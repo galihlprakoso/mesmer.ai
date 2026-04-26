@@ -269,7 +269,14 @@
   $: selectedIdRef = $selectedNode?.id ?? null
   $: {
     const s = ($scenarios || []).find(s => s.path === $selectedScenario)
-    scenarioMetaRef = s ? { leaderModule: s.module, objective: '' } : null
+    // ``s.modules`` (plural list) is the current shape; ``s.module`` is
+    // the legacy field still emitted by older list endpoints. Pick the
+    // first manager as the canonical "leader module" label for the
+    // scenario header — multi-manager scenarios show the first.
+    const firstModule = (s && Array.isArray(s.modules) && s.modules[0])
+      || (s && s.module)
+      || ''
+    scenarioMetaRef = s ? { leaderModule: firstModule, objective: '' } : null
   }
 
   // Full re-render when graph structure / scenario / active set / run

@@ -45,9 +45,13 @@ export const selectedScenario = writable(null)
 /** Selected graph node (for detail panel) */
 export const selectedNode = writable(null)
 
-/** Co-pilot mode: 'autonomous' | 'co-op'.
- *  ('plan' was removed — the leader-chat works in both states now.) */
-export const mode = writable('autonomous')
+/** Bottom-panel display preference: 'autonomous' | 'co-op'.
+ *  Frontend-only UI toggle. The backend executive ALWAYS has a chat
+ *  surface available (the synthesized executive owns ask_human /
+ *  talk_to_operator); this just controls whether the chat panel is
+ *  visible vs collapsed in the bottom panel. Defaults to 'co-op' so
+ *  the chat panel is the primary view during runs. */
+export const mode = writable('co-op')
 
 /** Whether the Modules drawer is open (toggled from Sidebar). */
 export const modulesDrawerOpen = writable(false)

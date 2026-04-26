@@ -1,0 +1,99 @@
+---
+title: TRIALS vs CONTINUOUS mode
+description: When each session shape pays off — and what changes in the graph.
+---
+
+Two run modes, set via `mode:` in the scenario:
+
+```yaml
+mode: trials       # default
+mode: continuous   # one long conversation
+```
+
+## TRIALS (default)
+
+Each sub-module runs in an independent session. The target is reset
+(if the module declares `reset_target: true`) between attempts. The
+graph accumulates one `AttackNode` per attempt; the leader's verdict
+caps each run.
+
+**Use when:**
+
+- The target has session-level memory but you want to sample technique
+  space cleanly without context-carry interference.
+- You're benchmarking — every defense × technique combination should
+  start from the same target state.
+- You're iterating on scenario YAML and want fast feedback.
+
+**Resource shape:** N attempts × M turns each, all parallelisable
+within `concurrency` and your throttle budget.
+
+## CONTINUOUS
+
+One long conversation with the target, persisted across runs at
+`~/.mesmer/targets/{hash}/conversation.json`. Each technique appends
+to the same target transcript. The compressor
+(`core/agent/compressor.py`) keeps the window from exploding by
+summarising older turns into a buffer.
+
+**Use when:**
+
+- The target is a stateful chat with account-level persistent memory
+  (Slack-style internal assistants, customer-service bots that
+  remember the user across sessions).
+- The attack depends on long-horizon rapport — `foot-in-door` and
+  `narrative-transport` benefit from compounding compliance the
+  target can't easily reset.
+- You want the target to forget the leader's existence and treat each
+  technique as the same human.
+
+**Resource shape:** sequential — every technique reads the full
+running transcript, judge scores the *delta* (what new information
+this turn surfaced).
+
+## What changes in the graph
+
+| Aspect | TRIALS | CONTINUOUS |
+|---|---|---|
+| Target session | Reset per technique (if `reset_target: true`) | One session across all runs |
+| `~/.mesmer/targets/{hash}/conversation.json` | Not written | Rolling target transcript |
+| `Turn.kind` | `EXCHANGE` | `EXCHANGE` plus `SUMMARY` from compressor |
+| Judge framing | "How well did this technique do" | "What new info did this turn surface beyond what we already had" |
+| `MODE_OVERRIDE` log event | n/a | Fires when a module declares `reset_target: true` (it's force-disabled) |
+
+## CONTINUOUS-mode context budget
+
+When the conversation grows past the attacker's context window, the
+compressor activates. Tune via `agent:`:
+
+```yaml
+agent:
+  model: openrouter/anthropic/claude-sonnet-4
+  api_key: "${OPENROUTER_API_KEY}"
+  max_context_tokens: 0           # 0 = auto-resolve from litellm with 10% margin
+  compression_keep_recent: 10     # preserve last N turns verbatim
+  compression_target_ratio: 0.6   # aim for 60% of cap after compression
+  compression_model: ""           # empty → judge_model → attacker model
+```
+
+The defaults leave TRIALS mode unchanged — compression only activates
+when `mode: continuous` AND the effective cap is `> 0`.
+
+If a compression call fails, `CompressionLLMError` is raised in
+`_summarise_block` and caught at the single boundary in
+`maybe_compress`. The run continues without the summary if compression
+is non-essential; the failure is logged with a typed reason.
+
+## Picking right
+
+If in doubt, start TRIALS. Switch to CONTINUOUS only when:
+
+- TRIALS scored cleanly but the win didn't generalise — you suspect
+  the target's defenses degrade under sustained pressure.
+- You're attacking a target where you've confirmed cross-session
+  persistence (test by sending a deliberate sentence in one session
+  and asking about it in the next).
+
+CONTINUOUS amortises the context-build cost across many techniques
+but is harder to reason about — every prior turn shapes every
+subsequent technique's behaviour.

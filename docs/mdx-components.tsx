@@ -3,7 +3,7 @@ import type { MDXComponents } from "mdx/types";
 import { TerminalPre } from "@/components/terminal-pre";
 import { ScenarioCard } from "@/components/scenario-card";
 import { ModuleGrid } from "@/components/module-grid";
-import { AsciiDiagram } from "@/components/ascii-diagram";
+import { Mermaid } from "@/components/mermaid";
 import { Kbd } from "@/components/kbd";
 import { Terminal } from "@/components/magicui/terminal";
 
@@ -19,7 +19,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     // Mesmer-specific MDX primitives
     ScenarioCard,
     ModuleGrid,
-    AsciiDiagram,
+    Mermaid,
     Kbd,
     Terminal,
     ...components,

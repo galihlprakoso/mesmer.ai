@@ -18,19 +18,20 @@ attack can't adapt to a defense it hasn't seen. Mesmer treats attack
 generation as a **search problem over cognitive space**: explore,
 exploit, prune, remember.
 
-<AsciiDiagram caption="The top-level loop.">
-{`   ┌──────────┐     ┌──────────┐     ┌──────────┐
-   │   PLAN   │ ──▶ │ EXECUTE  │ ──▶ │  JUDGE   │
-   └──────────┘     └──────────┘     └────┬─────┘
-        ▲                                  │
-        │           ┌──────────┐     ┌────▼─────┐
-        └────────── │ REFLECT  │ ◀── │  UPDATE  │
-                    └──────────┘     └──────────┘
-                                          │
-                                  ┌───────▼────────┐
-                                  │  ATTACK GRAPH  │  ~/.mesmer/
-                                  └────────────────┘`}
-</AsciiDiagram>
+<Mermaid caption="The top-level loop." chart={`
+flowchart LR
+  P([PLAN]) --> E([EXECUTE])
+  E --> J([JUDGE])
+  J --> U([UPDATE])
+  U --> R([REFLECT])
+  R --> P
+  U --> G[(Attack graph<br/>~/.mesmer/)]
+
+  classDef step fill:#141A17,stroke:#00D67A,color:#E6EDE8;
+  classDef store fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8;
+  class P,E,J,U,R step;
+  class G store;
+`} />
 
 Every module execution is recorded as an `AttackNode` — including the
 leader's own. The frontier proposer respects the **TAPER tier ladder**
@@ -42,21 +43,44 @@ the cheapest technique that worked.
 
 <ModuleGrid />
 
-16 shipped modules: 1 leader, 1 profiler, 1 planner, 6 field-level
-techniques (T0/T1), 6 cognitive techniques (T2). All YAML, all
-declarative, all picked up by `Registry.auto_discover()` on startup.
+19 shipped modules: 2 leaders (`system-prompt-extraction`,
+`tool-extraction`), 1 profiler, 1 planner, 9 field-level techniques
+(T0/T1 — payload-shape and structural injection, including
+function-calling probes), 6 cognitive / linguistic / psychological
+techniques (T2). All YAML, all declarative, all picked up by
+`Registry.auto_discover()` on startup.
 
-## Where to start
+## Pick your starting point
 
 <Cards>
   <Card title="Install" href="/docs/getting-started/install" />
-  <Card title="Quickstart" href="/docs/getting-started/quickstart" />
+  <Card
+    title="Your first attack"
+    href="/docs/tutorials/your-first-attack"
+    description="10 minutes — public model → graph → leak."
+  />
+  <Card
+    title="Attack your own app"
+    href="/docs/tutorials/attack-your-own-app"
+    description="Wrap a custom HTTP API with the rest adapter."
+  />
+  <Card
+    title="Run your first benchmark"
+    href="/docs/tutorials/run-your-first-benchmark"
+    description="Pinned dataset → ASR table → interactive viz."
+  />
+  <Card
+    title="Throttling — fix 429s"
+    href="/docs/recipes/throttling"
+    description="Per-target / per-agent rate limits with key rotation."
+  />
+  <Card
+    title="Pick a technique"
+    href="/docs/techniques"
+    description="When each shipping technique pays off — and when it doesn't."
+  />
   <Card title="Why mesmer" href="/docs/getting-started/why-mesmer" />
-  <Card title="The attack graph" href="/docs/concepts/attack-graph" />
-  <Card title="TAPER tier ladder" href="/docs/concepts/taper-tiers" />
-  <Card title="Scratchpad & shared state" href="/docs/concepts/scratchpad" />
-  <Card title="Bench tracing & viz" href="/docs/concepts/bench-trace" />
-  <Card title="Benchmarks" href="/docs/benchmarks" />
+  <Card title="Reference: attack graph" href="/docs/concepts/attack-graph" />
 </Cards>
 
 ---

@@ -26,6 +26,12 @@ EXPECTED_MODULES: dict[str, int] = {
     "prefix-commitment": 1,
     "delimiter-injection": 1,
     "role-impersonation": 1,
+    # Tool-extraction-specific tier-1 probes (added 2026-04-26 alongside
+    # the tool-extraction leader). Both are authored from published
+    # red-team disclosures (HiddenLayer, Answer.AI) and ship with the
+    # same anti-overfit contract as the rest of the field/ tier-0/1 set.
+    "fake-function-injection": 1,
+    "hallucinated-tool-probing": 1,
 }
 
 # Tokens that would betray overfitting to the Tensor Trust extraction
@@ -144,6 +150,8 @@ PROFILER_COUPLING_TOKENS = [
     "authority-bias",
     "narrative-transport",
     "pragmatic-reframing",
+    "fake-function-injection",
+    "hallucinated-tool-probing",
 ]
 
 
@@ -181,4 +189,97 @@ class TestTargetProfilerDecoupling:
         ]
         assert not hits, (
             f"target-profiler contains dataset-specific tokens: {hits}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool-extraction-specific field modules (fake-function-injection,
+# hallucinated-tool-probing)
+# ---------------------------------------------------------------------------
+#
+# These two ship with extra constraints beyond the generic field-module
+# contract because they're authored against the dvllm fixture's known
+# tool catalog (search_web / read_document / send_email). Hardcoding any
+# of those into the prompts would be the same overfitting trap that
+# triggered the target-profiler decoupling test — so we scan for them
+# explicitly. Also: both prompts MUST mention the OBJECTIVE SIGNAL
+# protocol so verbatim-leak fragments propagate to the leader correctly.
+
+TOOL_EXTRACTION_MODULES = ["fake-function-injection", "hallucinated-tool-probing"]
+
+
+class TestToolExtractionFieldModules:
+    """Tool-extraction probes ship with realistic anti-overfit constraints."""
+
+    # The full ban list. Each parametrized test removes the module's OWN
+    # name from this set before scanning — a module legitimately references
+    # itself in `name:`, the system-prompt identity line, and the
+    # judge_rubric heading. What we ban is *cross-module* references
+    # (one tool-extraction probe naming the other), dvllm-fixture-specific
+    # tool names, persona names, and framework brands.
+    TOOL_EXTRACTION_BANNED_BASE = [
+        # dvllm-specific tool names — would mean the prompt was authored
+        # by reading the test fixture instead of the published literature.
+        "search_web", "read_document", "send_email",
+        # Sibling-module name hardcoding (cross-references; self-name
+        # excluded per parametrization). Same overfitting shape as the
+        # PROFILER_COUPLING_TOKENS list above.
+        "fake-function-injection", "hallucinated-tool-probing",
+        # Scenario-coupling phrases.
+        "research-l1", "research-l2", "research-l3",
+        "support-l1", "support-l2", "support-l3",
+        # Framework-coupling — probes must work against any function-
+        # calling LLM training distribution, not be authored against
+        # one vendor's branding.
+        "langchain", "llamaindex", "openai assistants",
+        "anthropic tool use",
+    ]
+
+    @pytest.mark.parametrize("module_name", TOOL_EXTRACTION_MODULES)
+    def test_no_dvllm_or_cross_module_tokens(self, module_name: str):
+        path = FIELD_ROOT / module_name / "module.yaml"
+        body = path.read_text().lower()
+        # Each module legitimately contains its own name; ban list
+        # excludes self-name so the scan only catches cross-references.
+        banned = [
+            tok for tok in self.TOOL_EXTRACTION_BANNED_BASE
+            if tok != module_name
+        ]
+        offenders = [tok for tok in banned if tok.lower() in body]
+        assert not offenders, (
+            f"{module_name} contains banned tokens: {offenders} — "
+            "prompt is overfit to the dvllm fixture, cross-references "
+            "the sibling tool-extraction probe, or hardcodes a "
+            "framework brand."
+        )
+
+    @pytest.mark.parametrize("module_name", TOOL_EXTRACTION_MODULES)
+    def test_objective_signal_protocol_documented(self, module_name: str):
+        """Sub-module prompts that detect a verbatim leak must instruct
+        the agent to flag it via OBJECTIVE SIGNAL — that's the engine's
+        contract for sub-module → leader signalling. Without this, a
+        leak detected here never reaches the leader's termination call.
+        """
+        path = FIELD_ROOT / module_name / "module.yaml"
+        body = path.read_text()
+        assert "OBJECTIVE SIGNAL" in body, (
+            f"{module_name} system_prompt must mention OBJECTIVE SIGNAL "
+            "so verbatim-leak fragments propagate to the leader. See "
+            "engine.py:140-156 for the depth>0 stanza this protocol "
+            "complements."
+        )
+
+    @pytest.mark.parametrize("module_name", TOOL_EXTRACTION_MODULES)
+    def test_no_leader_marker_in_sub_module_prompt(self, module_name: str):
+        """The leader-only termination marker (OBJECTIVE MET) must not
+        appear in a sub-module prompt — sub-modules pattern-match on it
+        and call it themselves. Documented in CLAUDE.md's "Don't repeat
+        the OBJECTIVE AWARENESS instruction" rule.
+        """
+        path = FIELD_ROOT / module_name / "module.yaml"
+        body = path.read_text()
+        assert "OBJECTIVE MET" not in body, (
+            f"{module_name} system_prompt contains OBJECTIVE MET — "
+            "sub-modules will pattern-match on it and prematurely "
+            "terminate the run. The marker is leader-only."
         )

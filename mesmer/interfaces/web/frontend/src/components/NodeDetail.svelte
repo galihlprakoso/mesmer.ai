@@ -1,5 +1,15 @@
 <script>
+  import { marked } from 'marked'
   import { selectedNode, moduleTiers, isRunning } from '../lib/stores.js'
+
+  // GFM tables, autolinks, sane line breaks. We don't enable raw HTML
+  // because module_output is LLM-generated — sanitize-by-omission is
+  // safer than allowing arbitrary tags through.
+  marked.setOptions({
+    gfm: true,
+    breaks: false,
+    smartLists: true,
+  })
 
   // Cache full module configs fetched from /api/modules/{name}.
   const moduleCache = new Map()
@@ -56,6 +66,11 @@
 
   // Tab list — derived from what data is actually present on this node.
   // Order matters: it's the default-pick precedence too (first tab wins).
+  // Output goes FIRST when present because it's the deliverable — the
+  // module's concluded write-up. For exploit-analysis specifically
+  // it's a markdown findings report, but every manager / sub-module's
+  // module_output is what the operator wants to read first; the
+  // probe-level detail (approach, exchange) is drill-down.
   function computeTabs(n, p, cfg) {
     if (!n) return []
     const out = []
@@ -64,11 +79,11 @@
       if (cfg) out.push({ key: 'config', label: 'Config' })
       return out
     }
+    if (n.module_output && !isFrontier(n)) out.push({ key: 'output', label: 'Output' })
+    if (n.leaked_info && !isFrontier(n)) out.push({ key: 'leaks', label: 'Leaks' })
     if (n.approach) out.push({ key: 'approach', label: 'Approach' })
     if (p.length) out.push({ key: 'exchange', label: 'Exchange' })
-    if (n.leaked_info && !isFrontier(n)) out.push({ key: 'leaks', label: 'Leaks' })
     if (n.reflection && !isFrontier(n)) out.push({ key: 'reflection', label: 'Reflection' })
-    if (n.module_output && !isFrontier(n)) out.push({ key: 'output', label: 'Output' })
     if (cfg) out.push({ key: 'config', label: 'Config' })
     return out
   }
@@ -163,7 +178,14 @@
           <pre>{node.reflection}</pre>
 
         {:else if activeTab === 'output'}
-          <pre>{node.module_output}</pre>
+          <!-- module_output is the manager's / sub-module's concluded
+               write-up. Many recent modules (exploit-analysis,
+               tool-extraction reports) emit structured markdown
+               with headings, lists, code blocks, tables — render
+               those richly. We DON'T enable raw-HTML passthrough
+               because the content is LLM-generated; marked drops
+               unknown tags safely by default. -->
+          <div class="md-render">{@html marked.parse(node.module_output || '')}</div>
 
         {:else if activeTab === 'config' && moduleConfig}
           <div class="config-tag">
@@ -349,6 +371,135 @@
     margin: 0 0 8px 0;
     color: var(--text);
     line-height: 1.55;
+  }
+
+  /* ---------- Markdown rendering for the Output tab ----------
+     Modules emit structured markdown reports (exploit-analysis is the
+     canonical example, but tool-extraction / system-prompt-extraction
+     also frequently emit headers + lists). The styles below give those
+     reports a comfortable read against the panel's narrow width. */
+  .md-render {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text);
+    word-break: break-word;
+  }
+  .md-render :global(h1) {
+    font-size: 14px;
+    font-family: var(--mono);
+    color: var(--phosphor);
+    margin: 0 0 8px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+  }
+  .md-render :global(h2) {
+    font-size: 13px;
+    font-family: var(--mono);
+    color: var(--text);
+    margin: 14px 0 6px;
+  }
+  .md-render :global(h3) {
+    font-size: 12px;
+    font-family: var(--mono);
+    color: var(--text);
+    margin: 10px 0 4px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .md-render :global(h4),
+  .md-render :global(h5),
+  .md-render :global(h6) {
+    font-size: 12px;
+    font-family: var(--mono);
+    color: var(--text-muted);
+    margin: 8px 0 4px;
+  }
+  .md-render :global(p) {
+    margin: 0 0 8px;
+  }
+  .md-render :global(ul),
+  .md-render :global(ol) {
+    margin: 0 0 10px;
+    padding-left: 18px;
+  }
+  .md-render :global(li) {
+    margin: 2px 0;
+  }
+  .md-render :global(li > ul),
+  .md-render :global(li > ol) {
+    margin: 2px 0 2px;
+  }
+  .md-render :global(strong) {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .md-render :global(em) {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .md-render :global(a) {
+    color: var(--cyan);
+    text-decoration: underline;
+  }
+  .md-render :global(code) {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--phosphor);
+  }
+  .md-render :global(pre) {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin: 0 0 10px;
+    overflow-x: auto;
+  }
+  .md-render :global(pre code) {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: 11px;
+    color: var(--text);
+  }
+  .md-render :global(blockquote) {
+    border-left: 2px solid var(--cyan);
+    padding: 2px 10px;
+    margin: 6px 0 10px;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .md-render :global(table) {
+    border-collapse: collapse;
+    margin: 8px 0 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    width: 100%;
+  }
+  .md-render :global(th),
+  .md-render :global(td) {
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .md-render :global(th) {
+    background: var(--bg-tertiary);
+    color: var(--text);
+    font-weight: 600;
+  }
+  .md-render :global(hr) {
+    border: 0;
+    border-top: 1px dashed var(--border);
+    margin: 14px 0;
+  }
+  /* First child shouldn't push down with a top margin — it'd add
+     visual whitespace above the rendered report. */
+  .md-render > :global(*:first-child) {
+    margin-top: 0;
   }
 
   /* ---------- nested config <details> (still useful inside Config tab) */

@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from mesmer.core.agent.context import HumanQuestionBroker
 from mesmer.core.constants import NodeSource, ScenarioMode
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory
@@ -58,6 +59,70 @@ def run(scenario_path, model, max_turns, verbose, output, module_path, hint, hin
     asyncio.run(_run(scenario_path, model, max_turns, verbose, output, module_path, hint, hint_file, fresh, scenario_mode))
 
 
+def _make_tty_broker() -> HumanQuestionBroker | None:
+    """Build a stdin-backed :class:`HumanQuestionBroker` for interactive CLI runs.
+
+    The synthesized executive owns ``ask_human``; when the operator runs
+    ``mesmer run`` from a real terminal we want them to actually be able
+    to answer mid-run instead of having every question degrade to an
+    empty string.
+
+    Non-interactive runs (CI, piped input, bench) skip this entirely:
+    if ``sys.stdin`` isn't a TTY we return ``None`` so the executive's
+    ``ask_human`` falls back to the empty-string degrade path and the
+    run proceeds autonomously without ever blocking on input.
+
+    Each ``on_question`` fires a background task that reads a single
+    line from stdin (via ``asyncio.to_thread`` to keep the loop alive)
+    and calls ``broker.answer``. Cancelled answers (run ends, broker
+    cancels all) are tolerated — the task just no-ops.
+    """
+    if not sys.stdin.isatty():
+        return None
+
+    pending_tasks: list[asyncio.Task] = []
+
+    def _on_question(payload: dict) -> None:
+        qid = payload["question_id"]
+        question = payload["question"]
+        options = payload.get("options") or []
+
+        prompt_lines = [
+            "",
+            f"[bold yellow]❓ Executive asks:[/bold yellow] {question}",
+        ]
+        ctx_text = (payload.get("context") or "").strip()
+        if ctx_text:
+            prompt_lines.append(f"[dim]context: {ctx_text}[/dim]")
+        if options:
+            prompt_lines.append("[dim]options:[/dim]")
+            for i, opt in enumerate(options, 1):
+                prompt_lines.append(f"  [dim]{i}.[/dim] {opt}")
+        for line in prompt_lines:
+            console.print(line)
+
+        async def _read_and_answer():
+            try:
+                # Run blocking input() in a thread so the event loop —
+                # and the executive's other concurrent work — keeps moving.
+                answer = await asyncio.to_thread(input, "> ")
+            except (EOFError, asyncio.CancelledError):
+                answer = ""
+            broker.answer(qid, answer.strip())
+
+        # Schedule on the running loop. ``asyncio.create_task`` requires
+        # a running loop, which always holds because ``on_question`` is
+        # called from inside the executive's awaited completion.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        pending_tasks.append(loop.create_task(_read_and_answer()))
+
+    broker = HumanQuestionBroker(on_question=_on_question)
+    return broker
+
+
 def _make_verbose_log():
     """Create the verbose logging callback for CLI output."""
     def verbose_log(event: str, detail: str = ""):
@@ -90,6 +155,15 @@ def _make_verbose_log():
             "reflect_error": ("red",          "\U0001f4ad\u2717"),
             "send_error":    ("bold red",     "\u2192\u2717"),
             "throttle_wait": ("yellow",       "\u23f8"),
+            # Executive \u2194 operator surface (visible without --verbose
+            # would be ideal, but we route through the same log channel
+            # for now). talk_to_operator broadcasts run forward without
+            # waiting; the question/answer pair is what the broker
+            # already prints to stdin.
+            "operator_reply":   ("bold cyan",    "\U0001f4ac"),  # speech balloon
+            "operator_message": ("dim cyan",     "\U0001f4e8"),  # incoming envelope
+            "ask_human":        ("bold yellow",  "?"),
+            "human_answer":     ("yellow",       "!"),
         }
         style, icon = styles.get(event, ("dim", "\u00b7"))
         console.print(f"[{style}]{icon} {detail}[/{style}]")
@@ -103,7 +177,7 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
     console.print(Panel(
         f"[bold]{scenario.name}[/bold]\n{scenario.description}\n\n"
         f"Target: {scenario.target.adapter} \u2192 {scenario.target.url or scenario.target.model}\n"
-        f"Module: {scenario.module}\n"
+        f"Modules: {', '.join(scenario.modules)}\n"
         f"Agent: {scenario.agent.model}\n"
         f"Objective: {scenario.objective.goal}",
         title="[bold magenta]mesmer v1[/bold magenta]",
@@ -125,6 +199,12 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
         )
 
     log_fn = _make_verbose_log() if verbose else None
+    # Stdin-backed broker only when running interactively. Non-TTY
+    # invocations (CI, piped input, bench) get ``None`` and the
+    # executive's ask_human degrades to "" — run proceeds autonomously.
+    tty_broker = _make_tty_broker()
+    if tty_broker is not None:
+        console.print("[dim]Interactive mode — executive may ask you questions via ask_human.[/dim]")
     console.print("\n[bold green]Starting attack...[/bold green]\n")
 
     config = RunConfig(
@@ -136,6 +216,7 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
         fresh=fresh,
         extra_module_paths=list(extra_module_paths),
         output_path=output,
+        human_broker=tty_broker,
         scenario_mode_override=(
             ScenarioMode(scenario_mode.lower()) if scenario_mode else None
         ),
@@ -502,7 +583,7 @@ def describe_module(name, path):
         f"[bold]{mod.name}[/bold]\n\n"
         f"[cyan]Description:[/cyan]\n{mod.description}\n\n"
         f"[cyan]Theory:[/cyan]\n{mod.theory}\n\n"
-        f"[cyan]Sub-modules:[/cyan] {', '.join(mod.sub_modules) or 'none'}\n\n"
+        f"[cyan]Sub-modules:[/cyan] {', '.join(mod.sub_module_names) or 'none'}\n\n"
         f"[cyan]System prompt:[/cyan]\n[dim]{mod.system_prompt[:500]}{'...' if len(mod.system_prompt) > 500 else ''}[/dim]",
         title=f"[magenta]{mod.name}[/magenta]",
         border_style="magenta",

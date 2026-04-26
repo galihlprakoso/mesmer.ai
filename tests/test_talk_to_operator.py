@@ -21,16 +21,16 @@ def _make_ctx(*, depth=0, target_memory=None):
     ctx.depth = depth
     ctx.scratchpad = Scratchpad()
     ctx.target_memory = target_memory
-    ctx.mode = "autonomous"
     ctx.human_broker = None
     ctx.registry = MagicMock()
     return ctx
 
 
-def _make_module(name="my-leader"):
+def _make_module(name="my-leader", *, is_executive=False):
     mod = MagicMock()
     mod.name = name
     mod.sub_modules = []
+    mod.is_executive = is_executive
     return mod
 
 
@@ -95,18 +95,22 @@ async def test_works_without_target_memory():
     assert "Sent to operator" in result["content"]
 
 
-def test_leader_only_in_build_tool_list():
-    """SCHEMA appears for depth==0, hidden for sub-modules."""
-    leader_ctx = _make_ctx(depth=0)
-    leader_ctx.registry.as_tools = MagicMock(return_value=[])
-    sub_ctx = _make_ctx(depth=1)
-    sub_ctx.registry.as_tools = MagicMock(return_value=[])
+def test_executive_only_in_build_tool_list():
+    """SCHEMA appears only for the synthesized executive, not for managers."""
+    exec_ctx = _make_ctx(depth=0)
+    exec_ctx.registry.as_tools = MagicMock(return_value=[])
+    manager_ctx = _make_ctx(depth=1)
+    manager_ctx.registry.as_tools = MagicMock(return_value=[])
 
-    leader_tools = build_tool_list(_make_module(), leader_ctx)
-    sub_tools = build_tool_list(_make_module(), sub_ctx)
+    exec_tools = build_tool_list(
+        _make_module("scenario:executive", is_executive=True), exec_ctx
+    )
+    manager_tools = build_tool_list(
+        _make_module("system-prompt-extraction", is_executive=False), manager_ctx
+    )
 
-    leader_names = [t["function"]["name"] for t in leader_tools]
-    sub_names = [t["function"]["name"] for t in sub_tools]
+    exec_names = [t["function"]["name"] for t in exec_tools]
+    manager_names = [t["function"]["name"] for t in manager_tools]
 
-    assert ToolName.TALK_TO_OPERATOR.value in leader_names
-    assert ToolName.TALK_TO_OPERATOR.value not in sub_names
+    assert ToolName.TALK_TO_OPERATOR.value in exec_names
+    assert ToolName.TALK_TO_OPERATOR.value not in manager_names

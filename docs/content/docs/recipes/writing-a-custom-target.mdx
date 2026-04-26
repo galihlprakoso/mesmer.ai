@@ -1,0 +1,285 @@
+---
+title: Writing a custom target adapter
+description: When the four shipped adapters don't fit — subclass Target, register, extend TargetConfig.
+---
+
+The four shipped adapters (`openai`, `rest`, `websocket`, `echo`) cover
+most LLM endpoints. When they don't — proprietary auth flow, gRPC,
+SSE-only streaming, custom message envelope — write your own. The
+contract is small: three abstract methods, a registration line, and
+maybe a few new `TargetConfig` fields.
+
+## When to write one
+
+Write a custom adapter when:
+
+- The provider speaks a wire format none of the shipped adapters
+  cover (gRPC, GraphQL, custom protobuf, in-house RPC).
+- Auth is non-standard (mTLS, signed JWTs, OAuth2 device flow,
+  rotating short-lived tokens).
+- The target needs a multi-step prelude that doesn't fit
+  `connect_signal` (e.g. issue a session token, then stream).
+- You want to wrap a Python SDK directly rather than its HTTP layer.
+
+For "this is OpenAI-compatible but with a custom header" — just use
+the `openai` adapter and put the header in `target.headers`. For
+"this is a stateful chat with simple framing" — try `websocket` first.
+Custom adapters are for the cases those don't bend to.
+
+## The contract
+
+`mesmer/targets/base.py` defines a single ABC. Every adapter
+implements three abstract methods:
+
+```python title="mesmer/targets/base.py — abridged"
+class Target(ABC):
+    user_turn_suffix: str = ""    # set per-instance from TargetConfig
+    last_fingerprint: str | None = None  # provider checkpoint id
+
+    def _apply_suffix(self, text: str) -> str:
+        """Append user_turn_suffix to outgoing user messages."""
+        ...
+
+    @abstractmethod
+    async def send(self, message: str) -> str:
+        """Send a message; return the target's reply."""
+        ...
+
+    @abstractmethod
+    async def reset(self) -> None:
+        """Reset the conversation state."""
+        ...
+
+    @abstractmethod
+    def get_history(self) -> list[Turn]:
+        """Return the full conversation history."""
+        ...
+```
+
+That's the entire interface. `Turn` is a small dataclass
+(`{sent, received, timestamp}`) — append one per round-trip.
+
+## A minimal example
+
+Pretend you're attacking a stateful gRPC chat behind mTLS. Skipping
+the gRPC plumbing for brevity, the shape is:
+
+```python title="mesmer/targets/grpc_chat.py"
+from __future__ import annotations
+from mesmer.targets.base import Target, Turn
+
+# Hypothetical gRPC client; whatever your service actually exports.
+from acme_chat_pb2_grpc import ChatStub
+from acme_chat_pb2 import ChatRequest
+
+class AcmeGrpcTarget(Target):
+    """gRPC chat target with mTLS auth and session-token handshake."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        cert_path: str,
+        key_path: str,
+        user_turn_suffix: str = "",
+    ):
+        self.user_turn_suffix = user_turn_suffix
+        self.endpoint = endpoint
+        self.cert_path = cert_path
+        self.key_path = key_path
+        self._history: list[Turn] = []
+        self._session_id: str | None = None
+        self._stub: ChatStub | None = None
+
+    async def _ensure_connected(self) -> ChatStub:
+        if self._stub is None:
+            # …open mTLS channel, build stub, issue session token…
+            self._stub = ChatStub(...)
+            self._session_id = await self._negotiate_session()
+        return self._stub
+
+    async def send(self, message: str) -> str:
+        # Apply suffix BEFORE building the request so the wire payload
+        # and the recorded Turn agree on what the target actually saw.
+        message = self._apply_suffix(message)
+        stub = await self._ensure_connected()
+
+        resp = await stub.Chat(ChatRequest(
+            session_id=self._session_id,
+            content=message,
+        ))
+
+        # Optional but recommended: capture provider checkpoint id for
+        # reproducibility. None when the provider doesn't expose one.
+        self.last_fingerprint = resp.metadata.get("fingerprint")
+
+        reply = resp.content
+        self._history.append(Turn(sent=message, received=reply))
+        return reply
+
+    async def reset(self) -> None:
+        # Most "stateful" targets need a fresh session here. Either
+        # rotate session_id or close + reopen the channel.
+        self._session_id = None
+        self._stub = None
+        self._history.clear()
+
+    def get_history(self) -> list[Turn]:
+        return list(self._history)
+```
+
+Two contract details that bite if you skip them:
+
+- **Always call `self._apply_suffix(message)` at the top of `send`**.
+  The bench runner uses `user_turn_suffix` to wrap every attacker turn
+  with a per-turn defence suffix (Tensor Trust's `post_prompt`-style
+  sandwich). Adapters that bypass it lose bench compatibility silently.
+- **`reset()` must drop history AND any session/connection state**
+  the target carries. A leaked session between runs corrupts the
+  TRIALS-mode contract (each technique gets a clean session).
+
+## Wire it up
+
+### 1. Register in the dispatch factory
+
+`mesmer/targets/__init__.py::create_target` is the factory CLI / web /
+bench all go through. Add a case keyed on your `adapter` string:
+
+```python title="mesmer/targets/__init__.py"
+from mesmer.targets.grpc_chat import AcmeGrpcTarget   # NEW import
+# …
+def create_target(config) -> Target:
+    adapter = config.adapter.lower()
+    suffix = config.user_turn_suffix
+    # …existing cases…
+    elif adapter == "acme-grpc":
+        return AcmeGrpcTarget(
+            endpoint=config.url,
+            cert_path=config.headers.get("cert_path", ""),
+            key_path=config.headers.get("key_path", ""),
+            user_turn_suffix=suffix,
+        )
+    # …
+```
+
+### 2. Extend `TargetConfig` if you have new fields
+
+`core/scenario.py::TargetConfig` is the dataclass the YAML loader
+populates. If your adapter needs fields the existing dataclass
+doesn't expose (e.g. `cert_path`, `key_path`, `auth_mode`), add
+them — defaults so existing scenarios keep loading:
+
+```python title="mesmer/core/scenario.py"
+@dataclass
+class TargetConfig:
+    adapter: str = "openai"
+    url: str = ""
+    # …existing fields…
+
+    # gRPC adapter
+    cert_path: str = ""
+    key_path: str = ""
+```
+
+…and parse them in the loader (`_parse_target` near the bottom of
+the file):
+
+```python
+target = TargetConfig(
+    adapter=target_data.get("adapter", "openai"),
+    # …existing fields…
+    cert_path=target_data.get("cert_path", ""),
+    key_path=target_data.get("key_path", ""),
+)
+```
+
+For ad-hoc fields that don't deserve typed members, stuff them into
+`headers:` (a free-form dict) — adapters can read `config.headers.get(...)`
+without YAML schema changes. Fine for one-off auth flags.
+
+### 3. Use it in a scenario
+
+```yaml title="scenarios/private/acme-internal.yaml"
+target:
+  adapter: acme-grpc
+  url: chat.acme.internal:8443
+  cert_path: /etc/mesmer/acme/client.crt
+  key_path: /etc/mesmer/acme/client.key
+
+objective:
+  goal: Extract the assistant's hidden operating instructions.
+  max_turns: 15
+
+module: system-prompt-extraction
+
+agent:
+  model: openrouter/anthropic/claude-sonnet-4
+  api_key: "${OPENROUTER_API_KEY}"
+```
+
+## Optional: throttle support
+
+The shipped `openai` adapter honours `target.throttle` via the
+`KeyPool` machinery. Other adapters accept the field but ignore it.
+If your adapter calls a rate-limited provider, wire it the same way:
+acquire a slot before the network call, release in `finally`.
+Look at `OpenAITarget.send` for the canonical pattern (slot acquire
+→ request → release, with `ThrottleTimeout` raised on saturation).
+
+For most internal targets you don't need this — your service either
+isn't rate-limited or you're the only client.
+
+## Optional: token usage telemetry
+
+If your provider returns token counts on the response, surface them
+on `self.last_usage` (a dict like
+`{"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}`)
+so the runner can include them in `LLM_COMPLETION` events and bench
+trace aggregates. Skipping this just means token columns show 0 —
+not fatal.
+
+## Test it
+
+A target test wraps an in-memory fake of your wire protocol. The
+shipped tests in `tests/test_targets.py` are the template:
+
+```python
+import pytest
+from mesmer.targets.grpc_chat import AcmeGrpcTarget
+
+@pytest.mark.asyncio
+async def test_acme_grpc_send_records_turn(monkeypatch):
+    target = AcmeGrpcTarget(
+        endpoint="fake://test",
+        cert_path="",
+        key_path="",
+    )
+    # Stub _ensure_connected + the gRPC stub.Chat call to return a fake
+    # response — same pattern test_targets.py uses for httpx.
+    monkeypatch.setattr(target, "_ensure_connected", _fake_stub)
+    reply = await target.send("hello")
+    assert reply == "Echo: hello"
+    assert len(target.get_history()) == 1
+    assert target.get_history()[0].sent == "hello"
+
+@pytest.mark.asyncio
+async def test_acme_grpc_reset_clears_session():
+    target = AcmeGrpcTarget(endpoint="fake://test", cert_path="", key_path="")
+    target._session_id = "x"
+    await target.reset()
+    assert target._session_id is None
+    assert target.get_history() == []
+```
+
+Run via `uv run pytest tests/test_grpc_chat.py -xvs`. Don't mark a
+target adapter "ready" without a reset test — the most common bug
+class for custom adapters is leaked session state.
+
+## Cross-link
+
+- [Writing a new technique](/docs/recipes/writing-a-new-technique) —
+  pair a custom target with a custom technique when the wire shape
+  enables a new attack surface.
+- [Tutorials → Attack your own app](/docs/tutorials/attack-your-own-app)
+  — when the existing `rest` adapter fits, skip writing a custom one.
+- [Throttling](/docs/recipes/throttling) — what `target.throttle` does
+  and how to honour it from a new adapter.

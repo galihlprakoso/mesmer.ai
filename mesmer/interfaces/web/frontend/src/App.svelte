@@ -15,7 +15,11 @@
 
   let unsubscribe
   let sidebarOpen = false
-  let bottomOpen = false
+  // Default the bottom (chat) panel open — under the executive layer
+  // every run is conversational by default; the chat IS the primary
+  // operator surface during runs. Operator can still collapse via
+  // the edge toggle.
+  let bottomOpen = true
 
   onMount(() => {
     connect()
@@ -97,7 +101,7 @@
               class:active={$mode === 'autonomous'}
               role="tab"
               aria-selected={$mode === 'autonomous'}
-              title="Autonomous — agent runs alone, no chat"
+              title="Hide chat — show only activity log"
               on:click={() => $mode = 'autonomous'}
             >
               <span class="mb-ico">🤖</span>
@@ -108,7 +112,7 @@
               class:active={$mode === 'co-op'}
               role="tab"
               aria-selected={$mode === 'co-op'}
-              title="Chat — talk to the leader live"
+              title="Show chat — talk to the executive live"
               on:click={() => $mode = 'co-op'}
             >
               <span class="mb-ico">💬</span>

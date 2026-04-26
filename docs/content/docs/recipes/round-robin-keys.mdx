@@ -1,0 +1,88 @@
+---
+title: Round-robin keys
+description: Comma-separated API keys for higher throughput and resilience.
+---
+
+Mesmer's `KeyPool` rotates through multiple API keys per provider,
+cooling individual keys on 429/5xx instead of sleeping the whole run.
+This is the cheapest way to multiply your effective RPM.
+
+## Declare it
+
+```yaml
+agent:
+  api_key: "${OPENROUTER_API_KEY}"   # multi-key via env
+  # …
+```
+
+```bash
+export OPENROUTER_API_KEY="sk-or-aaa,sk-or-bbb,sk-or-ccc"
+```
+
+The comma-separated list is parsed at scenario load. You can also list
+keys inline (don't commit production keys to git):
+
+```yaml
+agent:
+  api_key: "sk-or-aaa,sk-or-bbb"
+```
+
+## How rotation works
+
+1. The first call uses key `aaa`.
+2. The second call uses key `bbb` (round-robin).
+3. If a call hits a 429, that key gets cooled for `Retry-After`
+   seconds (parsed from the response header) — `compute_cooldown` lives
+   in `core/agent/retry.py`.
+4. Next call rotates to a non-cooled key.
+5. When **every** key is cooled, the loop emits `RATE_LIMIT_WALL` and
+   returns `None`. Add `agent.throttle` (see
+   [Throttling](/docs/recipes/throttling)) to block instead of fail.
+
+## Multi-key + throttle
+
+The pool is keyed on the **sorted tuple of all keys**. If you declare:
+
+```yaml
+agent:
+  api_key: "sk-aaa,sk-bbb,sk-ccc"
+  throttle:
+    max_rpm: 60
+    max_concurrent: 6
+    max_wait_seconds: 600
+```
+
+…then `60 RPM` is the total across all three keys, not 60 per key. To
+multiply, declare a wider cap and let key rotation distribute the load.
+
+## What it does NOT do
+
+- **No automatic key generation.** Mesmer doesn't sign you up for
+  multiple accounts.
+- **No quota tracking.** If a provider has a daily token limit, mesmer
+  won't notice until you hit it.
+- **No per-model affinity.** All keys are interchangeable for the same
+  provider; if your keys have different model access, declare them in
+  separate scenarios with separate `model:` fields.
+
+## Targets too
+
+Same pattern works for `target.api_key` (currently honoured by the
+`openai` adapter only):
+
+```yaml
+target:
+  adapter: openai
+  base_url: https://api.groq.com/openai/v1
+  model: llama-3.1-8b-instant
+  api_key: "${GROQ_KEY_1},${GROQ_KEY_2}"
+```
+
+For benchmarks where the target side is the bottleneck (Groq free tier
+caps at 30 RPM per key), this is the difference between a 4-hour
+sweep and a 90-minute sweep.
+
+## See also
+
+- [Throttling](/docs/recipes/throttling) — pair key rotation with a
+  throttle config to block-up-to-N-seconds rather than fail-fast.

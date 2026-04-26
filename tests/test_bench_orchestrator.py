@@ -552,7 +552,7 @@ class TestLoadSpec:
         spec_path.write_text("""
 name: "test"
 version: v1
-module: system-prompt-extraction
+modules: [system-prompt-extraction]
 dataset:
   upstream_url: https://example.com/data.jsonl
   local_cache: data.jsonl
@@ -600,7 +600,7 @@ contamination_posture:
         spec_path.write_text("""
 name: no-posture
 version: v1
-module: system-prompt-extraction
+modules: [system-prompt-extraction]
 dataset:
   upstream_url: ""
   local_cache: data.jsonl
@@ -624,7 +624,7 @@ agent:
         spec_path.write_text("""
 name: throttled
 version: v1
-module: system-prompt-extraction
+modules: [system-prompt-extraction]
 dataset:
   upstream_url: https://example.com/data.jsonl
   local_cache: data.jsonl
@@ -668,7 +668,7 @@ contamination_posture:
         spec_path.write_text("""
 name: blank
 version: v1
-module: m
+modules: [m]
 dataset:
   upstream_url: ""
   local_cache: data.jsonl
@@ -714,7 +714,7 @@ class TestBuildScenario:
         scenario = build_scenario_for_row(spec, spec.targets[0], row, seed=7)
         assert scenario.target.system_prompt == "pre"
         assert scenario.target.user_turn_suffix == "post"
-        assert scenario.module == "system-prompt-extraction"
+        assert scenario.modules == ["system-prompt-extraction"]
         assert scenario.agent.seed == 7
         assert scenario.objective.max_turns == 5
 

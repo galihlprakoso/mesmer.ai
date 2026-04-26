@@ -75,7 +75,8 @@
         success_signals: '',
         max_turns: 25,
       },
-      module: '',
+      modules: [],
+      leader_prompt: '',
       agent: {
         model: 'openrouter/anthropic/claude-sonnet-4-20250514',
         judge_model: '',
@@ -105,7 +106,18 @@
         ? o.success_signals.join('\n')
         : (o.success_signals ?? '')
       base.objective.max_turns = o.max_turns ?? 25
-      base.module = data.module ?? ''
+      // ``modules:`` (list) is current; ``module:`` (single string) is the
+      // legacy field — we tolerate it in the form for read-only display
+      // purposes, but the backend's load_scenario will reject any save
+      // attempt that still uses it. Empty array if both absent.
+      if (Array.isArray(data.modules)) {
+        base.modules = data.modules.map(m => String(m))
+      } else if (data.module) {
+        base.modules = [String(data.module)]
+      } else {
+        base.modules = []
+      }
+      base.leader_prompt = data.leader_prompt ?? ''
       const a = data.agent || {}
       base.agent.model = a.model ?? base.agent.model
       base.agent.judge_model = a.judge_model ?? ''
@@ -143,8 +155,11 @@
       description: f.description,
       target,
       objective,
-      module: f.module,
+      modules: Array.isArray(f.modules) ? f.modules.filter(Boolean) : [],
       agent,
+    }
+    if (f.leader_prompt && f.leader_prompt.trim()) {
+      out.leader_prompt = f.leader_prompt
     }
     return yaml.dump(out, { lineWidth: 120, noRefs: true })
   }
@@ -295,26 +310,59 @@
         </section>
 
         <section>
-          <h4>Leader module</h4>
-          <label>
-            <span>Module</span>
-            <select bind:value={form.module} on:change={onFormChange} {disabled}>
-              <option value="">— Select a module —</option>
-              {#each groupedModules as group (group.category)}
-                <optgroup label={group.label}>
-                  {#each group.modules as m (m.name)}
-                    <option value={m.name}>{m.name}</option>
-                  {/each}
-                </optgroup>
-              {/each}
-            </select>
-          </label>
-          {#if form.module}
-            {@const meta = modules.find(m => m.name === form.module)}
-            {#if meta}
-              <p class="help">{meta.description}</p>
+          <h4>Manager modules</h4>
+          <p class="help">
+            The executive (synthesized at run start) dispatches these
+            managers to achieve the objective. Order is a hint — the
+            executive picks dispatch order based on the operator
+            conversation and judge feedback.
+          </p>
+          {#each form.modules as name, i (i + ':' + name)}
+            <div class="row" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+              <select
+                style="flex:1;"
+                value={name}
+                on:change={(e) => { form.modules[i] = e.target.value; onFormChange() }}
+                {disabled}
+              >
+                <option value="">— Select a manager —</option>
+                {#each groupedModules as group (group.category)}
+                  <optgroup label={group.label}>
+                    {#each group.modules as m (m.name)}
+                      <option value={m.name}>{m.name}</option>
+                    {/each}
+                  </optgroup>
+                {/each}
+              </select>
+              <button
+                type="button"
+                {disabled}
+                on:click={() => { form.modules = form.modules.filter((_, j) => j !== i); onFormChange() }}
+              >Remove</button>
+            </div>
+            {#if name}
+              {@const meta = modules.find(m => m.name === name)}
+              {#if meta}
+                <p class="help">{meta.description}</p>
+              {/if}
             {/if}
-          {/if}
+          {/each}
+          <button
+            type="button"
+            {disabled}
+            on:click={() => { form.modules = [...form.modules, '']; onFormChange() }}
+          >+ Add manager</button>
+
+          <label style="margin-top:12px;">
+            <span>Executive prompt (optional override)</span>
+            <textarea
+              rows="4"
+              placeholder="Leave blank to use the default executive prompt."
+              bind:value={form.leader_prompt}
+              on:input={onFormChange}
+              {disabled}
+            ></textarea>
+          </label>
         </section>
 
         <section>

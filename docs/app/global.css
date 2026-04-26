@@ -179,3 +179,43 @@ body > * {
   background: var(--color-fd-card) !important;
   border: 1px solid var(--color-fd-border);
 }
+
+/* ─── Landing graph demo animations ─────────────────────────────────────── */
+@keyframes graph-demo-pulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 2px hsla(155, 100%, 42%, 0.5));
+  }
+  50% {
+    filter: drop-shadow(0 0 9px hsla(155, 100%, 42%, 0.85));
+  }
+}
+
+.graph-demo-pulse {
+  animation: graph-demo-pulse 1.6s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes graph-demo-path-sweep {
+  0% {
+    stroke-dasharray: 6 200;
+    stroke-dashoffset: 200;
+  }
+  60% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dasharray: 6 200;
+    stroke-dashoffset: -50;
+  }
+}
+
+.graph-demo-winning-path {
+  animation: graph-demo-path-sweep 5.5s ease-in-out infinite;
+}
+
+/* Mermaid clean-up — keep it visually consistent in the phosphor theme */
+.mermaid svg,
+[id^="mermaid-"] {
+  background: transparent !important;
+}

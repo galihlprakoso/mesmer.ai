@@ -14,41 +14,37 @@ ever seen and how we judged it.
 Nodes are attack attempts (one per module execution, including the
 leader). Edges are parent-child refinements.
 
-<AsciiDiagram caption="A mid-run graph against a single target.">
-{`
-                         ┌──────────────┐
-                         │ ROOT         │
-                         │ target-hash  │
-                         └──────┬───────┘
-                                │
-               ┌────────────────┼──────────────────┐
-               ▼                ▼                  ▼
-      ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-      │target-profiler│  │ attack-planner│  │  direct-ask  │
-      │ score: 6.0   │   │ score: —     │   │ score: 2.1   │
-      │ :PROMISING   │   │ :ALIVE       │   │ :DEAD        │
-      │ source:AGENT │   │ source:AGENT │   │ source:AGENT │
-      └──────────────┘   └──────┬───────┘   └──────────────┘
-                                │
-                ┌───────────────┼───────────────┐
-                ▼               ▼               ▼
-       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-       │prefix-commit │  │delimiter-inj │  │ human hint   │
-       │ score: 8.4   │  │ score: 7.2   │  │ score: —     │
-       │ :PROMISING   │  │ :PROMISING   │  │ :FRONTIER    │
-       │ source:AGENT │  │ source:AGENT │  │ source:HUMAN │
-       └──────────────┘  └──────────────┘  └──────────────┘
-                                                   │
-                                            ┌──────┴──────┐
-                                            ▼
-                                   ┌──────────────────┐
-                                   │ LEADER VERDICT   │
-                                   │ run complete     │
-                                   │ objective_met:Y  │
-                                   │ source:LEADER    │
-                                   └──────────────────┘
-`}
-</AsciiDiagram>
+<Mermaid caption="A mid-run graph against a single target." chart={`
+flowchart TD
+  ROOT([root · target-hash])
+  TP[target-profiler<br/>score 6.0 · PROMISING]
+  AP[attack-planner<br/>ALIVE]
+  DA[direct-ask<br/>score 2.1 · DEAD]
+  PC[prefix-commitment<br/>score 8.4 · PROMISING]
+  DI[delimiter-injection<br/>score 7.2 · PROMISING]
+  HH[/human hint<br/>FRONTIER · source HUMAN/]
+  LV[[leader verdict<br/>objective_met true · source LEADER]]
+
+  ROOT --> TP
+  ROOT --> AP
+  ROOT --> DA
+  AP --> PC
+  AP --> DI
+  AP --> HH
+  HH --> LV
+
+  classDef promising fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8;
+  classDef alive fill:#141A17,stroke:#6B7A70,color:#E6EDE8;
+  classDef dead fill:#2A1414,stroke:#EF4444,color:#E6EDE8,stroke-dasharray: 4 3;
+  classDef frontier fill:#141A17,stroke:#6B7A70,color:#9DB1A4,stroke-dasharray: 4 3;
+  classDef leader fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8,stroke-width:2px;
+
+  class TP,PC,DI promising;
+  class AP alive;
+  class DA dead;
+  class HH frontier;
+  class LV leader;
+`} />
 
 Every module execution produces exactly **one** `AttackNode` in the
 graph. Sub-module executions are recorded by `evaluation._update_graph`

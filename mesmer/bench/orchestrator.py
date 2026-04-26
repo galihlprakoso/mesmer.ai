@@ -815,7 +815,7 @@ def build_scenario_for_row(
         description=f"Bench trial — target={target.id} sample={row.sample_id}",
         target=target_cfg,
         objective=objective,
-        module=spec.module,
+        modules=[spec.module],
         agent=agent,
         judge_rubric_additions=_render_row_template(spec.judge_rubric_additions, row),
         mode=ScenarioMode.TRIALS,

@@ -283,13 +283,32 @@ class AgentConfig:
 
 @dataclass
 class Scenario:
-    """A complete attack scenario."""
+    """A complete attack scenario.
+
+    Modules are referenced by name from the registry and orchestrated by a
+    scenario-scoped *executive* that the runner synthesizes in memory at
+    run start. Single-manager scenarios use a one-element list. The
+    executive itself is never authored in YAML — it's purely a runtime
+    construct that owns the user-facing chat and dispatches managers as
+    sub-modules.
+    """
 
     name: str
     description: str
     target: TargetConfig
     objective: Objective
-    module: str
+    # Manager-level modules from the registry that the executive can
+    # dispatch. Order is a hint to the executive (presented in this order
+    # in its tool list) but not a contract — the executive picks dispatch
+    # order based on conversation, judge feedback, and TAPER frontier.
+    modules: list[str] = field(default_factory=list)
+    # Optional override for the synthesized executive's system prompt.
+    # When None, the runner loads the default
+    # ``mesmer/core/agent/prompts/executive.prompt.md``. Use this when the
+    # generic "orchestrate the listed modules to achieve the objective"
+    # framing isn't enough — e.g. a scenario that wants the executive to
+    # dispatch one module strictly before another and pivot framing.
+    leader_prompt: str | None = None
     agent: AgentConfig = field(default_factory=AgentConfig)
     module_paths: list[str] = field(default_factory=list)
     # Optional scenario-specific judge rubric additions. Appended to the stock
@@ -429,12 +448,54 @@ def load_scenario(path: str | Path) -> Scenario:
     except ValueError:
         mode = ScenarioMode.TRIALS
 
+    # Schema migration guard — the legacy single ``module: <name>`` field
+    # was replaced by ``modules: [<name>, ...]`` plus the synthesized
+    # executive layer. A YAML carrying both is ambiguous; one carrying
+    # only the legacy field needs a one-line rewrite. Fail loud either
+    # way so the operator sees the migration instead of running the wrong
+    # leader silently.
+    has_legacy = "module" in data and data["module"] is not None and str(data["module"]).strip()
+    raw_modules = data.get("modules")
+    if has_legacy and raw_modules:
+        raise ValueError(
+            "Scenario YAML contains both 'module:' (legacy) and 'modules:' "
+            "(current). Drop 'module:' — the executive layer reads only "
+            "'modules:'."
+        )
+    if has_legacy:
+        raise ValueError(
+            f"Scenario YAML uses the legacy 'module: {data['module']!r}' field. "
+            f"Rewrite as 'modules: [{data['module']!r}]' — the runner now "
+            "synthesizes a scenario-scoped executive that dispatches managers "
+            "from the 'modules' list."
+        )
+    if raw_modules is None:
+        raw_modules = []
+    if not isinstance(raw_modules, list):
+        raise ValueError(
+            f"Scenario 'modules' must be a list of module names, got "
+            f"{type(raw_modules).__name__}."
+        )
+    modules = [str(m).strip() for m in raw_modules if str(m).strip()]
+    if not modules:
+        raise ValueError(
+            "Scenario 'modules' is empty — list at least one manager module "
+            "name from the registry."
+        )
+
+    raw_leader_prompt = data.get("leader_prompt")
+    leader_prompt: str | None = None
+    if raw_leader_prompt is not None:
+        text = str(raw_leader_prompt).strip()
+        leader_prompt = text or None
+
     return Scenario(
         name=data.get("name", "Unnamed Scenario"),
         description=data.get("description", ""),
         target=target,
         objective=objective,
-        module=data.get("module", ""),
+        modules=modules,
+        leader_prompt=leader_prompt,
         agent=agent,
         module_paths=data.get("module_paths", []),
         judge_rubric_additions=judge_rubric_additions,

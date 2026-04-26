@@ -1,0 +1,109 @@
+---
+title: Throttling — "I keep getting 429s"
+description: Per-target and per-agent rate-limit caps with KeyPool cooldown.
+---
+
+When a provider rate-limits you, mesmer doesn't sleep the run — it
+cools the offending key in `KeyPool` and rotates to a sibling key.
+With one key and a tight RPM cap, the loop emits
+`LogEvent.RATE_LIMIT_WALL` and the LLM call returns `None` (the engine
+maps that to `"LLM error: all retries exhausted"`). The fix is to
+declare a `throttle:` block — mesmer then **acquires a slot** before
+every call and **blocks up to N seconds** instead of failing.
+
+## The block
+
+`ThrottleConfig` lives on both `agent.throttle` and `target.throttle`
+with identical fields:
+
+```yaml
+throttle:
+  max_rpm: 30           # null/absent = no rpm cap
+  max_concurrent: 4     # null/absent = no concurrency cap
+  max_wait_seconds: 600 # 0 = fail fast on saturation; >0 = block up to N seconds
+```
+
+## When to put it on `agent.throttle`
+
+The attacker model is the high-volume side — every ReAct iteration
+does an attacker call, plus a judge call, plus occasionally a
+compressor call. Cap *here* when:
+
+- You're on a free-tier provider (Groq, OpenRouter free models).
+- You see `RATE_LIMIT_WALL` events in `--verbose` output.
+- You're running multiple scenarios in parallel against the same
+  agent provider.
+
+## When to put it on `target.throttle`
+
+The target is the lower-volume side — one call per technique attempt,
+maybe four to six attempts per run. Cap *here* when:
+
+- You're benchmarking against a target with a stricter cap than the
+  attacker (typical for in-house / staging chatbots).
+- Multiple scenarios point at the same target endpoint and you want
+  them to share a budget rather than each declare their own.
+
+## How keys merge across scenarios
+
+The pool is keyed on the **sorted tuple of API keys**. Two bench
+targets with the same `api_key` value automatically share one
+throttle budget — first caller wins on the config; subsequent targets
+declaring a different throttle for the same key see theirs ignored.
+This matches the attacker-side semantics in `core/agent/retry.py`.
+
+## `max_wait_seconds`: fail-fast vs block
+
+```yaml
+throttle:
+  max_rpm: 10
+  max_wait_seconds: 0     # ← fail fast: saturation → 0 turns silently
+```
+
+vs.
+
+```yaml
+throttle:
+  max_rpm: 10
+  max_wait_seconds: 600   # ← block up to 10 minutes when saturated
+```
+
+Pick the second form for any production-ish run. The first form is the
+legacy default and produces missing trials under burst load. With
+`max_wait_seconds > 0`, when the slot is unavailable the call blocks,
+and `ThrottleTimeout` is raised only if the wait actually exceeds N
+seconds. The typed error is caught at the engine boundary and logged
+with a real reason instead of returning silently.
+
+## What the verbose log shows
+
+```
+[ throttle ] acquire agent · waiting 18.4s for slot (max_rpm=30, in-flight=4)
+[ throttle ] acquired agent · slot in 18.7s
+[ judge ] score 7.4 / 10
+…
+[ throttle ] timeout target · waited 600.0s (raised ThrottleTimeout)
+```
+
+If you see `timeout` lines, the cap is too tight for the run's
+demands; either widen `max_rpm` or reduce `max_concurrent`.
+
+## Adapter coverage today
+
+| Adapter | Honours `throttle` |
+|---|---|
+| `openai` | ✓ |
+| `rest` | ✗ (accepts the field, ignores it) |
+| `websocket` / `ws` | ✗ |
+| `echo` | ✗ |
+
+The agent-side throttle (attacker + judge + compressor) is honoured
+unconditionally — it lives in `core/agent/retry.py`, not in any
+adapter.
+
+## See also
+
+- [Round-robin keys](/docs/recipes/round-robin-keys) — split your
+  RPM across multiple API keys.
+- [Picking an attacker model](/docs/recipes/picking-an-attacker-model)
+  — model choice affects cost mix.

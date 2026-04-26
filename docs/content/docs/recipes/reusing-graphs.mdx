@@ -1,0 +1,92 @@
+---
+title: Reusing graphs across runs
+description: When `--fresh` helps, when it hurts, and how to surgically reset only the bad parts.
+---
+
+The graph at `~/.mesmer/targets/{hash}/graph.json` is mesmer's
+cross-run memory. By default every run loads it, learns from it, and
+appends to it. That's the point — run #5 against a known target is
+meaningfully better than run #1.
+
+## Three ways to reset
+
+| Action | What it does | Reversible |
+|---|---|---|
+| (default) | Append to existing graph; warm-start scratchpad from prior outputs. | n/a — non-destructive |
+| `--fresh` | Bypass loading the existing graph for this run. The file on disk is left untouched; future runs without `--fresh` see the original graph again. | ✓ |
+| `mesmer graph reset <scenario>` | Delete `graph.json` for this target. Asks for confirmation. | ✗ — destructive |
+
+## When `--fresh` is right
+
+- You modified the target's system prompt or alignment training.
+  Prior dead-ends may no longer be dead.
+- You want to verify a result is reproducible from scratch (no
+  accumulated experience).
+- You're debugging a stuck planner — sometimes accumulated `## Learned
+  Experience` gets the planner stuck on a single angle.
+
+## When `--fresh` is wrong
+
+- You're iterating with hints. `--fresh` deletes the HUMAN-sourced
+  frontier nodes you just added.
+- You're benchmarking. `mesmer bench` always starts each trial fresh
+  by design (each trial is independent); calling `--fresh` from the
+  CLI is for one-off `mesmer run` invocations.
+- You're chasing a non-reproducible win. `--fresh` discards exactly
+  the prior context that made it reproducible.
+
+## Targeted reset — kill specific dead nodes
+
+If only part of the graph is stale (e.g. you fixed a target endpoint
+that was returning 500s, polluting the dead pool with infrastructure
+errors rather than real refusals), edit `graph.json` directly:
+
+```bash
+# Find dead nodes that came from network errors, not real refusals
+jq '.nodes | to_entries[] | select(.value.status == "DEAD") | .value | {module, leaked_info}' \
+   ~/.mesmer/targets/{hash}/graph.json
+
+# Manually remove the bad ones from the file (back it up first)
+cp ~/.mesmer/targets/{hash}/graph.json /tmp/graph.bak.json
+```
+
+The web UI also exposes per-node delete via the node-detail panel —
+useful for pruning a single misjudged dead-end without touching
+neighbours.
+
+## Reading the graph between runs
+
+```bash
+uv run mesmer graph show scenarios/extract-system-prompt.yaml
+```
+
+…prints node summaries: module, score, status, source, and the
+`approach` text. Filter dead-ends:
+
+```bash
+uv run mesmer graph show scenarios/extract-system-prompt.yaml --status PROMISING
+```
+
+…and check which techniques the planner currently considers viable.
+
+## Cross-target experience
+
+`~/.mesmer/global/techniques.json` accumulates technique success/fail
+counts across **every** target you've attacked. `mesmer stats`
+surfaces this:
+
+```bash
+uv run mesmer stats
+```
+
+This is read-only at runtime — the planner doesn't blindly favour
+techniques with a high global rate, because target alignment shape
+varies. But it's a good signal for "which techniques are worth
+authoring next."
+
+## Hash collisions are intentional
+
+`{hash}` is `sha256(adapter | url | model)` truncated to 16 chars.
+Different model strings produce different graphs. Upgrading
+`gpt-4o-mini` → `gpt-4o` against the same URL gives you a clean slate
+(and that's correct — the new model has different alignment).

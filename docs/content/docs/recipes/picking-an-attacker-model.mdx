@@ -1,0 +1,120 @@
+---
+title: Picking an attacker model
+description: Heuristics for the attacker model, the judge model, temperature, and ensembles.
+---
+
+Mesmer makes three model decisions per run:
+
+1. **Attacker** (`agent.model`) — drives ReAct loops, picks techniques,
+   crafts target messages.
+2. **Judge** (`agent.judge_model`) — scores attempts, proposes
+   frontier nodes. Falls back to `agent.model` if unset.
+3. **Compressor** (`agent.compression_model`) — summarises old
+   conversation turns in CONTINUOUS mode. Falls back to
+   `judge_model` → `model`.
+
+Each picks LiteLLM model strings (`openrouter/anthropic/claude-…`,
+`gemini/gemini-…`, `ollama/llama-…`).
+
+## Attacker — pick frontier-class
+
+The attacker drives the entire run quality. A 7B model planning
+multi-turn cognitive attacks doesn't work — the cognitive techniques
+are too hard for the smaller model to operate correctly. As of writing
+(2026 Q1), the attacker should be one of:
+
+- `openrouter/anthropic/claude-sonnet-4` (or 4.5)
+- `openrouter/openai/gpt-4o` / `o1` / `o4`
+- `gemini/gemini-2.5-pro` (high-context wins for CONTINUOUS mode)
+- `openrouter/google/gemini-2.5-flash` (cheaper alternative; still capable)
+
+```yaml
+agent:
+  model: openrouter/anthropic/claude-sonnet-4
+  api_key: "${OPENROUTER_API_KEY}"
+  temperature: 0.7
+```
+
+**Temperature.** `0.7` is a good default. Lower (`0.3`) when iterating
+on a known-working scenario for stability. Higher (`0.9`) when the
+planner keeps proposing the same angle and you want diversity.
+
+## Judge — pick a smaller, stable model
+
+The judge is called once per attempt, doesn't drive the run, but
+**cost-mixes badly with the attacker**. Use a smaller, stable model:
+
+```yaml
+agent:
+  model: openrouter/anthropic/claude-sonnet-4   # attacker
+  judge_model: openrouter/openai/gpt-4o-mini    # judge
+```
+
+Why a different model:
+
+- Cost. `gpt-4o-mini` at 18% the price of `claude-sonnet-4` and ~2×
+  faster, called 1× per attempt. Saves real money on long runs.
+- Stability across rotation. If you use an ensemble (below), you want
+  the judge to stay constant so scores don't drift with the attacker.
+
+## Ensembles — diversity across sub-modules
+
+Set `agent.models:` (plural) to rotate base models per sub-module:
+
+```yaml
+agent:
+  models:
+    - openrouter/anthropic/claude-sonnet-4
+    - openrouter/openai/gpt-4o
+    - openrouter/google/gemini-2.5-pro
+  judge_model: openrouter/openai/gpt-4o-mini
+  api_key: "${OPENROUTER_API_KEY}"
+```
+
+When `models:` is non-empty, `model:` is overwritten by the first
+entry and `next_attacker_model()` rotates round-robin so each
+sub-module gets a different base. Useful when:
+
+- One model has a weakness (e.g. Claude is good at refusal but weak
+  at format-shifting). Mix to cover the gaps.
+- You're benchmarking attacker robustness — comparing single-model
+  vs. ensemble baselines in the same spec.
+
+The judge stays stable so scoring doesn't drift.
+
+## Local attackers
+
+Local models as attackers usually don't work for production-grade
+targets. The cognitive techniques (foot-in-door, narrative-transport)
+need a model with enough world-knowledge to write convincing
+multi-turn manipulations. A 7B Llama can't.
+
+If you must run fully offline, use a local model only for the *judge*
+(less demanding) and keep the attacker on a hosted frontier model.
+
+## Cost mix in practice
+
+Run a small bench with `--verbose`, then aggregate:
+
+```bash
+cat events/*.jsonl \
+  | jq -r 'select(.event=="llm_completion") | .detail | fromjson | "\(.role) \(.total_tokens)"' \
+  | awk '{roles[$1]+=$2} END {for (r in roles) print r, roles[r]}'
+```
+
+Typical mix for a 50-trial Tensor Trust sweep:
+
+```
+attacker  3,200,000
+judge       580,000
+```
+
+Attacker is 5-7× the judge in tokens. Keep that ratio in mind when
+picking models.
+
+## See also
+
+- [Throttling](/docs/recipes/throttling) — pair model choice with a
+  throttle config to stay under provider caps.
+- [Round-robin keys](/docs/recipes/round-robin-keys) — multiplies
+  effective RPM at the same provider.

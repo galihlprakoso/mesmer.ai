@@ -24,7 +24,7 @@ export function baseOptions(): BaseLayoutProps {
       ),
       transparentMode: "top",
     },
-    githubUrl: "https://github.com/galihlprakoso/mesmer",
+    githubUrl: "https://github.com/galihlprakoso/mesmer.ai",
     links: [
       {
         text: "Docs",
@@ -35,11 +35,6 @@ export function baseOptions(): BaseLayoutProps {
         text: "Modules",
         url: "/docs/modules",
         active: "nested-url",
-      },
-      {
-        text: "llms.txt",
-        url: "/llms-full.txt",
-        external: true,
       },
     ],
   };

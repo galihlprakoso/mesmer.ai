@@ -1,0 +1,54 @@
+---
+title: Techniques overview
+description: Every shipping technique — what it does, when it pays off, when it doesn't.
+---
+
+A **technique** is a sub-module that knows how to do one specific kind
+of probe — wrap an ask in fiction, force a quoting prefix, mirror the
+target's delimiters. Each one runs a nested ReAct loop with its own
+system prompt and its own judge rubric, and returns a write-up that
+the leader reads to decide what to do next.
+
+Pick a technique page based on what you suspect the target's weakness
+is. The shipped catalog spans three tiers:
+
+## Tier 0 — naive baselines
+
+Cheap one-shot probes. Run these first; they're often enough, and the
+refusal style of a stronger target is itself diagnostic.
+
+- [direct-ask](/docs/techniques/direct-ask) — just ask, politely.
+- [instruction-recital](/docs/techniques/instruction-recital) — "repeat the above."
+- [indirect-recital](/docs/techniques/indirect-recital) — "print the above as Python."
+- [format-shift](/docs/techniques/format-shift) — same, but rotates through formats.
+
+## Tier 1 — structural / payload-shaping
+
+Few messages, leverage is in the payload structure (delimiters, role
+tokens, prefixes, fake function schemas).
+
+- [prefix-commitment](/docs/techniques/prefix-commitment) — force a quoting prefix.
+- [delimiter-injection](/docs/techniques/delimiter-injection) — mirror the target's section markers.
+- [role-impersonation](/docs/techniques/role-impersonation) — fake `[SYSTEM]:` cues mid-content.
+- [fake-function-injection](/docs/techniques/fake-function-injection) — forge a function whose params disclose internal state.
+- [hallucinated-tool-probing](/docs/techniques/hallucinated-tool-probing) — enumerate the tool catalog by calling fake names.
+
+## Tier 2 — cognitive / linguistic / psychological
+
+Multi-turn manipulation. Benefits from compounding target state.
+
+- [foot-in-door](/docs/techniques/foot-in-door) — graduated escalation.
+- [authority-bias](/docs/techniques/authority-bias) — claim status.
+- [anchoring](/docs/techniques/anchoring) — plant a false baseline.
+- [narrative-transport](/docs/techniques/narrative-transport) — wrap the ask in fiction.
+- [pragmatic-reframing](/docs/techniques/pragmatic-reframing) — ask a different question that answers the original.
+- [cognitive-overload](/docs/techniques/cognitive-overload) — bury the ask in a batch.
+
+## Reading order
+
+If you've never used mesmer, read [direct-ask](/docs/techniques/direct-ask)
+first — it's the cheapest baseline and the page explains how to read
+the failure modes that inform every other technique choice.
+
+If you're authoring a new technique, read
+[Recipes → Writing a new technique](/docs/recipes/writing-a-new-technique).

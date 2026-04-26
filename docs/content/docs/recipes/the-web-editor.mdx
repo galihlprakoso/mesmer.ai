@@ -1,0 +1,111 @@
+---
+title: The web editor
+description: Form/YAML tabs, vibe-code AI chat, undo, validate-as-you-type — the browser scenario authoring loop.
+---
+
+`mesmer serve` ships a scenario editor. It's the fastest way to author
+a scenario without a YAML reference open beside you, and it surfaces
+validation errors at the field level before you hit Run.
+
+## Launch
+
+```bash
+uv sync --extra web    # one-time, pulls FastAPI + uvicorn
+uv run mesmer serve    # default: http://localhost:8000
+```
+
+Open `http://localhost:8000`. The landing route is the scenario list
+(`#/`). Click **+ New scenario** to start.
+
+## Two views, one source of truth
+
+**Form tab** — every scenario field as a typed input. Two-way bound to
+the YAML via `js-yaml`'s `yamlToForm` / `formToYaml` helpers in
+`components/ScenarioForm.svelte`. Form mutations regenerate YAML; YAML
+edits parse back into the form. Latest write wins.
+
+**YAML tab** — raw editor for when the form abstraction gets in the
+way (long inline prompts, complex throttle blocks, agent ensemble
+arrays).
+
+A green/red validation badge at the top of the editor calls
+`POST /api/scenarios/validate` debounced 500ms; the endpoint runs
+`core.scenario.load_scenario` against a temp file and surfaces the
+loader's exception text verbatim. **Don't add a parallel YAML
+validator** — the loader is the source of truth.
+
+## The vibe-code chat panel
+
+Right-side chat panel (`EditorChat.svelte`). You describe a change;
+the assistant rewrites your YAML and the editor swaps it in. Every
+swap pushes the prior YAML onto a 20-deep undo stack — the ↶ button
+restores.
+
+The chat reads `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY`) directly from env, so it works on a blank scenario
+even before you've configured an `agent.api_key`. It's decoupled from
+the scenario's own `agent.model` for the same reason.
+
+Useful prompts to the chat:
+
+- "Add a Groq target for llama-3.1-8b-instant with throttle 10 RPM."
+- "Switch the attacker to Claude Sonnet 4 with judge model gpt-4o-mini."
+- "Convert this from TRIALS to CONTINUOUS, add a 4k context budget."
+- "Add a `judge_rubric_additions` block that scores +2 for verbatim
+  leaks."
+
+The assistant returns `{reply, updated_yaml}`; if `updated_yaml` is
+non-null the editor applies it. Verbal-only replies (questions back
+at you, sanity-check confirmations) leave your YAML alone.
+
+## Module picker
+
+The leader-module dropdown groups modules by registry category
+(`<optgroup>`):
+
+```
+attacks/      — leaders
+planners/     — attack-planner
+profilers/    — target-profiler
+techniques/   — every shipped technique
+```
+
+Tier is intentionally not shown for the leader picker — leader's own
+tier doesn't drive runtime. Sub-module pickers under the leader (when
+authoring a new leader) DO show tier.
+
+## Saving
+
+- **Existing scenario** → `PUT /api/scenarios/{path}` overwrites the
+  file.
+- **New scenario** → `POST /api/scenarios` with `{name, yaml_content}`;
+  backend slugifies the name and writes to
+  `scenarios/private/{slug}.yaml`. The `private/` directory is
+  gitignored — the right place for any scenario that references a
+  real production target.
+
+After first save the URL updates (`history.replaceState`) to
+`#/scenarios/{path}/edit` so refresh stays on your scenario.
+
+## Run from the editor
+
+Save first, then click **Run attack** — the URL navigates to
+`#/scenarios/{path}` (graph view). Run controls (max turns, hints,
+`--fresh`, mode override) live in the graph-view sidebar. Editor and
+graph view are routes on the same SPA so navigation is instant.
+
+## What you can't do (yet)
+
+- Inline syntax errors. Validation surfaces the loader's first error;
+  there's no in-editor squiggly-underline. Workaround: copy the YAML
+  to your editor of choice for surgery, paste back.
+- Module authoring. The editor only edits **scenarios**. To author a
+  new module YAML, drop it under `modules/<category>/<name>/` on disk
+  and restart mesmer to pick it up. See
+  [Writing a new technique](/docs/recipes/writing-a-new-technique).
+
+## Path-traversal guard
+
+`POST/PUT /api/scenarios` round-trips through `load_scenario` with a
+path-traversal guard — you can't write outside `scenarios/private/`.
+Same rule applies if you build automation around the API.

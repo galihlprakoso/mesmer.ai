@@ -98,7 +98,7 @@ judge_rubric_additions: |
 ## The two-judge split
 
 A benchmark has exactly **one** authoritative scorer:
-[`bench/canary.py::judge_trial_success`](https://github.com/galihlprakoso/mesmer/blob/main/mesmer/bench/canary.py)
+[`bench/canary.py::judge_trial_success`](https://github.com/galihlprakoso/mesmer.ai/blob/main/mesmer/bench/canary.py)
 — a deterministic substring match against the leader's concluded
 output. Pure function, zero LLM, zero randomness.
 
@@ -137,8 +137,19 @@ schema and triage cookbook.
 
 ## Reproducibility contract
 
-The spec's `contamination_posture:` block documents the known overlap
-risks. For publication runs, mesmer captures:
+The spec's `contamination_posture:` block exists to answer a single
+question a reader will ask of any LLM benchmark: **could the model
+have memorised the canary instead of being broken to leak it?** Both
+target and attacker model cutoffs predate the dataset's public
+release, so memorisation is implausible. ASR is therefore an
+**upper bound under contamination risk** — the per-target
+`mesmer-vs-baseline` delta is the cleaner signal, and
+cross-target variance is a second-order signal for whether the
+result generalises across alignment lineages. Pin the dataset SHA,
+record every model's cutoff, and a reader can audit the posture
+themselves.
+
+For publication runs, mesmer captures:
 
 - Dataset SHA + expected_rows (aborts on mismatch).
 - Target model `system_fingerprint` per-response (Groq may rotate

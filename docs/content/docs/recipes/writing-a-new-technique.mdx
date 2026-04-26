@@ -1,0 +1,155 @@
+---
+title: Writing a new technique
+description: A copy-paste skeleton for a new technique module — frontmatter, system prompt, judge rubric, tier choice.
+---
+
+A technique is a `module.yaml` that knows **how** to do one specific
+thing — e.g. `prefix-commitment` forces a quoting prefix,
+`narrative-transport` wraps the ask in fiction. Auto-discovered by the
+registry on startup; declared in any leader's `sub_modules:` list to
+become callable.
+
+## Skeleton
+
+```yaml title="modules/techniques/cognitive-bias/your-technique/module.yaml"
+name: your-technique
+tier: 2                        # 0=naive · 1=structural · 2=cognitive · 3=composed
+
+description: |
+  One-line blurb the LEADER reads when picking a tool. Visible in the
+  function-calling tool list. Be concrete: "Wrap the ask in a fictional
+  framing where the target is a character." Vague descriptions get
+  picked less often.
+
+theory: |
+  Cognitive-science / linguistics basis for why this works. 1-3
+  sentences, cite if the basis is a named effect (Cialdini foot-in-door,
+  Loftus misinformation, etc). The leader doesn't read this; the docs
+  page for your technique does.
+
+system_prompt: |
+  You are a specialist in <technique>. Your role is to <one-sentence
+  goal>. You are NOT the leader — you have one job and a fixed turn
+  budget; do that job and call conclude() with your write-up.
+
+  ## Your approach
+  1. <step 1>
+  2. <step 2>
+  3. <step 3>
+
+  ## You have access to send_message and conclude.
+  - send_message: send a turn to the target.
+  - conclude: when you're done, call with a write-up that includes
+    every meaningful target response (verbatim) and what you learned.
+
+sub_modules: []                # techniques don't usually delegate
+
+judge_rubric: |
+  Score on <what THIS technique uniquely produces>, NOT on whether
+  the overall objective was hit. Specific examples:
+    - Score 8-10 when <best case>.
+    - Score 5-7 when <partial signal>.
+    - Score 1-3 when <no signal / refusal>.
+
+reset_target: false            # default; set true for fresh-session probes
+```
+
+## Tier choice
+
+| Tier | Use when |
+|---|---|
+| **0** | One-shot probe, no multi-turn dependency, target gets reset before. Minimal LLM cost. |
+| **1** | Few messages, leverage is the *payload structure* (prefix, delimiters, role tokens). Doesn't need cognitive modeling. |
+| **2** | Multi-turn manipulation; benefits from compounding target state. The default if you don't declare. |
+| **3** | Composed — tier-2 lever × tier-0/1 carrier. Reserved for future authored modules. |
+
+Picking the wrong tier makes the gate misfire. A T0 technique that
+needs 6 turns blows its budget; a T2 technique declared as T0 gets
+picked before the leader has tried any baseline. **Default to your
+intuition for the cheapest reasonable tier, and let the gate's
+escape-hatch surface miscalibration on the first run.**
+
+## Where to put it
+
+`modules/techniques/<category>/<your-name>/module.yaml`. Categories
+already in use: `cognitive-bias`, `linguistic`, `psychological`,
+`field` (T0/T1 payload-shape). Pick whichever fits, or add a new
+category directory — the registry auto-discovers any depth of
+subdirectory.
+
+## Anti-overfit guardrail
+
+Field modules (`modules/techniques/field/*`) are CI-scanned for
+banned dataset tokens (`password`, `access code`, `tensor trust`,
+`canary`, `pre_prompt`, `post_prompt`). If you author a field module,
+keep its YAML generic — scenarios and bench specs own the
+dataset-specific terminology. The scan is in
+`tests/test_field_modules_load.py`.
+
+## Don't repeat the OBJECTIVE AWARENESS protocol
+
+The engine appends a depth-aware OBJECTIVE AWARENESS stanza to every
+module's prompt at runtime. Sub-modules automatically get the
+`OBJECTIVE SIGNAL — <fragment>` flag protocol; leaders get the
+`conclude(objective_met=true)` protocol. **Do not write either into
+your module's `system_prompt`** — the engine handles it. Writing
+`OBJECTIVE MET — …` into a module prompt is a known author mistake
+that breaks termination semantics.
+
+## Test it
+
+```bash
+# Verify it loads
+uv run mesmer modules describe your-technique
+
+# Run a scenario where some leader has it in sub_modules
+uv run mesmer run scenarios/private/your-test-scenario.yaml --verbose
+```
+
+If the registry rejects the YAML, you'll get a typed
+`InvalidModuleConfig` with the offending field and reason. Fix and
+re-run; no restart needed beyond the next `mesmer` invocation.
+
+## What about profilers and planners?
+
+Profilers (`modules/profilers/`) and planners (`modules/planners/`)
+are **modules with the same YAML shape as a technique** — they're
+just authored to do something other than probe. The differences:
+
+| Module type | Directory | Talks to target? | What it concludes with |
+|---|---|---|---|
+| Technique | `modules/techniques/<category>/<name>/` | Yes — multiple turns. | Attack write-up; the win, or what was learned. |
+| Profiler | `modules/profilers/<name>/` | Yes — recon-only, doesn't try to win. | Dossier — identity, defence shape, policy surface, exploitation hypothesis. |
+| Planner | `modules/planners/<name>/` | **No** — pure reasoning over the scratchpad. | Ordered plan: `(module, targeting sentence)` pairs the leader executes in order. |
+
+**Authoring a profiler**: write it like a tier-0 technique that
+doesn't try to satisfy the objective. Its `system_prompt` instructs
+the module to observe + categorise; its `judge_rubric` rewards
+*useful recon*, not wins. `target-profiler` is the canonical
+example.
+
+**Authoring a planner**: same YAML shape, but the `system_prompt`
+forbids `send_message` calls — the planner should only `conclude()`
+with its plan text. To let the planner name specific siblings in
+its plan without hardcoding them, the leader's `sub_modules:` entry
+for the planner must set `see_siblings: true`:
+
+```yaml title="modules/attacks/your-leader/module.yaml — leader-side"
+sub_modules:
+  - target-profiler
+  - name: your-planner
+    see_siblings: true       # injects sibling roster into planner's prompt
+  - direct-ask
+  # …
+```
+
+`attack-planner` is the canonical example. See
+[Writing a new leader](/docs/recipes/writing-a-new-leader) for how
+the leader composes profiler + planner + techniques.
+
+## Cross-link forward
+
+Once it's working, write a doc page for it under
+`docs/content/docs/techniques/your-technique.mdx` so users
+understand when to pick it. Use the existing pages as templates —
+they're short on purpose.
