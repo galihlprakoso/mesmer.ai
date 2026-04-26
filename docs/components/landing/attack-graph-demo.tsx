@@ -25,8 +25,27 @@ interface NodeSpec {
   isWinner?: boolean;
 }
 
+interface BeliefNodeSpec {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  kind: "hypothesis" | "evidence" | "frontier" | "strategy" | "target" | "attempt";
+  tone: "text" | "primary" | "red" | "amber" | "purple" | "muted";
+  size: number;
+  detail?: string;
+}
+
+interface BeliefEdgeSpec {
+  from: string;
+  to: string;
+  kind: "supports" | "refutes" | "expands" | "audit" | "strategy";
+}
+
 const PHOSPHOR = "var(--color-fd-primary)";
 const RED = "#ef4444";
+const AMBER = "#d4a017";
+const PURPLE = "#a78bfa";
 const MUTED = "var(--color-fd-muted-foreground)";
 const FG = "var(--color-fd-foreground)";
 const BORDER = "rgba(140, 155, 145, 0.45)";
@@ -163,70 +182,217 @@ function edgePath(from: NodeSpec, to: NodeSpec) {
 
 const byId = (id: string) => nodes.find((n) => n.id === id)!;
 
-const beliefs = [
+const beliefs: BeliefNodeSpec[] = [
   {
-    id: "b1",
-    label: "refusal policy",
-    value: "strong",
+    id: "target",
+    label: "tensor trust",
+    x: 260,
+    y: 140,
+    kind: "target",
+    tone: "primary",
+    size: 23,
+  },
+  {
+    id: "h1",
+    label: "hidden instruction frag. · 100%",
+    x: 185,
+    y: 135,
+    kind: "hypothesis",
+    tone: "primary",
+    size: 18,
+  },
+  {
+    id: "h2",
+    label: "tool reference · 52%",
+    x: 355,
+    y: 235,
+    kind: "hypothesis",
+    tone: "text",
+    size: 15,
+  },
+  {
+    id: "h3",
+    label: "format following streng. · 68%",
+    x: 310,
+    y: 64,
+    kind: "hypothesis",
+    tone: "primary",
+    size: 16,
+  },
+  {
+    id: "f1",
+    label: "exploit-analysis · u=0.32",
     x: 110,
-    y: 84,
-    tone: "muted",
+    y: 90,
+    kind: "frontier",
+    tone: "amber",
+    size: 9,
   },
   {
-    id: "b2",
-    label: "format compliance",
-    value: "0.74",
-    x: 270,
-    y: 42,
+    id: "f2",
+    label: "instruction-recital · u=0.31",
+    x: 120,
+    y: 210,
+    kind: "frontier",
+    tone: "amber",
+    size: 10,
+  },
+  {
+    id: "f3",
+    label: "role-impersonation · u=0.34",
+    x: 430,
+    y: 212,
+    kind: "frontier",
+    tone: "amber",
+    size: 9,
+  },
+  {
+    id: "e1",
+    label: "supports · hidden instruction frag.",
+    x: 165,
+    y: 60,
+    kind: "evidence",
     tone: "primary",
+    size: 8,
   },
   {
-    id: "b3",
-    label: "authority cue",
-    value: "weak",
-    x: 365,
-    y: 145,
-    tone: "warn",
-  },
-  {
-    id: "b4",
-    label: "canary likely",
-    value: "0.91",
-    x: 190,
-    y: 195,
+    id: "e2",
+    label: "supports · partial compliance",
+    x: 300,
+    y: 184,
+    kind: "evidence",
     tone: "primary",
+    size: 8,
   },
   {
-    id: "b5",
-    label: "delimiter style",
-    value: "xml-ish",
-    x: 70,
+    id: "e3",
+    label: "refutes · safety prompt leak",
+    x: 90,
+    y: 155,
+    kind: "evidence",
+    tone: "red",
+    size: 7,
+  },
+  {
+    id: "s1",
+    label: "format-shift",
+    x: 250,
+    y: 35,
+    kind: "strategy",
+    tone: "purple",
+    size: 7,
+  },
+  {
+    id: "s2",
+    label: "authority-bias",
+    x: 505,
     y: 180,
+    kind: "strategy",
+    tone: "purple",
+    size: 7,
+  },
+  {
+    id: "a1",
+    label: "attack-planner · v=0.62",
+    x: 52,
+    y: 118,
+    kind: "attempt",
     tone: "muted",
+    size: 5,
+  },
+  {
+    id: "a2",
+    label: "exploit-executor · v=0.32",
+    x: 460,
+    y: 265,
+    kind: "attempt",
+    tone: "muted",
+    size: 5,
   },
 ];
 
-const beliefEdges = [
-  ["b1", "b2"],
-  ["b2", "b4"],
-  ["b5", "b4"],
-  ["b3", "b4"],
-  ["b1", "b5"],
+const beliefEdges: BeliefEdgeSpec[] = [
+  { from: "target", to: "h1", kind: "supports" },
+  { from: "target", to: "h2", kind: "audit" },
+  { from: "target", to: "h3", kind: "supports" },
+  { from: "h1", to: "f1", kind: "expands" },
+  { from: "h1", to: "f2", kind: "expands" },
+  { from: "h2", to: "f3", kind: "expands" },
+  { from: "e1", to: "h3", kind: "supports" },
+  { from: "e2", to: "h2", kind: "supports" },
+  { from: "e3", to: "h1", kind: "refutes" },
+  { from: "a1", to: "h1", kind: "audit" },
+  { from: "a2", to: "h2", kind: "audit" },
+  { from: "s1", to: "h3", kind: "strategy" },
+  { from: "s2", to: "f3", kind: "strategy" },
 ];
 
 const beliefById = (id: string) => beliefs.find((n) => n.id === id)!;
 
-function beliefColor(tone: string) {
+function beliefColor(tone: BeliefNodeSpec["tone"]) {
   if (tone === "primary") return PHOSPHOR;
-  if (tone === "warn") return "#f59e0b";
+  if (tone === "red") return RED;
+  if (tone === "amber") return AMBER;
+  if (tone === "purple") return PURPLE;
+  if (tone === "text") return FG;
   return MUTED;
+}
+
+function beliefEdgeColor(kind: BeliefEdgeSpec["kind"]) {
+  if (kind === "supports") return PHOSPHOR;
+  if (kind === "refutes") return RED;
+  if (kind === "expands") return AMBER;
+  if (kind === "strategy") return PURPLE;
+  return MUTED;
+}
+
+function beliefShape(node: BeliefNodeSpec, color: string) {
+  const { x, y, size, kind } = node;
+  if (kind === "frontier") {
+    return (
+      <rect
+        x={x - size}
+        y={y - size}
+        width={size * 2}
+        height={size * 2}
+        fill={color}
+      />
+    );
+  }
+  if (kind === "evidence") {
+    return (
+      <polygon
+        points={`${x},${y - size} ${x + size},${y + size} ${x - size},${y + size}`}
+        fill={color}
+      />
+    );
+  }
+  if (kind === "strategy") {
+    return (
+      <polygon
+        points={`${x},${y - size} ${x + size},${y} ${x},${y + size} ${x - size},${y}`}
+        fill={color}
+      />
+    );
+  }
+  if (kind === "target") {
+    const outer = size;
+    const inner = size * 0.48;
+    const points = Array.from({ length: 10 }, (_, i) => {
+      const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+      const radius = i % 2 === 0 ? outer : inner;
+      return `${x + Math.cos(angle) * radius},${y + Math.sin(angle) * radius}`;
+    }).join(" ");
+    return <polygon points={points} fill={color} />;
+  }
+  return <circle cx={x} cy={y} r={size} fill={color} />;
 }
 
 export function AttackGraphDemo() {
   return (
-    <div className="grid gap-5 lg:grid-cols-[1.35fr_1fr]">
+    <div className="grid gap-5 lg:grid-cols-[1.35fr_1fr] lg:items-start">
       {/* SVG mind-map */}
-      <div className="relative overflow-hidden rounded-lg border border-[var(--color-fd-border)] bg-[var(--color-fd-card)]/65 p-4 shadow-[0_0_48px_rgba(0,214,122,0.08)]">
+      <div className="relative overflow-hidden rounded-lg border border-[var(--color-fd-border)] bg-[var(--color-fd-card)]/65 p-4 shadow-[0_0_48px_rgba(0,214,122,0.08)] lg:self-start">
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_52%_56%,rgba(0,214,122,0.12),transparent_34%)]" />
         {/* Top chrome — mimics the live web header */}
         <div className="relative mb-2 flex items-center gap-2 border-b border-[var(--color-fd-border)] pb-2">
@@ -242,7 +408,7 @@ export function AttackGraphDemo() {
         </div>
 
         <svg
-          viewBox="0 0 700 440"
+          viewBox="0 0 700 418"
           className="relative h-auto w-full"
           aria-label="Attack graph demo"
         >
@@ -423,76 +589,149 @@ export function AttackGraphDemo() {
           </div>
         </div>
 
-        <div className="rounded-lg border border-[var(--color-fd-border)] bg-[var(--color-fd-card)]/65 p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="pixel-label text-[var(--color-fd-primary)]">
-              ▸ belief map
-            </span>
-            <span className="pixel-label text-[var(--color-fd-muted-foreground)]">
-              live scratchpad
-            </span>
-          </div>
-          <svg
-            viewBox="0 0 430 240"
-            className="h-auto w-full"
-            aria-label="Belief map demo"
-          >
-            <g fill="none" stroke="rgba(140,155,145,0.24)" strokeWidth={1.2}>
-              {beliefEdges.map(([from, to]) => {
-                const a = beliefById(from);
-                const b = beliefById(to);
+        <div className="overflow-hidden rounded-lg border border-[var(--color-fd-border)] bg-[var(--color-fd-card)]/65">
+          <div className="relative h-[300px] bg-[var(--color-fd-background)]">
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-1.5 bg-gradient-to-b from-[var(--color-fd-card)]/90 to-transparent px-3 py-2">
+              <span className="size-2 rounded-full bg-[var(--color-fd-primary)] shadow-[0_0_6px_var(--color-fd-primary)]" />
+              <span className="size-2 rounded-full bg-[var(--color-fd-muted-foreground)]/40" />
+              <span className="size-2 rounded-full bg-[var(--color-fd-muted-foreground)]/40" />
+              <span className="pixel-label ml-1 text-[var(--color-fd-muted-foreground)]">
+                belief map ▸ live
+              </span>
+            </div>
+
+            <svg
+              viewBox="0 0 560 300"
+              className="absolute inset-0 h-full w-full"
+              aria-label="Belief map demo"
+            >
+              <defs>
+                <marker
+                  id="belief-demo-arrow"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="4"
+                  markerHeight="4"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill={MUTED} opacity="0.72" />
+                </marker>
+              </defs>
+              <g fill="none" strokeLinecap="round">
+                {beliefEdges.map((edge) => {
+                  const a = beliefById(edge.from);
+                  const b = beliefById(edge.to);
+                  const color = beliefEdgeColor(edge.kind);
+                  return (
+                    <path
+                      key={`${edge.from}-${edge.to}`}
+                      d={`M ${a.x} ${a.y} C ${(a.x + b.x) / 2} ${a.y}, ${(a.x + b.x) / 2} ${b.y}, ${b.x} ${b.y}`}
+                      stroke={color}
+                      strokeWidth={edge.kind === "audit" ? 1.3 : 2.2}
+                      opacity={edge.kind === "audit" ? 0.36 : 0.78}
+                      markerEnd="url(#belief-demo-arrow)"
+                    />
+                  );
+                })}
+              </g>
+              {beliefs.map((belief) => {
+                const color = beliefColor(belief.tone);
                 return (
-                  <path
-                    key={`${from}-${to}`}
-                    d={`M ${a.x} ${a.y} C ${(a.x + b.x) / 2} ${a.y}, ${(a.x + b.x) / 2} ${b.y}, ${b.x} ${b.y}`}
-                  />
+                  <g key={belief.id}>
+                    <g
+                      className={
+                        belief.tone === "primary"
+                          ? "graph-demo-belief-pulse"
+                          : undefined
+                      }
+                    >
+                      {beliefShape(belief, color)}
+                    </g>
+                    <text
+                      x={belief.x + belief.size + 7}
+                      y={belief.y + 3}
+                      fill={belief.kind === "attempt" ? MUTED : FG}
+                      fontSize={8.5}
+                      fontFamily="var(--font-pixel)"
+                      opacity={belief.kind === "attempt" ? 0.72 : 0.9}
+                    >
+                      {belief.label}
+                    </text>
+                  </g>
                 );
               })}
-            </g>
-            {beliefs.map((belief) => {
-              const color = beliefColor(belief.tone);
-              return (
-                <g key={belief.id}>
-                  <circle
-                    cx={belief.x}
-                    cy={belief.y}
-                    r={belief.tone === "primary" ? 17 : 14}
-                    fill="var(--color-fd-background)"
-                    stroke={color}
-                    strokeWidth={belief.tone === "primary" ? 2 : 1.3}
-                    className={
-                      belief.tone === "primary"
-                        ? "graph-demo-belief-pulse"
-                        : undefined
-                    }
-                  />
-                  <text
-                    x={belief.x}
-                    y={belief.y + 32}
-                    textAnchor="middle"
-                    fill={FG}
-                    fontSize={10}
-                    fontFamily="var(--font-pixel)"
-                  >
-                    {belief.label}
-                  </text>
-                  <text
-                    x={belief.x}
-                    y={belief.y + 46}
-                    textAnchor="middle"
-                    fill={color}
-                    fontSize={10}
-                    fontFamily="var(--font-pixel)"
-                  >
-                    {belief.value}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
+            </svg>
+
+            <div className="absolute bottom-3 right-3 z-10 rounded border border-[var(--color-fd-border)] bg-[var(--color-fd-card)]/90 p-2 shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
+              <div className="grid grid-cols-[1fr_1fr] gap-x-4 gap-y-1">
+                <div className="pixel-label col-span-1 text-[var(--color-fd-primary)]">
+                  nodes
+                </div>
+                <div className="pixel-label col-span-1 text-[var(--color-fd-primary)]">
+                  edges
+                </div>
+                <BeliefLegendNode kind="hypothesis" label="Hypothesis" />
+                <BeliefLegendEdge color={PHOSPHOR} label="supports" />
+                <BeliefLegendNode kind="evidence" label="Evidence" />
+                <BeliefLegendEdge color={RED} label="refutes" />
+                <BeliefLegendNode kind="frontier" label="Frontier" />
+                <BeliefLegendEdge color={AMBER} label="expands" />
+                <BeliefLegendNode kind="strategy" label="Strategy" />
+                <BeliefLegendEdge color={MUTED} label="audit" />
+                <BeliefLegendNode kind="target" label="Target" />
+                <span />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function BeliefLegendNode({
+  kind,
+  label,
+}: {
+  kind: BeliefNodeSpec["kind"];
+  label: string;
+}) {
+  const sample: BeliefNodeSpec = {
+    id: label,
+    label,
+    x: 7,
+    y: 7,
+    kind,
+    tone:
+      kind === "frontier"
+        ? "amber"
+        : kind === "strategy"
+          ? "purple"
+          : kind === "target" || kind === "evidence"
+            ? "primary"
+            : "text",
+    size: kind === "target" ? 6 : 5,
+  };
+  return (
+    <span className="inline-flex items-center gap-1.5 font-mono text-[10px] text-[var(--color-fd-foreground)]">
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+        {beliefShape(sample, beliefColor(sample.tone))}
+      </svg>
+      {label}
+    </span>
+  );
+}
+
+function BeliefLegendEdge({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 font-mono text-[10px] text-[var(--color-fd-foreground)]">
+      <span
+        className="inline-block h-0.5 w-4 rounded"
+        style={{ backgroundColor: color }}
+      />
+      {label}
+    </span>
   );
 }
 
