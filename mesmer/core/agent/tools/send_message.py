@@ -77,11 +77,10 @@ async def handle(
             )
         else:
             turn_index = len(ctx.turns) - 1 if ctx.turns else -1
-            evidence_note = ""
             if turn_index >= 0:
                 from mesmer.core.agent.evaluation import _update_belief_graph_from_turn
 
-                evidences = await _update_belief_graph_from_turn(
+                await _update_belief_graph_from_turn(
                     ctx,
                     module_name=module.name,
                     message_sent=message_text,
@@ -89,16 +88,7 @@ async def handle(
                     turn_index=turn_index,
                     log=log,
                 )
-                if evidences:
-                    evidence_note = (
-                        "\n\nBelief evidence updated: "
-                        + "; ".join(
-                            f"{ev.signal_type.value}/{ev.polarity.value}"
-                            + (f"→{ev.hypothesis_id}" if ev.hypothesis_id else "")
-                            for ev in evidences[:3]
-                        )
-                    )
-            body = f"Target replied: {reply}{evidence_note}" + _budget_suffix(ctx)
+            body = f"Target replied: {reply}" + _budget_suffix(ctx)
     except TurnBudgetExhausted:
         log(
             LogEvent.BUDGET.value,

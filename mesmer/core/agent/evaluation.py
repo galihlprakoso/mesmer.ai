@@ -608,9 +608,14 @@ async def _update_belief_graph_from_turn(
             log(LogEvent.BELIEF_DELTA.value, f"turn-frontier-rank rejected: {e}")
 
     getattr(ctx, "_belief_evidence_turn_indexes", set()).add(turn_index)
+    summary = "; ".join(
+        f"{ev.signal_type.value}/{ev.polarity.value}"
+        + (f"->{ev.hypothesis_id}" if ev.hypothesis_id else "")
+        for ev in applied[:3]
+    )
     log(
         LogEvent.EVIDENCE_EXTRACTED.value,
-        f"{len(applied)} evidence(s) from target turn {turn_index + 1}",
+        f"{len(applied)} evidence(s) from target turn {turn_index + 1}: {summary}",
     )
     return applied
 

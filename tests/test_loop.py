@@ -1030,6 +1030,43 @@ class TestFreshSessionFraming:
         assert "4/5 sends remaining" in joined
 
     @pytest.mark.asyncio
+    async def test_send_tool_result_does_not_include_belief_update_bookkeeping(self):
+        """BeliefGraph updates are framework telemetry, not target replies.
+
+        The next LLM call should see a clean send_message result containing
+        the target response and budget only; evidence extraction details live
+        in logs / BeliefMap.
+        """
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("send_message", {"message": "probe 1"})]
+                )),
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "done"})]
+                )),
+            ],
+            target_replies=["ack"],
+            max_turns=5,
+            captured_messages=captured,
+        )
+
+        with patch(
+            "mesmer.core.agent.evaluation._update_belief_graph_from_turn",
+            new=AsyncMock(return_value=[object()]),
+        ):
+            await run_react_loop(_make_module(), ctx, "test", log=None)
+
+        tool_results = [
+            m.get("content", "") for m in captured[1] if m.get("role") == "tool"
+        ]
+        joined = "\n".join(tool_results)
+        assert "Target replied: ack" in joined
+        assert "Belief evidence updated" not in joined
+        assert "hidden_instruction_fragment" not in joined
+
+    @pytest.mark.asyncio
     async def test_pipeline_error_not_framed_as_refusal(self):
         """When the target emits a timeout/gateway error, the tool_result
         must NOT say 'Target replied' — that misleads the attacker into
