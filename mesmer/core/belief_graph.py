@@ -1,6 +1,6 @@
 """Belief Attack Graph — typed planner state for mesmer's red-team agent.
 
-The legacy :class:`mesmer.core.graph.AttackGraph` is a flat execution log:
+The :class:`mesmer.core.graph.AttackGraph` is a flat execution log:
 every module run becomes one node with a score and a status. That answers
 "what did we try?" but not "what do we believe about this target?" — the
 question that should drive next-move selection.
@@ -26,7 +26,7 @@ Persistence sidecar — distinct from ``graph.json``::
     ~/.mesmer/targets/{hash}/
     ├── belief_graph.json     # current snapshot
     ├── belief_deltas.jsonl   # append-only delta log
-    └── graph.json            # legacy AttackGraph (untouched in Session 1)
+    └── graph.json            # AttackGraph execution trace
 
 Session 1 ships this module + extractor + updater + context compiler as
 a parallel system. Session 2 replaces the planner's read of
@@ -256,11 +256,11 @@ class Evidence(BeliefNode):
 class Attempt(BeliefNode):
     """One module execution against the target.
 
-    Replaces the role of the legacy ``AttackNode`` in attempt-recording,
+    Replaces the role of ``AttackNode`` in planner attempt-recording,
     but with explicit links to the hypotheses tested, the strategy
     used, and the evidence observed. The judge_score and the verbatim
-    transcript are kept here so the audit story is identical to the
-    legacy graph; what changes is what the planner reads downstream
+    transcript are kept here so the audit story matches the execution
+    graph; what changes is what the planner reads downstream
     (frontier ranking now operates on hypotheses + experiments, not on
     raw attempt history).
     """

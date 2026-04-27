@@ -212,14 +212,6 @@ def extract_trial_telemetry(
 
     # Only this run's nodes, in timestamp order — sibling runs persisted
     # on the same graph must not bleed into the trace.
-    #
-    # FRONTIER nodes (score=0 placeholders for "next move" suggestions) are
-    # EXCLUDED from the attempt-level telemetry. They're unevaluated —
-    # counting them as "attempts with score 0" would tank the median and
-    # mis-attribute the ladder (a leader that enqueues T2 frontier items
-    # during its T0 run would look like it did T2 work). Frontier nodes
-    # still land in the graph snapshot; they just don't count as attempts.
-    #
     # LEADER-VERDICT nodes are also excluded — the leader is a module
     # whose own execution is recorded at run end (source=LEADER). It's
     # not an attack attempt in the TAPER ladder sense: including it
@@ -235,7 +227,7 @@ def extract_trial_telemetry(
         ),
         key=lambda n: n.timestamp,
     )
-    nodes = [n for n in all_run_nodes if not n.is_frontier]
+    nodes = all_run_nodes
 
     modules_called = [n.module for n in nodes]
     tier_sequence = [registry.tier_of(m) for m in modules_called]
@@ -254,7 +246,7 @@ def extract_trial_telemetry(
             # terminal tools like ``jq`` without blowing up an event row.
             "reason": (n.reflection or "")[:240],
         }
-        for n in nodes if n.is_dead
+        for n in nodes if n.status == "failed"
     ]
 
     winning_module, winning_tier = _resolve_winning_module(

@@ -18,7 +18,7 @@ attack can't adapt to a defense it hasn't seen. Mesmer treats attack
 generation as a **search problem over cognitive space**: explore,
 exploit, prune, remember.
 
-<Mermaid caption="The top-level loop. Every UPDATE step writes to two graphs in parallel — the legacy attack graph (attempt history) and the typed belief graph (planner state)." chart={`
+<Mermaid caption="The top-level loop. Every UPDATE step writes to two graphs in parallel — the attack graph execution trace and the typed belief graph planner state." chart={`
 flowchart LR
   P([PLAN]) --> E([EXECUTE])
   E --> J([JUDGE])
@@ -35,13 +35,11 @@ flowchart LR
   class G,B store;
 `} />
 
-Every module execution is recorded as an `AttackNode` — including the
-synthesised executive's run-end verdict. The frontier proposer
-respects the **TAPER tier ladder** (T0 naive → T1 structural → T2
-cognitive → T3 composed), so simple moves get tried before expensive
-ones, and wins are attributable to the cheapest technique that worked.
+Every module execution is recorded as an `AttackNode`. The executive
+node is created at run start, manager modules attach under it, and
+nested sub-module calls attach under the module that dispatched them.
 
-Alongside that legacy log, mesmer maintains a typed
+Alongside that execution log, mesmer maintains a typed
 [**belief graph**](/docs/concepts/belief-graph): weakness hypotheses
 gain or lose confidence as the judge model extracts structured
 evidence from each target reply, and a deterministic
@@ -55,7 +53,7 @@ state live.
 <ModuleGrid />
 
 21 shipped modules: 4 managers (`system-prompt-extraction`,
-`tool-extraction`, `exploit-analysis`, `exploit-executor`), 1
+`tool-extraction`, `indirect-prompt-injection`, `email-exfiltration-proof`), 1
 profiler, 1 planner, 9 field-level techniques (T0/T1 — payload-shape
 and structural injection, including function-calling probes), 6
 cognitive / linguistic / psychological techniques (T2). All YAML,

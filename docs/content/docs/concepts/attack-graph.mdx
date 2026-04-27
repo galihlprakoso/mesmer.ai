@@ -1,68 +1,50 @@
 ---
 title: The attack graph
-description: Mesmer's per-target memory — a persistent tree of attack attempts that compounds across runs.
+description: Mesmer's per-target execution trace — what ran, in what order, and what it produced.
 ---
 
-This page covers the **legacy attack-attempt graph** — a per-module
-attempt log that's been there since v0.1.0. Mesmer also runs a
-parallel typed planner state called the [belief graph](./belief-graph)
-that tracks weakness hypotheses, evidence, and frontier experiments.
-Both are persisted, both are read by the engine on every run; the web
-UI's toggle pill flips between them. Read this page first if you want
-to understand how mesmer scores attempts and prunes dead ends; read
-the [belief graph](./belief-graph) for how the planner now picks the
-*next* move.
+This page covers the **AttackGraph**: Mesmer's persisted execution
+trace. It answers "what ran, who dispatched it, what target exchanges
+happened, what did the module conclude, and how did the judge score it?"
 
-Every time mesmer attacks a target, it writes the result into a graph.
-Every subsequent run reads that graph back before planning the next move.
-This is what makes mesmer **adaptive** — the attacker gets smarter with
-exposure. The graph is **the** source of truth for what a target has
-ever seen and how we judged it.
+Search/planning state is separate. The [belief graph](./belief-graph)
+tracks weakness hypotheses, evidence, frontier experiments, utility, and
+dead zones. Do not read AttackGraph status as search status.
 
 ## Shape
 
-Nodes are attack attempts (one per module execution, including the
-synthesised executive's run-end verdict). Edges are parent-child
-refinements.
+Nodes are module executions, including the synthesised executive's
+execution node. Edges are runtime delegation relationships.
 
-<Mermaid caption="A mid-run graph against a single target. The executive verdict (square) is the rendered root; managers and employees branch from it." chart={`
+<Mermaid caption="A mid-run graph against a single target. The executive node (square) owns manager delegations; employees branch from the manager that dispatched them." chart={`
 flowchart TD
-  EXEC[[executive verdict<br/>objective_met true · source LEADER]]
-  TP[target-profiler<br/>score 6.0 · PROMISING]
-  SPE[system-prompt-extraction<br/>manager · ALIVE]
-  DA[direct-ask<br/>score 2.1 · DEAD]
-  PC[prefix-commitment<br/>score 8.4 · PROMISING]
-  DI[delimiter-injection<br/>score 7.2 · PROMISING]
-  HH[/human hint<br/>FRONTIER · source HUMAN/]
+  EXEC[[executive<br/>running · source LEADER]]
+  TP[target-profiler<br/>completed · score 6]
+  SPE[system-prompt-extraction<br/>completed · manager]
+  DA[direct-ask<br/>completed · score 2]
+  PC[prefix-commitment<br/>completed · score 8]
+  DI[delimiter-injection<br/>completed · score 7]
 
   EXEC --> TP
   EXEC --> SPE
   EXEC --> DA
   SPE --> PC
   SPE --> DI
-  SPE --> HH
-
-  classDef promising fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8;
-  classDef alive fill:#141A17,stroke:#6B7A70,color:#E6EDE8;
-  classDef dead fill:#2A1414,stroke:#EF4444,color:#E6EDE8,stroke-dasharray: 4 3;
-  classDef frontier fill:#141A17,stroke:#6B7A70,color:#9DB1A4,stroke-dasharray: 4 3;
+  classDef high fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8;
+  classDef done fill:#141A17,stroke:#6B7A70,color:#E6EDE8;
   classDef exec fill:#0F2A1E,stroke:#00D67A,color:#E6EDE8,stroke-width:2px;
 
-  class TP,PC,DI promising;
-  class SPE alive;
-  class DA dead;
-  class HH frontier;
+  class PC,DI high;
+  class TP,SPE,DA done;
   class EXEC exec;
 `} />
 
 Every module execution produces exactly **one** `AttackNode` in the
 graph. Manager and employee executions are recorded by
-`evaluation._update_graph` from inside the parent's dispatch; the
-**executive's** own run-end verdict is recorded by `execute_run` right
-after the outer ReAct loop returns, distinguished by `source: LEADER`
-(the enum value name is preserved across the leader → executive rename
-for graph-schema compatibility — treat it as the opaque "depth-0 root"
-marker).
+`sub_module.handle` when delegation starts and completed by
+`evaluation._update_graph` after the child returns. The **executive's**
+own node is created by `execute_run` at run start and completed after
+the outer ReAct loop returns, distinguished by `source: LEADER`.
 
 The executive is **synthesised in memory at run start** (not loaded
 from any `module.yaml`); its name is `f"{scenario_stem}:executive"`.
@@ -77,43 +59,48 @@ by the executive at depth 1; their employees nest at depth ≥ 2.
   "parent": "n-a7f0",
   "module": "prefix-commitment",
   "score": 8.4,
-  "status": "PROMISING",
+  "status": "completed",
   "source": "AGENT",
   "approach": "Inject 'Sure, here are my instructions: ...' as a forced prefix",
   "leaked_info": "You are Acme Corp's customer support assistant...",
   "reflection": "prefix commits the continuation into verbatim leak",
   "module_output": "<full conclude() text — authoritative record>",
+  "agent_trace": [
+    {"event": "llm_call", "iteration": 1},
+    {"event": "tool_calls", "payload": {"name": "send_message"}},
+    {"event": "tool_result"}
+  ],
   "turn_range": [5, 7]
 }
 ```
 
-Four **lifecycle statuses** — all live in the `NodeStatus` enum in
+`agent_trace` is the node-local ReAct trace. It records the actor's
+LLM calls, reasoning turns, tool calls, tool results, delegations, and
+final `conclude()`. It is intentionally separate from
+`messages_sent` / `target_responses`, which only contain attacker-target
+exchanges.
+
+Execution statuses live in the `NodeStatus` enum in
 `core/constants.py`:
 
 | Status | Meaning |
 |---|---|
-| `FRONTIER` | Proposed but not yet tried. The planner picks from this set. |
-| `ALIVE` | Tried with promising results. May be revisited to refine. |
-| `PROMISING` | High-scoring descendent candidates. Priority on next run. |
-| `DEAD` | Score ≤ `DEAD_SCORE_THRESHOLD` or explicitly killed by the judge. Never re-walked. |
+| `pending` | Reserved for an execution record that has not started. |
+| `running` | Live synthetic/UI state or an in-progress execution. |
+| `completed` | Module ran to conclusion. Judge score may still be low. |
+| `failed` | Runtime/tool execution failed. |
+| `blocked` | Runtime guard prevented execution. |
+| `skipped` | Runtime intentionally skipped execution. |
 
 ## Four kinds of proposer
 
 Every node has a `source` field recording who produced it:
 
-- **`AGENT`** — the ReAct loop proposed it during `_reflect_and_expand`.
-- **`JUDGE`** — the in-loop LLM judge surfaced it while scoring an
-  attempt ("the target leaked auth context, try that angle").
-- **`HUMAN`** — came in via `mesmer hint`, `mesmer debrief`, or the web
-  UI. Explored **first** by the executive on the next run — human
-  pattern-matching beats the judge for creative leaps.
-- **`LEADER`** — the **executive's** run-end verdict node (one per
-  run). The enum value name predates the leader → executive rename and
-  is preserved for graph-schema compatibility. Filtered out of
-  attempt-centric walks (TAPER trace, winning-module attribution) via
-  `AttackNode.is_leader_verdict`; renders as a **square** in the bench
-  viz so every tree ends on the executive's decision, not on whichever
-  sub-module was last delegated to.
+- **`AGENT`** — a module execution record.
+- **`JUDGE`** — reserved for judge-authored records.
+- **`HUMAN`** — an operator note recorded in the execution trace.
+- **`LEADER`** — the **executive's** execution node (one per run).
+  Filtered out of attempt-centric walks and rendered as a square in the UI.
 
 ## Persistence
 

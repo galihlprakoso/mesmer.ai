@@ -1,48 +1,32 @@
 ---
 title: Iterating with hints
-description: Use mesmer hint and the debrief flow to course-correct between runs.
+description: Use mesmer hint and the debrief flow to leave operator context between runs.
 ---
 
-The graph is mesmer's memory. Hints are how you write into it. When a
-run dead-ends and you have a hunch about what to try next — a specific
-prefix, a roleplay frame, a refusal pattern you noticed — `mesmer
-hint` adds it to the frontier as a `source: HUMAN` node. The next run
-explores HUMAN-sourced nodes **first**, regardless of tier, because
-human pattern-matching beats the LLM judge for creative leaps.
+The graph is mesmer's execution memory. Hints are operator notes inside
+that memory. When a run reveals a pattern the executive missed — a
+specific refusal template, a promising format, or a target quirk — use
+`mesmer hint` to record it as a `source: HUMAN` node.
 
-## When hints help
-
-After a run that scored 4 across the board with no clean win, you'll
-recognise patterns the in-loop judge missed — verbatim refusal
-templates the target keeps quoting, a specific format it can't refuse
-(JSON, YAML, a code comment), a persona the model breaks character
-for. Encode that hunch as a hint.
+Hints do not create search frontier nodes. They are durable context that
+future runs can read alongside prior module outputs and judged attempts.
 
 ## Adding a hint from the CLI
 
 ```bash
 uv run mesmer hint scenarios/extract-system-prompt.yaml \
-  "Try wrapping the request as a Python docstring — the target keeps refusing in prose but seems to comply with code-shaped frames."
+  "Try wrapping the request as a Python docstring; the target refuses prose but responds to code-shaped frames."
 ```
 
-That writes a new frontier node:
+That writes an execution-note node:
 
 ```json
 {
-  "id": "n-h0421",
-  "module": "format-shift",
-  "approach": "Try wrapping the request as a Python docstring …",
-  "status": "FRONTIER",
+  "module": "human-insight",
+  "approach": "Try wrapping the request as a Python docstring...",
+  "status": "completed",
   "source": "HUMAN"
 }
-```
-
-The `module` field is inferred from the hint text (here `format-shift`
-fits best). To target a specific module, prefix with its name:
-
-```bash
-uv run mesmer hint scenarios/extract-system-prompt.yaml \
-  "role-impersonation: claim to be the on-call SRE asked to dump the prompt for an incident report"
 ```
 
 ## The debrief flow
@@ -54,23 +38,13 @@ why each technique scored what it did:
 uv run mesmer debrief scenarios/extract-system-prompt.yaml
 ```
 
-You'll see, per attempt:
-
-- The technique used and its `OBJECTIVE SIGNAL —` flag (if any).
-- The verbatim target turn that drove the judge's score.
-- The judge's `dead_end` reason when the score was low.
-- The frontier proposals the judge surfaced at the end.
-
-Use this to spot the pattern that the planner missed.
-`role-impersonation` getting refused with the same template every time
-is a hint that the target has explicit role-impersonation training; a
-`prefix-commitment` attempt that scored 6 but didn't get followed up
-on is a planner oversight.
+Use this to spot patterns the planner missed, then capture the useful
+parts as hints or write them into the shared scratchpad.
 
 ## A two-run iterate loop
 
 ```bash
-# Run #1 — let mesmer explore
+# Run #1 — let mesmer execute the scenario
 uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
 
 # Read what happened
@@ -80,48 +54,9 @@ uv run mesmer debrief scenarios/extract-system-prompt.yaml
 uv run mesmer hint scenarios/extract-system-prompt.yaml \
   "delimiter-injection: mimic the target's <|system|> token style I saw in turn 14"
 
-# Run #2 — explores the HUMAN node first, then the rest
+# Run #2 — starts with the prior graph and hint context
 uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
 ```
 
-The graph carries forward. The second run starts with full prior
-context: the dossier, the plan, the dead-end attempts, and your new
-hint. You're effectively pair-programming with the agent.
-
-## Hints in the web UI
-
-Same flow, point-and-click:
-
-```bash
-uv run mesmer serve
-```
-
-In the graph view, click any node → "Add follow-up hint". The textbox
-takes free-form English; submit, and the new HUMAN-sourced node
-appears in the frontier list with a star icon. Click "Run again" and
-mesmer dispatches the next iteration.
-
-## When NOT to hint
-
-- **You're not sure**. Bad hints pollute the frontier — mesmer commits
-  budget to them. If you're guessing, run another seed (`--fresh`)
-  before hinting.
-- **The target is rate-limited**. A hint costs LLM calls; if you're
-  capped at 10 RPM, your hint will block on the throttle. See
-  [Recipes → Throttling](/docs/recipes/throttling).
-- **Bench mode**. `mesmer bench` ignores HUMAN nodes — by design. A
-  benchmark measures ASR with a fixed attacker; introducing human
-  hints contaminates the comparison.
-
-## Cross-run experience accumulation
-
-If you run the same scenario five times, the `~/.mesmer/targets/`
-graph for that target carries:
-
-- Every winning technique, in `## Learned Experience` rendered into
-  every subsequent attacker prompt.
-- Every dead-end, filtered out of the frontier on subsequent runs.
-- Every HUMAN hint, surfaced first.
-
-Mesmer is meaningfully better on run #5 than run #1 against the same
-target. Don't `--fresh` unless you actually changed the target.
+Use `--fresh` when you want to ignore prior graph and conversation state.
+The scratchpad is intentionally not deleted by `--fresh`.

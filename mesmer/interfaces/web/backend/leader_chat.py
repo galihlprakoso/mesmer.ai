@@ -59,7 +59,7 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "list_attempts",
             "description": (
-                "List attack-graph nodes (excluding root + frontier proposals). "
+                "List attack-graph execution nodes (excluding root). "
                 "Filter by status/module/source/score/run_id. Returns up to "
                 f"{MAX_LIST_ATTEMPTS} entries, newest first. Use this to scan "
                 "what's been tried and how it went before drilling into one."
@@ -67,7 +67,7 @@ TOOL_SCHEMAS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "status":   {"type": "string", "description": "alive | promising | dead"},
+                    "status":   {"type": "string", "description": "pending | running | completed | failed | blocked | skipped"},
                     "module":   {"type": "string", "description": "module name to filter by"},
                     "source":   {"type": "string", "description": "agent | human | judge | leader"},
                     "min_score": {"type": "integer", "description": "lower bound (inclusive)"},
@@ -241,7 +241,7 @@ def _run_list(memory: TargetMemory, limit: int) -> list[dict]:
         verdict_node = verdicts.get(rid)
         if verdict_node is not None:
             verdict = (
-                "objective_met" if verdict_node.status == "promising"
+                "objective_met" if verdict_node.score >= 10
                 else "no_consolidation"
             )
         else:
@@ -306,8 +306,6 @@ def dispatch_tool(name: str, args: dict, memory: TargetMemory) -> dict:
         nodes = []
         for n in graph.nodes.values():
             if not n.module or n.module == "root":
-                continue
-            if n.status == "frontier":
                 continue
             if status and n.status != status:
                 continue

@@ -106,8 +106,10 @@ system_prompt: |
 
 sub_modules: []
 
-parameters:
-  allow_target_access: false
+tool_policy:
+  dispatch_submodules: false
+  builtin:
+    - conclude
 
 # Planning is a pure-reasoning step; never touches the target. No reset
 # needed, no sessions to protect.

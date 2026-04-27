@@ -40,7 +40,7 @@ sequenceDiagram
   E->>M: dispatch system-prompt-extraction
   Note over M: Phase 0 — RECON
   M->>TP: delegate
-  TP-->>M: dossier (scratchpad['target-profiler'])
+  TP-->>M: dossier (module_outputs['target-profiler'])
 
   Note over M: Phase 1 — PLAN
   M->>AP: delegate (see_siblings: true)
@@ -54,7 +54,7 @@ sequenceDiagram
       M->>AP: replan
     end
   end
-  M-->>E: write-up (scratchpad['system-prompt-extraction'])
+  M-->>E: write-up (module_outputs['system-prompt-extraction'])
 
   Note over E: Executive evaluates the manager's write-up
   E->>E: conclude(objective_met=true) when evidence is clean

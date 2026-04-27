@@ -21,8 +21,8 @@
    *   - Attempt nodes are small dots (de-emphasised audit trail).
    *   - Target node is a star.
    *
-   * Distinct from `AttackGraph.svelte` which renders the legacy
-   * `AttackGraph` as a hierarchical tree of attempt history. The belief
+   * Distinct from `AttackGraph.svelte` which renders `AttackGraph` as a
+   * hierarchical tree of execution history. The belief
    * map answers "what does the planner believe right now?"; the attack
    * graph answers "what did we try?".
    */

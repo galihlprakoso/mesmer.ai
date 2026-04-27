@@ -1,7 +1,7 @@
 """``ask_human`` — executive's operator question tool.
 
-Only wired into the attacker's tool list when the running module is the
-synthesized executive (``ModuleConfig.is_executive=True``) AND a
+Only wired into the attacker's tool list when the running actor is the
+synthesized executive (``ActorRole.EXECUTIVE``) AND a
 :class:`HumanQuestionBroker` is attached. Manager and employee modules
 never see this tool — they run heads-down and report back via
 ``conclude()``. Schema + handler live here so the LLM-facing description
@@ -16,9 +16,9 @@ from mesmer.core.agent.tools.base import tool_result
 from mesmer.core.constants import LogEvent, ToolName
 
 if TYPE_CHECKING:
+    from mesmer.core.actor import ReactActorSpec
     from mesmer.core.agent.context import Context
     from mesmer.core.agent.engine import LogFn
-    from mesmer.core.module import ModuleConfig
 
 
 NAME = ToolName.ASK_HUMAN
@@ -66,7 +66,7 @@ SCHEMA = {
 
 async def handle(
     ctx: Context,
-    module: ModuleConfig,
+    module: "ReactActorSpec",
     call,
     args: dict,
     log: LogFn,

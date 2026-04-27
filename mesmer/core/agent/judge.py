@@ -1,8 +1,8 @@
-"""In-loop LLM judge + approach refinement + legacy frontier generation.
+"""In-loop LLM judge and approach refinement.
 
 Inspired by TAP (Tree of Attacks with Pruning) evaluator pattern. Runs as a
 separate LLM call after each module execution. Scores the attempt 1-10 and
-extracts insights used by the reflection step.
+extracts insights used by belief updates and leader decisions.
 
 Prompt text (``JUDGE_SYSTEM``, ``JUDGE_USER``, etc.) is loaded from
 ``mesmer.core.agent.prompts`` — see the ``.prompt.md`` files next to that
@@ -22,7 +22,6 @@ from mesmer.core.agent.prompts import (
     JUDGE_SYSTEM,
     JUDGE_USER,
     REFINE_APPROACH_PROMPT,
-    REFLECT_PROMPT,
 )
 from mesmer.core.constants import CompletionRole, ScenarioMode
 
@@ -331,12 +330,10 @@ async def refine_approach(
     judge_result: JudgeResult | None = None,
     transcript_tail: str = "",
 ) -> str:
-    """Generate the approach one-liner for a graph-chosen module.
+    """Generate the approach one-liner for a planner-chosen module.
 
-    The LLM has no say in *which* technique runs (that's
-    :func:`AttackGraph.propose_frontier`'s job); it only writes the *opener*
-    for the already-selected technique. This removes the class of failures
-    where the LLM re-suggested techniques the graph had already excluded.
+    The LLM has no say in *which* technique runs; it only writes the *opener*
+    for an already-selected technique.
 
     ``transcript_tail`` (CONTINUOUS mode only) is a short render of the last
     handful of turns in the live conversation. When provided, the refinement
@@ -395,52 +392,6 @@ async def refine_approach(
     return str(data.get("approach", "")).strip()[:200]
 
 
-async def generate_frontier(
-    ctx: "Context",
-    judge_result: JudgeResult,
-    module_name: str,
-    approach: str,
-    dead_ends: str,
-    explored: str,
-    available_modules: list[str],
-) -> list[dict]:
-    """
-    Generate frontier nodes (suggested next moves) from a judge evaluation.
-
-    Returns list of dicts: [{"module": ..., "approach": ..., "reasoning": ...}]
-    """
-    user_content = REFLECT_PROMPT.format(
-        score=judge_result.score,
-        leaked_info=judge_result.leaked_info,
-        promising_angle=judge_result.promising_angle,
-        dead_end=judge_result.dead_end,
-        suggested_next=judge_result.suggested_next,
-        module=module_name,
-        approach=approach,
-        dead_ends=dead_ends or "(none yet)",
-        explored=explored or "(none yet)",
-    )
-
-    # Append available modules hint
-    user_content += f"\n\nAvailable techniques: {', '.join(available_modules)}"
-
-    try:
-        response = await ctx.completion(
-            messages=[
-                {"role": "system", "content": "You generate attack strategy suggestions. Respond with valid JSON array only."},
-                {"role": "user", "content": user_content},
-            ],
-            role=CompletionRole.JUDGE,
-        )
-    except Exception:
-        return []
-
-    suggestions = parse_llm_json(response.choices[0].message.content or "", default=[])
-    if isinstance(suggestions, list):
-        return suggestions[:3]  # cap at 3
-    return []
-
-
 __all__ = [
     "JudgeResult",
     "_compose_judge_system",
@@ -448,5 +399,4 @@ __all__ = [
     "_format_module_result_section",
     "evaluate_attempt",
     "refine_approach",
-    "generate_frontier",
 ]

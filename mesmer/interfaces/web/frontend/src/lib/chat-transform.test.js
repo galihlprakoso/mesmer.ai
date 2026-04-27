@@ -14,7 +14,7 @@ function mkGraph(nodes) {
       score: n.score ?? 0,
       leaked_info: n.leaked_info ?? '',
       reflection: '',
-      status: n.status ?? 'alive',
+      status: n.status ?? 'completed',
       children: [],
       depth: 0,
       timestamp: n.timestamp ?? 0,
@@ -34,33 +34,20 @@ describe('messagesFromGraph', () => {
   it('does NOT surface explored attempt nodes (those live in the graph view)', () => {
     const g = mkGraph([
       { id: 'root', module: 'root' },
-      { id: 'n1', module: 'foot-in-door', status: 'promising', score: 7,
+      { id: 'n1', module: 'foot-in-door', status: 'completed', score: 7,
         approach: 'small ask', leaked_info: 'philosophy', timestamp: 100 },
-      { id: 'n2', module: 'anchoring', status: 'dead', score: 2,
+      { id: 'n2', module: 'anchoring', status: 'completed', score: 2,
         approach: 'lowball', timestamp: 110 },
     ])
     expect(messagesFromGraph(g)).toEqual([])
   })
 
-  it('does NOT surface agent-source frontier (those are ideas, not chat)', () => {
+  it('does NOT surface non-chat graph nodes', () => {
     const g = mkGraph([
       { id: 'root', module: 'root' },
-      { id: 'f1', module: 'foo', status: 'frontier', source: 'agent' },
+      { id: 'n1', module: 'foo', status: 'completed', source: 'agent' },
     ])
     expect(messagesFromGraph(g)).toEqual([])
-  })
-
-  it('still surfaces legacy human-source frontier (backfill for old graphs)', () => {
-    const g = mkGraph([
-      { id: 'root', module: 'root' },
-      { id: 'h1', module: 'human-insight', status: 'frontier', source: 'human',
-        approach: 'try calendar API errors', timestamp: 200 },
-    ])
-    const msgs = messagesFromGraph(g)
-    expect(msgs).toHaveLength(1)
-    expect(msgs[0].kind).toBe('human')
-    expect(msgs[0].sender).toBe('human')
-    expect(msgs[0].text).toBe('try calendar API errors')
   })
 })
 
@@ -123,8 +110,8 @@ describe('buildChatMessages', () => {
   it('chat is conversation-only — explored attempts never appear, even chronologically interleaved', () => {
     const g = mkGraph([
       { id: 'root', module: 'root' },
-      { id: 'n1', module: 'a', status: 'alive', score: 3, timestamp: 100 },
-      { id: 'h1', module: 'human-insight', status: 'frontier', source: 'human',
+      { id: 'n1', module: 'a', status: 'completed', score: 3, timestamp: 100 },
+      { id: 'h1', module: 'human-insight', status: 'completed', source: 'human',
         approach: 'try X', timestamp: 50 },
     ])
     const events = [
@@ -135,13 +122,11 @@ describe('buildChatMessages', () => {
     const msgs = buildChatMessages(g, events)
     const times = msgs.map(m => m.timestamp)
     expect(times).toEqual([...times].sort((a, b) => a - b))
-    // status, module_start, AND the explored n1 attempt are all gone.
-    // Only the human hint (50) and ask_human (90) remain.
-    expect(msgs).toHaveLength(2)
-    expect(msgs[0].sender).toBe('human')
-    expect(msgs[0].text).toBe('try X')
-    expect(msgs[1].sender).toBe('agent')
-    expect(msgs[1].text).toContain('Asked human')
+    // status, module_start, human-insight graph nodes, and explored attempts
+    // are all gone. Only ask_human remains.
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].sender).toBe('agent')
+    expect(msgs[0].text).toContain('Asked human')
   })
 
   it('handles empty inputs', () => {

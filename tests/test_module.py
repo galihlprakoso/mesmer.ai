@@ -2,6 +2,7 @@
 
 import pytest
 
+from mesmer.core.constants import ToolName
 from mesmer.core.errors import InvalidModuleConfig
 from mesmer.core.module import DEFAULT_TIER, ModuleConfig, load_module_config
 
@@ -77,12 +78,49 @@ class TestResetTargetField:
         assert load_module_config(module_dir) is None
 
 
-class TestTierField:
-    """`tier` drives the 'simple before complex' frontier ladder.
+class TestToolPolicyField:
+    def test_yaml_module_parses_tool_policy(self, tmp_path):
+        module_dir = tmp_path / "planner"
+        module_dir.mkdir()
+        (module_dir / "module.yaml").write_text(
+            "name: planner\n"
+            "description: test\n"
+            "tool_policy:\n"
+            "  dispatch_submodules: false\n"
+            "  builtin:\n"
+            "    - conclude\n"
+        )
+        cfg = load_module_config(module_dir)
+        assert cfg is not None
+        actor = cfg.as_actor()
+        assert actor.tool_policy is not None
+        assert actor.tool_policy.dispatch_submodules is False
+        assert actor.tool_policy.builtin == [ToolName.CONCLUDE.value]
 
-    Legacy modules omit the field → default to 2 (cognitive). Six new
-    field-technique modules declare tier 0 or 1 so `propose_frontier`
-    picks them before any multi-turn cognitive attack.
+    def test_yaml_module_without_policy_uses_standard_module_policy(self, tmp_path):
+        module_dir = tmp_path / "default"
+        module_dir.mkdir()
+        (module_dir / "module.yaml").write_text(
+            "name: default\n"
+            "description: test\n"
+        )
+        cfg = load_module_config(module_dir)
+        assert cfg is not None
+        actor = cfg.as_actor()
+        assert actor.tool_policy is not None
+        assert actor.tool_policy.dispatch_submodules is False
+        assert actor.tool_policy.builtin == [
+            ToolName.SEND_MESSAGE.value,
+            ToolName.CONCLUDE.value,
+        ]
+
+
+class TestTierField:
+    """`tier` describes module complexity for BeliefGraph planning.
+
+    Modules without the field default to 2 (cognitive). Field-technique
+    modules can declare tier 0 or 1 so planners can prefer low-friction
+    attempts before multi-turn cognitive attacks.
     """
 
     def test_default_is_2_on_dataclass(self):

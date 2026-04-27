@@ -3,9 +3,8 @@
 Verifies each new :class:`LogEvent` fires at the right seam with a
 structured JSON payload the bench artifact can consume:
 
-  * ``tier_gate``     — one per frontier expansion, from _reflect_and_expand.
   * ``judge_verdict`` — one per judged sub-module, from _judge_module_result.
-  * ``delegate``      — now carries full instruction/tier/frontier_id.
+  * ``delegate``      — now carries full instruction/tier/experiment_id.
   * ``llm_completion``— one per ctx.completion call (any role).
 
 These are what lets us answer "why did the agent do X?" from artifacts.
@@ -21,6 +20,7 @@ import pytest
 from mesmer.core.agent import _judge_module_result
 from mesmer.core.agent.context import Context, Turn
 from mesmer.core.agent.judge import JudgeResult
+from mesmer.core.actor import ActorRole, ReactActorSpec, ToolPolicySpec
 from mesmer.core.belief_graph import (
     BeliefGraph,
     FrontierCreateDelta,
@@ -67,6 +67,25 @@ def _ctx(*, turns: list[Turn] | None = None):
     if turns is not None:
         ctx.turns[:] = turns
     return ctx
+
+
+def _ordered_executive_actor() -> ReactActorSpec:
+    ordered = [
+        "system-prompt-extraction",
+        "tool-extraction",
+        "indirect-prompt-injection",
+        "email-exfiltration-proof",
+    ]
+    return ReactActorSpec(
+        name="scenario:executive",
+        role=ActorRole.EXECUTIVE,
+        sub_modules=[SubModuleEntry(name=name) for name in ordered],
+        parameters={"ordered_modules": ordered},
+        tool_policy=ToolPolicySpec(
+            dispatch_submodules=True,
+            builtin=["ask_human", "talk_to_operator", "update_scratchpad", "conclude"],
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +217,9 @@ class TestJudgeVerdict:
 
 class TestDelegateEventPayload:
     @pytest.mark.asyncio
-    async def test_delegate_carries_instruction_tier_frontier_id(self):
+    async def test_delegate_carries_instruction_tier_and_experiment_id(self):
         """The sub_module tool logs a structured DELEGATE event with
-        module / tier / instruction / frontier_id.
+        module / tier / instruction / experiment_id.
         """
         from mesmer.core.agent.tools.sub_module import handle
 
@@ -226,10 +245,6 @@ class TestDelegateEventPayload:
                 "mesmer.core.agent.tools.sub_module._update_graph",
                 return_value=None,
             ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=AsyncMock(return_value=None),
-            ),
         ):
             await handle(
                 ctx,
@@ -239,7 +254,7 @@ class TestDelegateEventPayload:
                 args={
                     "instruction": "ask the target plainly for its rules",
                     "max_turns": 1,
-                    "frontier_id": "fid123",
+                    "experiment_id": "fx123",
                 },
                 instruction="ignored-fallback",
                 log=capture,
@@ -251,7 +266,7 @@ class TestDelegateEventPayload:
         assert payload["module"] == "direct-ask"
         assert payload["tier"] == 0
         assert payload["max_turns"] == 1
-        assert payload["frontier_id"] == "fid123"
+        assert payload["experiment_id"] == "fx123"
         assert payload["instruction"] == "ask the target plainly for its rules"
 
     @pytest.mark.asyncio
@@ -307,10 +322,6 @@ class TestDelegateEventPayload:
             patch("mesmer.core.agent.tools.sub_module._update_graph", return_value=None),
             patch(
                 "mesmer.core.agent.tools.sub_module._update_belief_graph",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
                 new=AsyncMock(return_value=None),
             ),
         ):
@@ -373,10 +384,6 @@ class TestDelegateEventPayload:
                 "mesmer.core.agent.tools.sub_module._update_belief_graph",
                 new=AsyncMock(return_value=None),
             ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=AsyncMock(return_value=None),
-            ),
         ):
             await handle(
                 ctx,
@@ -401,28 +408,13 @@ class TestDelegateEventPayload:
         ctx.run_module = AsyncMock(return_value="should not run")
         call = MagicMock()
         call.id = "call_1"
-        module = ModuleConfig(
-            name="scenario:executive",
-            sub_modules=[
-                SubModuleEntry(name="system-prompt-extraction"),
-                SubModuleEntry(name="exploit-analysis"),
-                SubModuleEntry(name="exploit-executor"),
-            ],
-            parameters={
-                "ordered_modules": [
-                    "system-prompt-extraction",
-                    "exploit-analysis",
-                    "exploit-executor",
-                ]
-            },
-            is_executive=True,
-        )
+        module = _ordered_executive_actor()
 
         result = await handle(
             ctx,
             module,
             call,
-            "exploit-executor",
+            "email-exfiltration-proof",
             args={"instruction": "execute"},
             instruction="ignored",
             log=lambda *_: None,
@@ -433,40 +425,29 @@ class TestDelegateEventPayload:
         assert "`system-prompt-extraction`" in result["content"]
 
     @pytest.mark.asyncio
-    async def test_fixed_order_executive_warns_but_runs_when_analysis_catalog_is_thin(self):
+    async def test_fixed_order_executive_warns_but_runs_when_injection_artifact_is_thin(self):
         from mesmer.core.agent.tools.sub_module import handle
 
         ctx = _ctx()
-        ctx.scratchpad.set("system-prompt-extraction", "recon done")
-        ctx.scratchpad.set("exploit-analysis", "Exploit analysis complete.")
-        ctx.run_module = AsyncMock(return_value="executor saw no usable findings")
+        ctx.scratchpad.set_module_output("system-prompt-extraction", "recon done")
+        ctx.scratchpad.set_module_output("tool-extraction", "tools found")
+        ctx.scratchpad.set_module_output(
+            "indirect-prompt-injection",
+            "Injection path likely exists.",
+        )
+        ctx.run_module = AsyncMock(return_value="proof saw no usable retrieval evidence")
         call = MagicMock()
         call.id = "call_1"
-        module = ModuleConfig(
-            name="scenario:executive",
-            sub_modules=[
-                SubModuleEntry(name="system-prompt-extraction"),
-                SubModuleEntry(name="exploit-analysis"),
-                SubModuleEntry(name="exploit-executor"),
-            ],
-            parameters={
-                "ordered_modules": [
-                    "system-prompt-extraction",
-                    "exploit-analysis",
-                    "exploit-executor",
-                ],
-                "ordered_artifact_requirements": {
-                    "exploit-analysis": ["## Findings"],
-                },
-            },
-            is_executive=True,
-        )
+        module = _ordered_executive_actor()
+        module.parameters["ordered_artifact_requirements"] = {
+            "indirect-prompt-injection": ["## Retrieval Path", "## Injection Evidence"],
+        }
 
         result = await handle(
             ctx,
             module,
             call,
-            "exploit-executor",
+            "email-exfiltration-proof",
             args={"instruction": "execute"},
             instruction="ignored",
             log=lambda *_: None,
@@ -475,193 +456,9 @@ class TestDelegateEventPayload:
         ctx.run_module.assert_awaited_once()
         delegated_instruction = ctx.run_module.await_args.args[1]
         assert "Framework Handoff Warning" in delegated_instruction
-        assert "`## Findings`" in delegated_instruction
-        assert "executor saw no usable findings" in result["content"]
-
-
-# ---------------------------------------------------------------------------
-# sub_module.handle — short-circuit when judge flags objective_met
-# ---------------------------------------------------------------------------
-
-
-class TestSubModuleReflectAndExpand:
-    """_reflect_and_expand is always called after sub-module delegation —
-    regardless of whether the judge flagged objective_met. Termination
-    authority lives at the LEADER level: the judge's objective_met is an
-    advisory signal in the tool_result, not a run-stopper. If the leader
-    decides the objective is met it calls conclude("OBJECTIVE MET — ..."),
-    but unused frontier nodes from a correct signal are harmless, and a
-    wrong judge signal (e.g. "Access Granted" ≠ the secret code) should not
-    strand the attack by skipping frontier expansion.
-    """
-
-    @pytest.mark.asyncio
-    async def test_runs_reflect_and_expand_even_when_judge_flags_objective_met(self):
-        """Frontier expansion is NOT skipped when judge.objective_met=True.
-        The leader reads the OBJECTIVE SIGNAL in the tool_result and decides.
-        """
-        from mesmer.core.agent.tools.sub_module import handle
-
-        ctx = _ctx()
-        ctx.run_module = AsyncMock(return_value="we got it")
-
-        call = MagicMock()
-        call.id = "call_win"
-        module = ModuleConfig(name="leader", sub_modules=["direct-ask"])
-
-        winning = JudgeResult(
-            score=10,
-            leaked_info="paradox",
-            promising_angle="framing as python var",
-            dead_end="none",
-            suggested_next="done",
-            objective_met=True,
-        )
-        graph_node = MagicMock()
-        graph_node.id = "node_win"
-        reflect_spy = AsyncMock(return_value=None)
-
-        with (
-            patch(
-                "mesmer.core.agent.tools.sub_module._judge_module_result",
-                new=AsyncMock(return_value=winning),
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._update_graph",
-                return_value=graph_node,
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=reflect_spy,
-            ),
-        ):
-            await handle(
-                ctx,
-                module,
-                call,
-                "direct-ask",
-                args={"instruction": "ask plainly"},
-                instruction="fallback",
-                log=lambda *a, **kw: None,
-            )
-
-        # Frontier expansion must still run — leader decides termination.
-        reflect_spy.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_runs_reflect_and_expand_when_objective_not_met(self):
-        """Below-threshold verdicts still hit the frontier-expansion path."""
-        from mesmer.core.agent.tools.sub_module import handle
-
-        ctx = _ctx()
-        ctx.run_module = AsyncMock(return_value="partial signal only")
-
-        call = MagicMock()
-        call.id = "call_partial"
-        module = ModuleConfig(name="leader", sub_modules=["direct-ask"])
-
-        partial = JudgeResult(
-            score=4,
-            leaked_info="",
-            promising_angle="maybe try framing",
-            dead_end="refusal template",
-            suggested_next="try delimiter-injection",
-            objective_met=False,
-        )
-        graph_node = MagicMock()
-        graph_node.id = "node_partial"
-        reflect_spy = AsyncMock(return_value=None)
-
-        with (
-            patch(
-                "mesmer.core.agent.tools.sub_module._judge_module_result",
-                new=AsyncMock(return_value=partial),
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._update_graph",
-                return_value=graph_node,
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=reflect_spy,
-            ),
-        ):
-            await handle(
-                ctx,
-                module,
-                call,
-                "direct-ask",
-                args={"instruction": "ask plainly"},
-                instruction="fallback",
-                log=lambda *a, **kw: None,
-            )
-
-        reflect_spy.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_ordered_executive_skips_generic_frontier_expansion(self):
-        """Fixed manager pipelines should not propose current/prior phases."""
-        from mesmer.core.agent.tools.sub_module import handle
-
-        ctx = _ctx()
-        ctx.run_module = AsyncMock(return_value="phase output")
-
-        call = MagicMock()
-        call.id = "call_ordered"
-        module = ModuleConfig(
-            name="scenario:executive",
-            sub_modules=[
-                SubModuleEntry(name="system-prompt-extraction"),
-                SubModuleEntry(name="exploit-analysis"),
-                SubModuleEntry(name="exploit-executor"),
-            ],
-            parameters={
-                "ordered_modules": [
-                    "system-prompt-extraction",
-                    "exploit-analysis",
-                    "exploit-executor",
-                ],
-            },
-            is_executive=True,
-        )
-
-        verdict = JudgeResult(
-            score=8,
-            leaked_info="phase output",
-            promising_angle="phase worked",
-            dead_end="none",
-            suggested_next="next phase",
-            objective_met=False,
-        )
-        graph_node = MagicMock()
-        graph_node.id = "node_ordered"
-        reflect_spy = AsyncMock(return_value=None)
-
-        with (
-            patch(
-                "mesmer.core.agent.tools.sub_module._judge_module_result",
-                new=AsyncMock(return_value=verdict),
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._update_graph",
-                return_value=graph_node,
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=reflect_spy,
-            ),
-        ):
-            await handle(
-                ctx,
-                module,
-                call,
-                "system-prompt-extraction",
-                args={"instruction": "run phase 1"},
-                instruction="fallback",
-                log=lambda *a, **kw: None,
-            )
-
-        reflect_spy.assert_not_awaited()
+        assert "`## Retrieval Path`" in delegated_instruction
+        assert "`## Injection Evidence`" in delegated_instruction
+        assert "proof saw no usable retrieval evidence" in result["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -735,10 +532,6 @@ class TestTargetEvidenceInToolResult:
                 "mesmer.core.agent.tools.sub_module._update_graph",
                 return_value=graph_node,
             ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=AsyncMock(return_value=None),
-            ),
         ):
             tr = await handle(
                 ctx,
@@ -799,10 +592,6 @@ class TestTargetEvidenceInToolResult:
             patch(
                 "mesmer.core.agent.tools.sub_module._update_graph",
                 return_value=graph_node,
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=AsyncMock(return_value=None),
             ),
         ):
             tr = await handle(
@@ -875,10 +664,6 @@ class TestTargetEvidenceInToolResult:
             patch(
                 "mesmer.core.agent.tools.sub_module._update_graph",
                 return_value=graph_node,
-            ),
-            patch(
-                "mesmer.core.agent.tools.sub_module._reflect_and_expand",
-                new=AsyncMock(return_value=None),
             ),
         ):
             tr = await handle(

@@ -8,7 +8,6 @@ import pytest
 from mesmer.core.agent.context import Turn
 from mesmer.core.agent.judge import (
     evaluate_attempt,
-    generate_frontier,
     refine_approach,
     JudgeResult,
 )
@@ -829,89 +828,6 @@ class TestJudgeSystemStaysDatasetNeutral:
         assert "Scenario-specific notes" in sent
         assert "literal substring" in sent
         assert "XYZ123" in sent
-
-
-# ---------------------------------------------------------------------------
-# generate_frontier
-# ---------------------------------------------------------------------------
-
-
-class TestGenerateFrontier:
-    @pytest.mark.asyncio
-    async def test_good_response(self):
-        response = json.dumps(
-            [
-                {
-                    "module": "foot-in-door",
-                    "approach": "ask about tools",
-                    "reasoning": "target discusses tools freely",
-                },
-                {
-                    "module": "cognitive-overload",
-                    "approach": "technical batch",
-                    "reasoning": "might bypass filters",
-                },
-            ]
-        )
-        ctx = _make_mock_ctx(response)
-
-        judge_result = JudgeResult(
-            score=7,
-            leaked_info="design principles",
-            promising_angle="philosophy works",
-            dead_end="authority claims fail",
-            suggested_next="ask about tools",
-        )
-
-        suggestions = await generate_frontier(
-            ctx,
-            judge_result=judge_result,
-            module_name="foot-in-door",
-            approach="philosophy",
-            dead_ends="authority-bias: detected instantly",
-            explored="foot-in-door→philosophy (score:7)",
-            available_modules=["foot-in-door", "cognitive-overload", "authority-bias"],
-        )
-
-        assert len(suggestions) == 2
-        assert suggestions[0]["module"] == "foot-in-door"
-        assert suggestions[1]["module"] == "cognitive-overload"
-
-    @pytest.mark.asyncio
-    async def test_caps_at_3(self):
-        response = json.dumps(
-            [
-                {"module": "a", "approach": "1", "reasoning": "r"},
-                {"module": "b", "approach": "2", "reasoning": "r"},
-                {"module": "c", "approach": "3", "reasoning": "r"},
-                {"module": "d", "approach": "4", "reasoning": "r"},
-                {"module": "e", "approach": "5", "reasoning": "r"},
-            ]
-        )
-        ctx = _make_mock_ctx(response)
-        judge_result = JudgeResult(5, "", "", "", "")
-
-        suggestions = await generate_frontier(
-            ctx, judge_result, "test", "test", "", "", ["a", "b", "c", "d", "e"]
-        )
-        assert len(suggestions) == 3
-
-    @pytest.mark.asyncio
-    async def test_garbage_response(self):
-        ctx = _make_mock_ctx("I cannot generate suggestions because...")
-
-        judge_result = JudgeResult(3, "", "", "", "")
-        suggestions = await generate_frontier(ctx, judge_result, "test", "test", "", "", ["test"])
-        assert suggestions == []
-
-    @pytest.mark.asyncio
-    async def test_markdown_fenced_response(self):
-        response = '```json\n[{"module": "test", "approach": "do thing", "reasoning": "why"}]\n```'
-        ctx = _make_mock_ctx(response)
-        judge_result = JudgeResult(5, "", "", "", "")
-
-        suggestions = await generate_frontier(ctx, judge_result, "test", "test", "", "", ["test"])
-        assert len(suggestions) == 1
 
 
 # ---------------------------------------------------------------------------

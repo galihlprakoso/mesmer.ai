@@ -6,8 +6,9 @@ description: When to author a manager module vs reuse system-prompt-extraction. 
 A **manager** is an authored module listed in `scenario.modules`. It
 runs at depth 1 — the synthesised executive dispatches it, it
 orchestrates sub-modules, it talks to the target via `send_message`,
-and it concludes with a write-up. Three managers ship today:
-`system-prompt-extraction`, `tool-extraction`, `exploit-analysis`.
+and it concludes with a write-up. Four managers ship today:
+`system-prompt-extraction`, `tool-extraction`,
+`indirect-prompt-injection`, `email-exfiltration-proof`.
 Author a new one when the **objective shape** is fundamentally
 different from those.
 
@@ -66,8 +67,9 @@ system_prompt: |
   continue, replan, or conclude.
 
   You CAN call send_message to the target directly when a single
-  probe is the right move; you CANNOT call talk_to_operator,
-  update_scratchpad, or ask_human (those are executive-only).
+  probe is the right move. You can also call update_scratchpad if
+  your `tool_policy` grants it. You CANNOT call talk_to_operator or
+  ask_human; those are executive-only.
 
   ## Phase 0 — RECON
   1. <when to run target-profiler>
@@ -98,9 +100,8 @@ judge_rubric: |
 reset_target: false
 ```
 
-`is_executive: true` does **nothing** in authored YAML — the loader
-ignores the field. The executive is synthesised at run start by
-`runner.execute_run`; you can't author one.
+The executive is synthesised at run start by `runner.execute_run`; you
+can't author one in module YAML.
 
 ## `see_siblings` — when to set it
 
@@ -180,13 +181,12 @@ the run via `conclude(objective_met=true)`. Don't write `OBJECTIVE
 MET —` strings into the manager's `system_prompt` — sub-modules will
 copy the format and try to terminate themselves.
 
-## Don't reach for executive-only tools
+## Don't reach for operator-only tools
 
-Managers can't call `talk_to_operator` / `update_scratchpad` /
-`ask_human`. The framework filters those out of `build_tool_list`
-when `is_executive=False`. If your manager's prompt mentions any of
-them, the model will hallucinate a call that resolves to "unknown
-tool" — the operator sees nothing and the manager's iteration burns.
+Managers should not call `talk_to_operator` or `ask_human`; those are
+operator-channel tools for the executive. `update_scratchpad` is
+policy-driven: grant it only to managers that should maintain the shared
+whiteboard.
 Audit your prompt for residual mentions.
 
 If the work genuinely belongs at the operator level, return it from

@@ -126,13 +126,13 @@ def _graph_with_nodes(run_id: str) -> AttackGraph:
     # Add nodes; stamp each with monotonically-increasing timestamps so the
     # extractor's time-based ordering is unambiguous.
     t = time.time()
-    for i, (mod, score, is_dead) in enumerate([
+    for i, (mod, score, failed) in enumerate([
         ("target-profiler", 7, False),
-        ("instruction-recital", 1, True),     # tier-0 dead-end
+        ("instruction-recital", 1, True),
         ("delimiter-injection", 9, False),
         ("foot-in-door", 3, False),
     ]):
-        status = NodeStatus.DEAD.value if is_dead else NodeStatus.ALIVE.value
+        status = NodeStatus.FAILED.value if failed else NodeStatus.COMPLETED.value
         n = g.add_node(
             parent_id=root.id,
             module=mod,
@@ -140,7 +140,7 @@ def _graph_with_nodes(run_id: str) -> AttackGraph:
             score=score,
             status=status,
             run_id=run_id,
-            reflection="detected" if is_dead else "",
+            reflection="detected" if failed else "",
         )
         n.timestamp = t + i * 0.01
     return g
@@ -264,69 +264,6 @@ class TestWinAttribution:
         tr = extract_trial_telemetry(result, registry=_registry(), canary_turn=None)
         assert tr.winning_module is None
         assert tr.winning_tier is None
-
-
-class TestFrontierExclusion:
-    """Frontier nodes (score=0 placeholders for proposed-next-moves) must
-    NOT pollute the per-trial attempt telemetry.
-
-    Regression guard: a trial that ran one tier-0 probe (score 10) and
-    produced five frontier suggestions for the next call must report
-    ``modules_called`` = 1 module, ``per_module_scores`` = {mod: [10]},
-    median score 10 — not six entries with four trailing zeros.
-    """
-
-    def test_frontiers_excluded_from_per_module_scores(self):
-        g = AttackGraph()
-        root = g.ensure_root()
-        t = time.time()
-        # One real attempt.
-        explored = g.add_node(
-            root.id, "instruction-recital", "recite words here plenty",
-            score=10, run_id="R",
-        )
-        explored.timestamp = t
-        # Three frontier suggestions for the next move — score 0 placeholders.
-        for i, mod in enumerate(["target-profiler", "direct-ask", "format-shift"]):
-            fn = g.add_frontier_node(root.id, mod, f"angle {i} words here",
-                                     run_id="R")
-            fn.timestamp = t + 0.01 * (i + 1)
-
-        tel = SimpleNamespace(n_calls=5, llm_seconds=2.0)
-        result = _result_with_turns(g, "R", [], tel)
-        tr = extract_trial_telemetry(result, registry=_registry(), canary_turn=None)
-
-        # Exactly one module attempted; no frontier pollution.
-        assert tr.modules_called == ["instruction-recital"]
-        assert tr.tier_sequence == [0]
-        assert tr.per_module_scores == {"instruction-recital": [10]}
-        assert tr.dead_ends == []
-
-    def test_frontiers_dont_influence_winning_module_fallback(self):
-        """The score>=7 fallback for winning_module must ignore frontier
-        score=0 entries. Otherwise an unevaluated frontier could
-        artificially become the highest-scored node (if all real attempts
-        scored low) and mis-attribute the win.
-        """
-        g = AttackGraph()
-        root = g.ensure_root()
-        t = time.time()
-        real = g.add_node(
-            root.id, "instruction-recital", "probe angle words here plenty",
-            score=8, run_id="R",
-        )
-        real.timestamp = t
-        # A frontier for a different tier-2 module — would score 0 but
-        # must not displace the real tier-0 attempt as the winner.
-        fn = g.add_frontier_node(root.id, "foot-in-door",
-                                 "warm up angle words plenty", run_id="R")
-        fn.timestamp = t + 0.01
-
-        tel = SimpleNamespace(n_calls=0, llm_seconds=0.0)
-        result = _result_with_turns(g, "R", [], tel)
-        tr = extract_trial_telemetry(result, registry=_registry(), canary_turn=None)
-        assert tr.winning_module == "instruction-recital"
-        assert tr.winning_tier == 0
 
 
 class TestExtractorRobustness:

@@ -11,25 +11,23 @@ sub-modules it can delegate to.
 
 ## The three runtime roles
 
-Mesmer has three roles, distinguished by where they sit in the call
-tree and one flag on `ModuleConfig`:
+Mesmer has three runtime roles, distinguished by where they sit in the call
+tree and by their `ReactActorSpec.role`:
 
-| Role | `is_executive` | Authored? | Depth | Tools |
-|---|---|---|---|---|
-| **Executive** | `True` | No — synthesised by `runner.execute_run` | 0 | `talk_to_operator`, `update_scratchpad`, `ask_human`, manager dispatch, `conclude` |
-| **Manager** | `False` | YES — `modules/attacks/<name>/`, listed in `scenario.modules` | 1 | `send_message`, sub-module dispatch, `conclude` |
-| **Employee** | `False` | YES — anywhere under `modules/`, referenced in a manager's `sub_modules:` | ≥ 2 | same as manager (recursive) |
+| Role | Authored? | Depth | Tools |
+|---|---|---|---|
+| **Executive** | No — synthesised by `runner.execute_run` | 0 | `talk_to_operator`, `update_scratchpad`, `ask_human`, manager dispatch, `conclude` |
+| **Manager** | YES — `modules/attacks/<name>/`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, `update_scratchpad`, `conclude` |
+| **Employee** | YES — anywhere under `modules/`, referenced in a manager's `sub_modules:` | ≥ 2 | Policy-defined: usually `send_message`, `conclude` |
 
 The executive owns the **operator channel** (chat, ask-human,
-scratchpad). Managers and employees own the **target channel**
-(`send_message`). Tool gating is in
-`core/agent/tools/__init__.py::build_tool_list` — the executive's
-tool list excludes `send_message` entirely; managers' lists exclude
-`talk_to_operator` / `update_scratchpad` / `ask_human`.
+scratchpad). Managers and employees own the **target channel** when their
+`tool_policy` grants `send_message`. Tool gating is declarative in each
+actor's `ToolPolicySpec` and materialized by
+`core/agent/tools/__init__.py::build_tool_list`.
 
 The executive is **synthesised in memory at run start** from
-`scenario.modules`; you never author one. `is_executive: true` in
-authored YAML is silently ignored. See
+`scenario.modules`; you never author one. See
 [Writing scenarios](/docs/scenarios/walkthrough#executive-vs-manager-the-role-split)
 for the full split.
 
@@ -81,12 +79,10 @@ executive doesn't appear in the registry):
   for hidden-instruction extraction;
   [`tool-extraction`](/docs/modules/tool-extraction) for
   function-catalog disclosure against function-calling agents;
-  [`exploit-analysis`](/docs/modules/exploit-analysis) synthesises
-  the recon → exploit hypothesis catalog;
-  [`exploit-executor`](/docs/modules/exploit-executor) runs the
-  cataloged exploits with published multi-turn chain templates
-  (Crescendo / GOAT / AgentDojo) and writes a PTES/OSCP-shaped
-  proof-of-impact dossier.
+  [`indirect-prompt-injection`](/docs/modules/indirect-prompt-injection)
+  proves retrieved-content instruction following;
+  [`email-exfiltration-proof`](/docs/modules/email-exfiltration-proof)
+  validates the side-effecting email path with a proof dossier.
 - **Profiler** (`modules/profilers/`, T0) — `target-profiler`: layered
   identity → defence-shape → policy-surface recon.
 - **Planner** (`modules/planners/`, T0) — `attack-planner`: reads the
@@ -119,16 +115,14 @@ mean and how the frontier gate uses them.
   manager as OpenAI-style function-calling tools. Each sub-module
   runs its **own nested ReAct loop** — its own planner, own turn
   budget, own sequence of target messages — and returns a string that
-  the framework writes to the scratchpad under the module's name,
-  then appends an `AttackNode` to the graph.
+  the framework records on the delegated `AttackNode`.
 
 Sub-modules are listed in YAML as a `sub_modules:` array. The nested
 loop is automatic — you don't write Python to wire them.
 
-The **executive's own run-end verdict** is also recorded as an
-`AttackNode`, distinguished by `source: LEADER` (legacy enum value
-preserved across the rename — treat as the opaque "depth-0 root"
-marker). Its `conclude()` text is the final run result.
+The **executive's own execution** is also recorded as an `AttackNode`,
+created at run start and completed at run end. It is distinguished by
+`source: LEADER`; its `conclude()` text is the final run result.
 
 ### Sub-module entries — strings or dicts
 

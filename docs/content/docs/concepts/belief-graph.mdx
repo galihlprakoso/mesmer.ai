@@ -1,9 +1,9 @@
 ---
 title: The belief graph
-description: Mesmer's typed planner state — weakness hypotheses, evidence, and frontier experiments — that runs alongside the legacy attack graph.
+description: Mesmer's typed planner state — weakness hypotheses, evidence, and frontier experiments — that runs alongside the attack graph execution trace.
 ---
 
-The [legacy attack graph](./attack-graph) is an attempt log: every
+The [attack graph](./attack-graph) is an execution log: every
 module run becomes one node with a score and a status. That answers
 "what did we try?" — not "what do we believe about this target?" The
 **belief graph** is the typed alternative the planner runs on. Six
@@ -12,10 +12,10 @@ node kinds, eleven typed edges, and one mutation primitive
 I run next?" to "which suspected weakness should I test next, with
 which strategy, given what I already believe?"
 
-The legacy attack graph is **not replaced**. Both run side-by-side
+The attack graph is **not replaced**. Both run side-by-side
 against every target — the belief graph is the planner substrate, the
 attack graph remains the per-attempt audit trail. See
-[the comparison](#side-by-side-with-the-legacy-attack-graph) at the
+[the comparison](#side-by-side-with-the-attack-graph) at the
 bottom of this page.
 
 ## The six node kinds
@@ -206,14 +206,14 @@ correlations dedupe-merge.
 
 ## Persistence
 
-The belief graph lives next to the legacy attack graph, distinct
+The belief graph lives next to the attack graph, distinct
 files:
 
 ```
 ~/.mesmer/targets/{target-hash}/
 ├── belief_graph.json    # current snapshot (authoritative for read)
 ├── belief_deltas.jsonl  # append-only audit log (replay-able)
-└── graph.json           # legacy AttackGraph (untouched)
+└── graph.json           # AttackGraph execution trace
 ```
 
 The snapshot is the authoritative current state.
@@ -257,13 +257,13 @@ The leader brief flagged with `★` looks like:
 
 Selector picks are advisory; the leader can override.
 
-## Side-by-side with the legacy attack graph
+## Side-by-side with the attack graph
 
 | | Attack graph | Belief graph | [Strategy library](./frontier-and-utility#the-strategy-library) |
 |---|---|---|---|
 | **File** | `~/.mesmer/targets/{hash}/graph.json` | `~/.mesmer/targets/{hash}/belief_graph.json` + `belief_deltas.jsonl` | `~/.mesmer/global/strategies.json` |
 | **Tracks** | Per-target attempt history | Per-target weakness beliefs + evidence + frontier | Cross-target attack patterns |
-| **Used for** | Legacy frontier proposer, dead-end pruning, tier gating, audit trail, the [Attack Graph view](../recipes/the-web-editor) | Hypothesis confidence, utility ranking, role-scoped briefs, the [Belief Map view](../recipes/reading-the-belief-map) | Bootstrap context for hypothesis generation, `transfer_value` component of utility |
+| **Used for** | Execution audit trail and the [Attack Graph view](../recipes/the-web-editor) | Hypothesis confidence, utility ranking, role-scoped briefs, the [Belief Map view](../recipes/reading-the-belief-map) | Bootstrap context for hypothesis generation, `transfer_value` component of utility |
 
 Both graphs are persisted; both are read by the engine on every run.
 The web UI's toggle pill at the top of the graph area flips between

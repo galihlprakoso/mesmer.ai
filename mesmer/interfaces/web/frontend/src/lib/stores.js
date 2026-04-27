@@ -156,7 +156,7 @@ export const runs = derived(graphData, $g => {
       entry.timestamp = node.timestamp || entry.timestamp
     }
     if (node.source === 'leader') {
-      entry.verdict = node.status === 'promising' ? 'met' : 'not_met'
+      entry.verdict = (node.score || 0) >= 10 ? 'met' : 'not_met'
     }
   }
   const list = Array.from(byRun.values())
@@ -169,7 +169,7 @@ export const runs = derived(graphData, $g => {
  *
  * Combines the persisted operator <> leader chat (warm-loaded from
  * /api/chat) with conversational events from the live event stream
- * (ask_human, human_answer + legacy human-source frontier hints).
+ * (ask_human, human_answer).
  * Per-attempt outcomes do NOT appear here — those live in the graph. */
 export const chatMessages = derived(
   [graphData, events, chatHistory],
@@ -187,34 +187,24 @@ export const chatMessages = derived(
   }
 )
 
-/** Derived: frontier nodes extracted from graph data */
+/** AttackGraph is execution trace only; search frontiers live in BeliefGraph. */
 export const frontierNodes = derived(graphData, $g => {
-  if (!$g || !$g.nodes) return []
-  return Object.values($g.nodes)
-    .filter(n => n.status === 'frontier')
-    .sort((a, b) => {
-      // Human hints first, then by parent score (higher = more promising lead)
-      if (a.source === 'human' && b.source !== 'human') return -1
-      if (b.source === 'human' && a.source !== 'human') return 1
-      return (b.score || 0) - (a.score || 0)
-    })
+  return []
 })
 
-/** Derived: stats that reflect the VISIBLE graph (after filtering frontier). */
+/** Derived: stats that reflect the visible execution graph. */
 export const visibleStats = derived(graphData, $g => {
   if (!$g || !$g.nodes) return null
 
   const nodes = Object.values($g.nodes)
-  // Explored = everything except frontier and root
-  const explored = nodes.filter(n => n.status !== 'frontier' && n.module !== 'root')
+  const explored = nodes.filter(n => n.module !== 'root')
 
-  const byStatus = { dead: 0, promising: 0, alive: 0, completed: 0 }
+  const byStatus = { pending: 0, running: 0, completed: 0, failed: 0, blocked: 0, skipped: 0 }
   const uniqueModules = new Set()
   let bestScore = 0
   let totalFrontier = 0
 
   for (const n of nodes) {
-    if (n.status === 'frontier') { totalFrontier++; continue }
     if (n.module === 'root') continue
     uniqueModules.add(n.module)
     byStatus[n.status] = (byStatus[n.status] || 0) + 1
@@ -225,10 +215,11 @@ export const visibleStats = derived(graphData, $g => {
     attempts: explored.length,
     techniques: uniqueModules.size,
     bestScore,
-    dead: byStatus.dead,
-    promising: byStatus.promising,
-    alive: byStatus.alive,
+    failed: byStatus.failed,
+    running: byStatus.running,
+    blocked: byStatus.blocked,
     completed: byStatus.completed,
+    skipped: byStatus.skipped,
     frontier: totalFrontier,
   }
 })
@@ -310,6 +301,10 @@ export function handleMessage(msg) {
 
     case 'graph':
       graphData.set(msg.data)
+      selectedNode.update(node => {
+        if (!node?.id || !msg.data?.nodes) return node
+        return msg.data.nodes[node.id] || node
+      })
       if (msg.stats) {
         graphStats.set(msg.stats)
       }

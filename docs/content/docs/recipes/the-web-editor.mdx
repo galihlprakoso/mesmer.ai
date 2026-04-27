@@ -65,7 +65,7 @@ YAML — groups modules by registry category (`<optgroup>`):
 
 ```
 attacks/      — managers (system-prompt-extraction, tool-extraction,
-                exploit-analysis, exploit-executor)
+                indirect-prompt-injection, email-exfiltration-proof)
 planners/     — attack-planner
 profilers/    — target-profiler
 techniques/   — every shipped technique
@@ -112,9 +112,6 @@ sealed off — see
 Use the chat for status updates, course-correction, "I see X, try Y"
 nudges. Use the scratchpad for hand-curated working notes that should
 survive into the next run (`--fresh` does not delete the scratchpad).
-Hints (`PATCH /api/frontier`) remain the right channel for "explore
-this specific frontier node first" — those persist in the graph and
-are explored ahead of agent / judge frontier nodes.
 
 The `ContextMode.AUTONOMOUS` / `CO_OP` distinction no longer exists.
 Every executive has these channels available; whether the operator
@@ -123,8 +120,8 @@ engages them is purely a UI choice.
 ## The Belief Map panel
 
 The graph layout has a toggle pill at the top — *Attack* / *Belief*.
-*Attack* renders the legacy [attack graph](../concepts/attack-graph)
-as a hierarchical tree of attempt history; *Belief* renders the new
+*Attack* renders the [attack graph](../concepts/attack-graph)
+as a delegation tree of execution history; *Belief* renders the
 [belief graph](../concepts/belief-graph) as a force-directed view of
 hypotheses, evidence, and frontier experiments. Both are persisted on
 disk and updated on every run; the toggle is purely a UI choice. See

@@ -3,6 +3,7 @@
   import {
     graphData,
     selectedNode,
+    activeModules,
     activeModuleSet,
     activeModuleTop,
     scenarios,
@@ -13,14 +14,15 @@
   import RunPicker from './RunPicker.svelte'
   import * as d3 from 'd3'
 
-  // Status drives node color — tier is a scheduling concern, not a thing
-  // a human watching the run cares about. Frontier and the leader-verdict
-  // square keep their own visual treatments below.
+  // AttackGraph status is execution lifecycle only. Use score to tint
+  // successful, high-signal executions.
   const STATUS_COLOR = {
-    promising: 'var(--phosphor)',
-    dead:      'var(--red)',
     completed: 'var(--blue)',
-    alive:     'var(--text-muted)',
+    failed:    'var(--red)',
+    blocked:   'var(--red)',
+    skipped:   'var(--text-muted)',
+    pending:   'var(--text-muted)',
+    running:   'var(--amber, #f59e0b)',
   }
 
   let svgEl
@@ -33,6 +35,7 @@
 
   // Live refs so the reactive block stays a single subscription chain.
   let activeSetRef = new Set()
+  let activeModulesRef = []
   let activeTopRef = null
   let selectedIdRef = null
   let scenarioMetaRef = null
@@ -41,15 +44,13 @@
     return node.source === 'leader'
   }
 
-  function isFrontier(node) {
-    return node.status === 'frontier'
-  }
-
   function colorFor(node) {
     if (node._isLeaderOrchestrator) return 'var(--phosphor)'
     if (isLeaderVerdict(node)) {
-      return node.status === 'promising' ? 'var(--phosphor)' : 'var(--red)'
+      if (node.status === 'running') return STATUS_COLOR.running
+      return node.score >= 7 ? 'var(--phosphor)' : 'var(--blue)'
     }
+    if (node.status === 'completed' && node.score >= 7) return 'var(--phosphor)'
     return STATUS_COLOR[node.status] ?? 'var(--text-muted)'
   }
 
@@ -58,14 +59,13 @@
     // green/red = win/loss, dashed = proposed, pulse = active). The label
     // is just the module name — no scores, no verdict suffix, no clutter.
     if (node._isLeaderOrchestrator) return node.module || 'leader'
-    if (isFrontier(node)) return `${node.module} · proposed`
     return node.module
   }
 
   function isNodeActive(data) {
     if (!activeSetRef || activeSetRef.size === 0) return false
     if (data._isLeaderOrchestrator) return false
-    if (data.status === 'dead') return false
+    if (data.status === 'failed' || data.status === 'blocked' || data.status === 'skipped') return false
     return activeSetRef.has(data.module)
   }
 
@@ -74,8 +74,7 @@
     const parts = ['node']
     if (data._isLeaderOrchestrator) parts.push('leader-orchestrator')
     else if (isLeaderVerdict(data)) parts.push('leader-verdict')
-    else if (isFrontier(data)) parts.push('frontier')
-    else if (data.status === 'dead') parts.push('dead')
+    else if (data.status === 'failed' || data.status === 'blocked') parts.push('failed')
     if (selectedIdRef && data.id === selectedIdRef) parts.push('selected')
     if (isNodeActive(data)) parts.push('active')
     return parts.join(' ')
@@ -115,7 +114,7 @@
     const next = new Set()
     for (const n of Object.values($graphData.nodes)) {
       const hasChildren = (n.children || []).length > 0
-      if (hasChildren && n.status !== 'frontier' && n.source !== 'leader') {
+      if (hasChildren && n.source !== 'leader') {
         next.add(n.id)
       }
     }
@@ -138,7 +137,7 @@
       collapsed,
       scenarioMetaRef,
       $selectedRunId,
-      activeTopRef,
+      activeModulesRef,
     )
     if (!tree) return
 
@@ -215,7 +214,7 @@
     // Circle — everything else
     nodeSel.filter(d => !d.data._isLeaderOrchestrator && !isLeaderVerdict(d.data))
       .append('circle')
-      .attr('r', d => isFrontier(d.data) ? 11 : 14)
+      .attr('r', 14)
       .attr('fill', d => colorFor(d.data))
 
     // Primary label below
@@ -272,6 +271,7 @@
   // Refs read inside render() — assignments must happen before the render
   // block fires (Svelte processes reactive declarations in source order).
   $: activeSetRef = $activeModuleSet
+  $: activeModulesRef = $activeModules
   $: activeTopRef = $activeModuleTop
   $: selectedIdRef = $selectedNode?.id ?? null
   $: {
@@ -309,6 +309,7 @@
   // deleted layer).
   $: {
     void $graphData
+    void $activeModules
     void $activeModuleSet
     void $activeModuleTop
     void scenarioMetaRef
@@ -343,7 +344,7 @@
   <svg bind:this={svgEl} {width} {height}></svg>
 
   <!-- Run picker (top-right). Subsumes the old running-ribbon: the
-       currently-running run's chip pulses in cyan and shows the active
+       currently-running run's chip pulses and shows the active
        module name as a sibling tag. -->
   <div class="run-picker-host">
     <RunPicker />
@@ -356,10 +357,10 @@
   </div>
 
   <div class="legend">
-    <span class="li"><span class="status-dot worked"></span>Worked</span>
-    <span class="li"><span class="status-dot output"></span>Output</span>
-    <span class="li"><span class="status-dot dead"></span>Dead end</span>
-    <span class="li"><span class="frontier-dot"></span>Up next</span>
+    <span class="li"><span class="status-dot running"></span>Running</span>
+    <span class="li"><span class="status-dot worked"></span>High score</span>
+    <span class="li"><span class="status-dot output"></span>Completed</span>
+    <span class="li"><span class="status-dot failed"></span>Failed / blocked</span>
   </div>
 </div>
 
@@ -439,14 +440,7 @@
   }
   .graph-container :global(.node:hover circle) { r: 16; }
 
-  .graph-container :global(.node.frontier circle) {
-    fill-opacity: 0.35;
-    stroke-dasharray: 4 3;
-    stroke-opacity: 0.7;
-  }
-  .graph-container :global(.node.frontier text) { opacity: 0.65; }
-
-  .graph-container :global(.node.dead circle) {
+  .graph-container :global(.node.failed circle) {
     stroke-dasharray: 3 2;
     opacity: 0.7;
   }
@@ -575,15 +569,9 @@
     display: inline-block;
   }
   .status-dot.worked { background: var(--phosphor); box-shadow: var(--phosphor-glow-tight); }
+  .status-dot.running { background: var(--amber); }
   .status-dot.output { background: var(--blue); }
-  .status-dot.dead { background: var(--red); }
-  .frontier-dot {
-    width: 9px; height: 9px; border-radius: 50%;
-    border: 1.5px dashed var(--text-muted);
-    background: transparent;
-    display: inline-block;
-    opacity: 0.7;
-  }
+  .status-dot.failed { background: var(--red); }
 
   /* ---------- run picker host ---------- */
   .run-picker-host {

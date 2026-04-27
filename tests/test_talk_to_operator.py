@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mesmer.core.agent.tools import build_tool_list, talk_to_operator
+from mesmer.core.actor import ActorRole, ReactActorSpec, ToolPolicySpec
 from mesmer.core.constants import LogEvent, ToolName
 
 
@@ -26,12 +27,20 @@ def _make_ctx(*, depth=0, target_memory=None):
     return ctx
 
 
-def _make_module(name="my-leader", *, is_executive=False):
-    mod = MagicMock()
-    mod.name = name
-    mod.sub_modules = []
-    mod.is_executive = is_executive
-    return mod
+def _make_actor(name="my-leader", *, role=ActorRole.MODULE):
+    builtin = [ToolName.CONCLUDE.value]
+    if role is ActorRole.EXECUTIVE:
+        builtin = [
+            ToolName.ASK_HUMAN.value,
+            ToolName.TALK_TO_OPERATOR.value,
+            ToolName.UPDATE_SCRATCHPAD.value,
+            ToolName.CONCLUDE.value,
+        ]
+    return ReactActorSpec(
+        name=name,
+        role=role,
+        tool_policy=ToolPolicySpec(builtin=builtin),
+    )
 
 
 @pytest.mark.asyncio
@@ -46,7 +55,7 @@ async def test_persists_to_chat_and_emits_event():
     log = MagicMock()
 
     result = await talk_to_operator.handle(
-        ctx, _make_module(), _Call(), {"text": "I'm pivoting to authority framing."}, log,
+        ctx, _make_actor(), _Call(), {"text": "I'm pivoting to authority framing."}, log,
     )
 
     assert appended == [("assistant", "I'm pivoting to authority framing.")]
@@ -59,7 +68,7 @@ async def test_rejects_empty_text():
     ctx = _make_ctx()
     log = MagicMock()
 
-    result = await talk_to_operator.handle(ctx, _make_module(), _Call(), {"text": ""}, log)
+    result = await talk_to_operator.handle(ctx, _make_actor(), _Call(), {"text": ""}, log)
     assert "non-empty 'text'" in result["content"]
     log.assert_not_called()
 
@@ -74,7 +83,7 @@ async def test_disk_failure_still_emits_event():
     log = MagicMock()
 
     result = await talk_to_operator.handle(
-        ctx, _make_module(), _Call(), {"text": "still goes through live UI"}, log,
+        ctx, _make_actor(), _Call(), {"text": "still goes through live UI"}, log,
     )
 
     # Event was emitted despite disk failure (live UI still gets it).
@@ -88,7 +97,7 @@ async def test_works_without_target_memory():
     log = MagicMock()
 
     result = await talk_to_operator.handle(
-        ctx, _make_module(), _Call(), {"text": "hi op"}, log,
+        ctx, _make_actor(), _Call(), {"text": "hi op"}, log,
     )
 
     log.assert_called_with(LogEvent.OPERATOR_REPLY.value, "hi op")
@@ -103,10 +112,10 @@ def test_executive_only_in_build_tool_list():
     manager_ctx.registry.as_tools = MagicMock(return_value=[])
 
     exec_tools = build_tool_list(
-        _make_module("scenario:executive", is_executive=True), exec_ctx
+        _make_actor("scenario:executive", role=ActorRole.EXECUTIVE), exec_ctx
     )
     manager_tools = build_tool_list(
-        _make_module("system-prompt-extraction", is_executive=False), manager_ctx
+        _make_actor("system-prompt-extraction", role=ActorRole.MODULE), manager_ctx
     )
 
     exec_names = [t["function"]["name"] for t in exec_tools]

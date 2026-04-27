@@ -221,7 +221,7 @@ const beliefs: BeliefNodeSpec[] = [
   },
   {
     id: "f1",
-    label: "exploit-analysis · u=0.32",
+    label: "indirect-prompt-injection · u=0.32",
     x: 110,
     y: 90,
     kind: "frontier",
@@ -302,7 +302,7 @@ const beliefs: BeliefNodeSpec[] = [
   },
   {
     id: "a2",
-    label: "exploit-executor · v=0.32",
+    label: "email-exfiltration-proof · v=0.32",
     x: 460,
     y: 265,
     kind: "attempt",

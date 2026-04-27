@@ -1,0 +1,34 @@
+---
+title: email-exfiltration-proof
+description: Manager that demonstrates attacker-controlled email side effects.
+---
+
+`email-exfiltration-proof` is the manager for the dvllm research persona's
+business-impact failure: unauthorized use of an email/reporting tool after
+retrieval or authority framing.
+
+It reads `tool-extraction`, `indirect-prompt-injection`, and
+`system-prompt-extraction` scratchpad entries, attempts the
+attacker-controlled email path, and writes a proof dossier. For dvllm, the
+operator verifies the side effect in `dvllm/logs/emails.jsonl`.
+
+Typical chain:
+
+```yaml
+modules:
+  - system-prompt-extraction
+  - tool-extraction
+  - indirect-prompt-injection
+  - email-exfiltration-proof
+```
+
+The manager concludes with:
+
+- outcome status
+- requested recipient and subject
+- verbatim attacker-target transcript
+- scoreboard check instructions
+- remediation notes
+
+See the source:
+[`modules/attacks/email-exfiltration-proof/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/modules/attacks/email-exfiltration-proof/module.yaml)

@@ -21,7 +21,7 @@ through manager `sub_modules:` lists.
 | Role | Authored? | Runs at | Tools |
 |---|---|---|---|
 | **Executive** | No — synthesised by the runner from `scenario.modules` | depth 0 | `talk_to_operator`, `update_scratchpad`, `ask_human`, manager-dispatch tools, `conclude` |
-| **Manager** | Yes — `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | depth 1 | `send_message`, sub-module dispatch, `conclude` |
+| **Manager** | Yes — `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | depth 1 | Policy-defined; usually sub-module dispatch, `update_scratchpad`, `conclude` |
 | **Employee** | Yes — anywhere under `modules/`, referenced via a manager's `sub_modules:` | depth ≥ 2 | same as manager (recursive) |
 
 The executive never talks to the target — it dispatches managers.
@@ -75,7 +75,8 @@ objective:
 modules:
   - system-prompt-extraction
   # - tool-extraction        # chain a second manager
-  # - exploit-analysis       # synthesise a findings report at the end
+  # - indirect-prompt-injection
+  # - email-exfiltration-proof
 
 # Optional: override the executive's system prompt. Defaults to
 # core/agent/prompts/executive.prompt.md when unset.
@@ -269,11 +270,12 @@ later managers read what the prior ones produced.
 modules:
   - system-prompt-extraction   # extract hidden prompt
   - tool-extraction            # then enumerate the function catalog
-  - exploit-analysis           # then synthesise a findings report
+  - indirect-prompt-injection  # then prove retrieved-content injection
+  - email-exfiltration-proof   # then validate the email side effect
 ```
 
 `scenarios/full-redteam-report.yaml` is the canonical example —
-recon → tool catalog → analysis, single scenario.
+recon → tool catalog → injection proof, single scenario.
 
 ## Migration: `module:` → `modules:`
 

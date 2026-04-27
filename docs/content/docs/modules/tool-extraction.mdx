@@ -20,8 +20,9 @@ exposed by tools-using assistants.
   meta-questions ("what can you help with?"), verbatim recital of
   function definitions.
 - You want to enumerate tools before deciding whether to attack any
-  individual one. `exploit-analysis` reads the resulting catalog
-  to plan tool-scoped exploits.
+  individual one. `indirect-prompt-injection` and
+  `email-exfiltration-proof` read the resulting catalog to target the
+  retrieval and side-effect path.
 
 ## When NOT to use it
 
@@ -96,7 +97,8 @@ modules:
 
 - [system-prompt-extraction](/docs/modules/system-prompt-extraction) —
   same shape, prompt-disclosure target surface.
-- [exploit-analysis](/docs/modules/exploit-analysis) — reads the
-  extracted catalog and plans exploits against specific tools.
+- [indirect-prompt-injection](/docs/modules/indirect-prompt-injection) —
+  reads the extracted catalog and proves retrieved-content instruction
+  following.
 - Source:
   [`modules/attacks/tool-extraction/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/modules/attacks/tool-extraction/module.yaml)

@@ -7,8 +7,8 @@ make that work:
 
 - ``Scenario.modules`` parses cleanly; the legacy ``module:`` field
   raises a migration-pointing error.
-- A registry-loaded manager module has ``is_executive=False`` by default.
-- ``build_tool_list`` swaps the toolset based on ``is_executive``: the
+- A registry-loaded manager module adapts to ``ActorRole.MODULE``.
+- ``build_tool_list`` swaps the toolset based on actor role: the
   executive gets ``ask_human`` / ``talk_to_operator`` /
   ``update_scratchpad`` (and NO ``send_message``); managers get
   ``send_message`` (and NONE of the operator tools).
@@ -20,7 +20,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mesmer.core.agent.tools import build_tool_list
+from mesmer.core.agent.tools import build_tool_list, resolve_tool_policy
+from mesmer.core.actor import ActorRole, ReactActorSpec, ToolPolicySpec
 from mesmer.core.constants import ToolName
 from mesmer.core.module import ModuleConfig, SubModuleEntry
 from mesmer.core.scenario import load_scenario
@@ -107,18 +108,16 @@ class TestScenarioModulesParsing:
             load_scenario(_write(tmp_path, "modules: just-a-string\n"))
 
 
-class TestModuleConfigIsExecutive:
-    def test_default_is_false(self):
+class TestModuleConfigActorAdapter:
+    def test_module_config_adapts_to_module_actor(self):
         m = ModuleConfig(name="some-manager", sub_modules=[])
-        assert m.is_executive is False
-
-    def test_explicit_true(self):
-        m = ModuleConfig(name="adhoc:executive", is_executive=True)
-        assert m.is_executive is True
+        actor = m.as_actor()
+        assert actor.role is ActorRole.MODULE
+        assert actor.name == "some-manager"
 
 
 class TestBuildToolListGating:
-    """Tool exposure swaps wholesale on ``module.is_executive``."""
+    """Tool exposure swaps wholesale on runtime actor role."""
 
     def _ctx(self):
         ctx = MagicMock()
@@ -129,17 +128,33 @@ class TestBuildToolListGating:
         return ctx
 
     def _executive(self):
-        return ModuleConfig(
+        return ReactActorSpec(
             name="adhoc:executive",
+            role=ActorRole.EXECUTIVE,
             sub_modules=[SubModuleEntry(name="system-prompt-extraction")],
-            is_executive=True,
+            tool_policy=ToolPolicySpec(
+                dispatch_submodules=True,
+                builtin=[
+                    ToolName.ASK_HUMAN.value,
+                    ToolName.TALK_TO_OPERATOR.value,
+                    ToolName.UPDATE_SCRATCHPAD.value,
+                    ToolName.CONCLUDE.value,
+                ],
+            ),
         )
 
     def _manager(self):
-        return ModuleConfig(
+        return ReactActorSpec(
             name="system-prompt-extraction",
+            role=ActorRole.MODULE,
             sub_modules=[SubModuleEntry(name="direct-ask")],
-            is_executive=False,
+            tool_policy=ToolPolicySpec(
+                dispatch_submodules=True,
+                builtin=[
+                    ToolName.SEND_MESSAGE.value,
+                    ToolName.CONCLUDE.value,
+                ],
+            ),
         )
 
     def test_executive_has_operator_tools_and_no_send_message(self):
@@ -152,6 +167,14 @@ class TestBuildToolListGating:
         assert ToolName.UPDATE_SCRATCHPAD.value in names
         assert ToolName.CONCLUDE.value in names
         assert ToolName.SEND_MESSAGE.value not in names
+        policy = resolve_tool_policy(self._executive())
+        assert policy.dispatch_submodules is True
+        assert policy.builtin == [
+            ToolName.ASK_HUMAN.value,
+            ToolName.TALK_TO_OPERATOR.value,
+            ToolName.UPDATE_SCRATCHPAD.value,
+            ToolName.CONCLUDE.value,
+        ]
 
     def test_manager_has_send_message_and_no_operator_tools(self):
         names = {
@@ -163,15 +186,48 @@ class TestBuildToolListGating:
         assert ToolName.ASK_HUMAN.value not in names
         assert ToolName.TALK_TO_OPERATOR.value not in names
         assert ToolName.UPDATE_SCRATCHPAD.value not in names
+        policy = resolve_tool_policy(self._manager())
+        assert policy.dispatch_submodules is True
+        assert policy.builtin == [
+            ToolName.SEND_MESSAGE.value,
+            ToolName.CONCLUDE.value,
+        ]
 
-    def test_pure_reasoning_module_can_opt_out_of_send_message(self):
-        module = ModuleConfig(
+    def test_pure_reasoning_module_can_declare_no_send_message(self):
+        module = ReactActorSpec(
             name="attack-planner",
-            parameters={"allow_target_access": False},
-            is_executive=False,
+            role=ActorRole.MODULE,
+            tool_policy=ToolPolicySpec(
+                dispatch_submodules=False,
+                builtin=[ToolName.CONCLUDE.value],
+            ),
         )
         names = {
             t["function"]["name"]
             for t in build_tool_list(module, self._ctx())
+        }
+        assert names == {ToolName.CONCLUDE.value}
+
+    def test_missing_tool_policy_fails_closed(self):
+        module = ReactActorSpec(
+            name="attack-planner",
+            role=ActorRole.MODULE,
+        )
+        with pytest.raises(ValueError, match="has no tool_policy"):
+            build_tool_list(module, self._ctx())
+
+    def test_explicit_tool_policy_overrides_role_default(self):
+        actor = ReactActorSpec(
+            name="dry-run-manager",
+            role=ActorRole.MODULE,
+            sub_modules=[SubModuleEntry(name="direct-ask")],
+            tool_policy=ToolPolicySpec(
+                dispatch_submodules=False,
+                builtin=[ToolName.CONCLUDE.value],
+            ),
+        )
+        names = {
+            t["function"]["name"]
+            for t in build_tool_list(actor, self._ctx())
         }
         assert names == {ToolName.CONCLUDE.value}

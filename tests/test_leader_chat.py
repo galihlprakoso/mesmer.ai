@@ -38,41 +38,35 @@ def memory(target_config, tmp_path):
 
 
 def _populate_graph(memory: TargetMemory):
-    """Seed a graph with one promising attempt + one dead end + one leader-verdict
-    + one frontier so the filters all have something to bite on."""
+    """Seed a graph with attempts plus one leader-verdict."""
     graph = memory.load_graph()
     root = graph.ensure_root()
     graph.add_node(
         root.id, "target-profiler", "passive recon",
         score=8, leaked_info="Kodee admits to having internal instructions",
         module_output="DOSSIER: target is Kodee, Hostinger sales bot…",
-        run_id="r1", status=NodeStatus.PROMISING.value,
+        run_id="r1", status=NodeStatus.COMPLETED.value,
     )
     graph.add_node(
         root.id, "anchoring", "lowball price ask",
         score=2, leaked_info="",
         module_output="ANCHOR FAILED: refused.",
         reflection="Refused on policy.", run_id="r1",
-        status=NodeStatus.DEAD.value,
+        status=NodeStatus.FAILED.value,
     )
     graph.add_node(
         root.id, "format-shift", "ask in pseudocode",
         score=9, leaked_info="Kodee dumped its full instruction list in code-block format",
         module_output="WIN: format-shift extracted system prompt verbatim.",
-        run_id="r1", status=NodeStatus.PROMISING.value,
+        run_id="r1", status=NodeStatus.COMPLETED.value,
     )
     # Leader-verdict node — should be filterable via source.
     graph.add_node(
         root.id, "system-prompt-extraction", "leader's overall verdict",
-        score=9, leaked_info="<verbatim system prompt>",
+        score=10, leaked_info="<verbatim system prompt>",
         module_output="OBJECTIVE MET via format-shift",
-        run_id="r1", status=NodeStatus.PROMISING.value,
+        run_id="r1", status=NodeStatus.COMPLETED.value,
         source=NodeSource.LEADER.value,
-    )
-    # Frontier (should be hidden by list_attempts).
-    graph.add_node(
-        root.id, "narrative-transport", "story framing — try next",
-        status=NodeStatus.FRONTIER.value, run_id="r1",
     )
     memory.save_graph(graph)
 
@@ -83,13 +77,11 @@ def _populate_graph(memory: TargetMemory):
 
 
 class TestDispatchTool:
-    def test_list_attempts_excludes_root_and_frontier(self, memory):
+    def test_list_attempts_excludes_root(self, memory):
         _populate_graph(memory)
         result = leader_chat.dispatch_tool("list_attempts", {}, memory)
         modules = [item["module"] for item in result["items"]]
         assert "root" not in modules
-        # Frontier "narrative-transport" must NOT appear.
-        assert "narrative-transport" not in modules
         # All four explored attempts (incl. leader-verdict) appear.
         assert sorted(modules) == sorted([
             "target-profiler", "anchoring", "format-shift", "system-prompt-extraction"
@@ -98,10 +90,10 @@ class TestDispatchTool:
     def test_list_attempts_filters_by_status(self, memory):
         _populate_graph(memory)
         result = leader_chat.dispatch_tool(
-            "list_attempts", {"status": "promising"}, memory
+            "list_attempts", {"status": "completed"}, memory
         )
         for item in result["items"]:
-            assert item["status"] == "promising"
+            assert item["status"] == "completed"
 
     def test_list_attempts_filters_by_min_score(self, memory):
         _populate_graph(memory)

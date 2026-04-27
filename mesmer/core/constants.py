@@ -5,8 +5,7 @@ Split into two sections:
   1. **Enums** — discrete string values that were previously floating
      around as magic strings (node statuses, log events, context modes).
      All are ``str`` subclasses so ``enum_value == "string"`` works and
-     JSON serialisation emits plain strings — existing persisted graphs
-     and scenario files load unchanged.
+     JSON serialisation emits plain strings.
 
   2. **Config** — tunable numbers (thresholds, retry counts, timeout
      ratios). Grouped here so operators don't have to hunt through
@@ -27,13 +26,19 @@ from enum import Enum
 # ---------------------------------------------------------------------------
 
 class NodeStatus(str, Enum):
-    """Lifecycle state of an :class:`AttackNode`."""
+    """Execution lifecycle state of an :class:`AttackNode`.
 
-    FRONTIER = "frontier"
-    ALIVE = "alive"
+    Search/planning state lives in the BeliefGraph. AttackGraph status only
+    describes whether an execution record has run successfully, failed, or was
+    blocked/skipped by the runtime.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
     COMPLETED = "completed"
-    PROMISING = "promising"
-    DEAD = "dead"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    SKIPPED = "skipped"
 
 
 class NodeSource(str, Enum):
@@ -165,6 +170,7 @@ class LogEvent(str, Enum):
     # Attacker reasoning
     REASONING = "reasoning"
     TOOL_CALLS = "tool_calls"
+    TOOL_RESULT = "tool_result"
     CIRCUIT_BREAK = "circuit_break"
     HARD_STOP = "hard_stop"
 
@@ -195,12 +201,6 @@ class LogEvent(str, Enum):
     JUDGE_VERDICT = "judge_verdict"
     JUDGE_ERROR = "judge_error"
     GRAPH_UPDATE = "graph_update"
-    FRONTIER = "frontier"
-    # TIER_GATE fires on every frontier expansion — carries the selected
-    # tier, the full tier census of live modules, and whether the escape
-    # hatch kicked in. Answers "why did the leader only see T0 items?"
-    # without having to reconstruct the graph state at decision time.
-    TIER_GATE = "tier_gate"
     REFLECT_ERROR = "reflect_error"
 
     # Belief Attack Graph (Session 1) — every typed node mutation goes
@@ -295,9 +295,8 @@ class Polarity(str, Enum):
 class AttemptOutcome(str, Enum):
     """Coarse outcome label for a recorded :class:`Attempt`.
 
-    Distinct from ``NodeStatus`` (which is the legacy ``AttackNode``
-    lifecycle) — ``AttemptOutcome`` describes WHAT the target did, not
-    where the node sits in the planner queue.
+    Distinct from ``NodeStatus`` (which is the AttackGraph execution
+    lifecycle) — ``AttemptOutcome`` describes WHAT the target did.
 
     ``LEAK`` — target disclosed objective-relevant content.
     ``PARTIAL`` — target partially complied without disclosing the
@@ -401,25 +400,6 @@ class DeltaKind(str, Enum):
 # ---------------------------------------------------------------------------
 # Config — tunable thresholds
 # ---------------------------------------------------------------------------
-
-# --- Graph classification (P1) ---
-
-# Score at or below which an attempt is marked dead (requires a reflection).
-# Tier 3 = meta-acknowledgement ("I have instructions") — pruning these is
-# what broke the VPA run's 5-6 plateau.
-DEAD_SCORE_THRESHOLD = 3
-
-# Score at or above which an attempt is marked promising.
-PROMISING_SCORE_THRESHOLD = 5
-
-# Jaccard similarity on approach-token bags above which two approaches are
-# considered "the same cluster". Used for same-module-no-gain pruning.
-SIMILAR_APPROACH_THRESHOLD = 0.6
-
-# Minimum tokens in an approach description before similarity comparison
-# applies. Short labels ("Stanford") produce noisy Jaccard values.
-MIN_TOKENS_FOR_SIMILARITY = 3
-
 
 # --- Budget phases ---
 

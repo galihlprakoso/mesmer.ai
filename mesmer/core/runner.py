@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from mesmer.core.actor import ExecutiveSpec
 from mesmer.core.constants import LogEvent, NodeSource, NodeStatus, ScenarioMode
 from mesmer.core.agent.context import Context, HumanQuestionBroker, RunTelemetry
 from mesmer.core.belief_graph import NodeKind, Strategy, TargetTraitsUpdateDelta
@@ -25,7 +26,6 @@ from mesmer.core.agent.beliefs import (
 )
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id
 from mesmer.core.agent.prompts import EXECUTIVE_SYSTEM as _DEFAULT_EXECUTIVE_PROMPT
-from mesmer.core.module import ModuleConfig, SubModuleEntry
 from mesmer.core.registry import Registry
 from mesmer.core.scenario import load_scenario, AgentConfig, Scenario
 from mesmer.core.strategy_library import (
@@ -178,27 +178,23 @@ async def execute_run(
     ordered_artifact_requirements = {}
     if (
         scenario.leader_prompt
-        and "exploit-analysis" in scenario.modules
-        and "exploit-executor" in scenario.modules
+        and "indirect-prompt-injection" in scenario.modules
+        and "email-exfiltration-proof" in scenario.modules
     ):
-        ordered_artifact_requirements["exploit-analysis"] = ["## Findings"]
+        ordered_artifact_requirements["indirect-prompt-injection"] = [
+            "## Retrieval Path",
+            "## Injection Evidence",
+        ]
 
-    entry = ModuleConfig(
+    executive = ExecutiveSpec(
         name=executive_name,
         description=f"Scenario-scoped executive for {scenario.name}.",
-        theory="Coordinates manager modules and converses with the operator.",
         system_prompt=scenario.leader_prompt or _DEFAULT_EXECUTIVE_PROMPT,
-        sub_modules=[SubModuleEntry(name=n) for n in scenario.modules],
-        parameters={
-            "suppress_belief_context": bool(scenario.leader_prompt),
-            "ordered_modules": list(scenario.modules) if scenario.leader_prompt else [],
-            "ordered_artifact_requirements": ordered_artifact_requirements,
-        },
-        judge_rubric="",
-        reset_target=False,
-        tier=0,
-        is_executive=True,
+        ordered_modules=list(scenario.modules) if scenario.leader_prompt else list(scenario.modules),
+        suppress_belief_context=bool(scenario.leader_prompt),
+        ordered_artifact_requirements=ordered_artifact_requirements,
     )
+    executive_actor = executive.as_actor()
 
     # Create target
     target = create_target(scenario.target)
@@ -282,7 +278,18 @@ async def execute_run(
         _turns=seeded_turns,
     )
 
-    # Seed the scratchpad from the graph's conversation history. Walk
+    graph_root = graph.ensure_root()
+    executive_node = graph.add_node(
+        parent_id=graph_root.id,
+        module=executive_actor.name,
+        approach=scenario.objective.goal or f"{executive_actor.name} run",
+        status=NodeStatus.RUNNING.value,
+        run_id=run_id,
+        source=NodeSource.LEADER.value,
+    )
+    ctx.graph_parent_id = executive_node.id
+
+    # Seed latest module outputs from the graph's conversation history. Walk
     # oldest → newest so ordinary modules keep latest-wins semantics.
     # Structured phase artifacts are slightly stricter: a later thin
     # retry summary should not overwrite an earlier valid deliverable
@@ -290,10 +297,9 @@ async def execute_run(
     # module that only produced target messages (no authored conclude
     # text) doesn't clutter the pad.
     #
-    # This is how the scratchpad carries cross-run knowledge forward:
-    # a second run against a known target starts with the latest
-    # profiler dossier + latest plan already on the pad, so the first
-    # sub-module delegation already sees it.
+    # This is how ordered phase gates and precise handoff warnings can inspect
+    # prior artifacts without rendering every module report into the shared
+    # scratchpad whiteboard.
     # ``conversation_history()`` already excludes leader-verdict nodes
     # at the source — this loop sees only real attempt outputs.
     for node in graph.conversation_history():
@@ -301,22 +307,18 @@ async def execute_run(
         if output:
             markers = ordered_artifact_requirements.get(node.module) or []
             if markers:
-                prior = ctx.scratchpad.get(node.module)
+                prior = ctx.scratchpad.module_output(node.module)
                 prior_has_artifact = all(marker in prior for marker in markers)
                 output_has_artifact = all(marker in output for marker in markers)
                 if prior_has_artifact and not output_has_artifact:
                     continue
-            ctx.scratchpad.set(node.module, output)
+            ctx.scratchpad.set_module_output(node.module, output)
 
-    # Persistent executive-scratchpad slot. The executive's slot is the only
-    # one the framework leaves empty after the conversation_history loop
-    # above (leader-verdict nodes are excluded at source), so the on-disk
-    # scratchpad.md content is canonical — overwrite cleanly. Edited via
-    # the executive's ``update_scratchpad`` tool and via the operator
-    # through the web UI's leader-chat.
+    # Persistent shared scratchpad whiteboard. Edited via
+    # ``update_scratchpad`` and rendered as a single note into prompts.
     scratchpad_md = None if config.fresh else memory.load_scratchpad()
     if scratchpad_md is not None:
-        ctx.scratchpad.set(executive_name, scratchpad_md)
+        ctx.scratchpad.update(scratchpad_md)
 
     # Fire ctx-ready hook AFTER seeding so the web backend's hold-onto-ctx
     # grab gets a fully populated context (operator_messages queue ready).
@@ -381,7 +383,7 @@ async def execute_run(
         frontier_deltas = generate_frontier_experiments(
             belief_graph,
             registry=registry,
-            available_modules=entry.sub_module_names,
+            available_modules=executive_actor.sub_module_names,
             run_id=run_id,
         )
         for d in frontier_deltas:
@@ -401,7 +403,7 @@ async def execute_run(
 
     # Run
     try:
-        result = await run_react_loop(entry, ctx, scenario.objective.goal, log=actual_log)
+        result = await run_react_loop(executive_actor, ctx, scenario.objective.goal, log=actual_log)
     except KeyboardInterrupt:
         result = "Interrupted by user"
     except Exception as e:
@@ -411,41 +413,16 @@ async def execute_run(
         if config.human_broker is not None:
             config.human_broker.cancel_all("run ended")
 
-    # Record the leader's own execution as a graph node, same as any
-    # sub-module: one module run → one node. The leader is just a module
-    # whose parent in the tree is root (or the last sub-module it
-    # delegated to). Marking source=LEADER lets attempt-centric walks
-    # (TAPER trace, frontier ranking, winning-module attribution) skip
-    # it without having to know the leader's module name. Parent = most
-    # recent non-leader node produced during this run_id, else root.
-    _leader_peer_nodes = [
-        n
-        for n in graph.nodes.values()
-        if n.run_id == run_id and n.module != "root" and not n.is_leader_verdict
-    ]
-    if _leader_peer_nodes:
-        _leader_parent = max(_leader_peer_nodes, key=lambda n: n.timestamp)
-        _leader_parent_id = _leader_parent.id
-    else:
-        if graph.root_id is None:
-            graph.ensure_root()
-        _leader_parent_id = graph.root_id
     objective_met = bool(ctx.objective_met)
-    graph.add_node(
-        parent_id=_leader_parent_id,
-        module=entry.name,
-        approach=scenario.objective.goal or f"{entry.name} run",
-        module_output=result or "",
-        leaked_info=ctx.objective_met_fragment or "",
-        reflection=("objective_met=true" if objective_met else "objective_met=false"),
-        # Explicit status skips auto_classify — we already know the
-        # outcome from ctx.objective_met, no need for the similarity
-        # heuristic to second-guess it.
-        status=(NodeStatus.PROMISING.value if objective_met else NodeStatus.DEAD.value),
-        score=10 if objective_met else 1,
-        run_id=run_id,
-        source=NodeSource.LEADER.value,
-    )
+    executive_node.module = executive_actor.name
+    executive_node.approach = scenario.objective.goal or f"{executive_actor.name} run"
+    executive_node.module_output = result or ""
+    executive_node.leaked_info = ctx.objective_met_fragment or ""
+    executive_node.reflection = "objective_met=true" if objective_met else "objective_met=false"
+    executive_node.status = NodeStatus.COMPLETED.value
+    executive_node.score = 10 if objective_met else 1
+    executive_node.run_id = run_id
+    executive_node.source = NodeSource.LEADER.value
 
     # Save graph + memory
     memory.save_graph(graph)

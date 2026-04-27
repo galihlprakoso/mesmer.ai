@@ -15,9 +15,9 @@ from mesmer.core.constants import LogEvent, ToolName
 from mesmer.core.errors import TurnBudgetExhausted
 
 if TYPE_CHECKING:
+    from mesmer.core.actor import ReactActorSpec
     from mesmer.core.agent.context import Context
     from mesmer.core.agent.engine import LogFn
-    from mesmer.core.module import ModuleConfig
 
 
 NAME = ToolName.SEND_MESSAGE
@@ -47,7 +47,7 @@ SCHEMA = {
 
 async def handle(
     ctx: Context,
-    module: ModuleConfig,
+    module: "ReactActorSpec",
     call,
     args: dict,
     log: LogFn,

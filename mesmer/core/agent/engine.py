@@ -34,6 +34,7 @@ from mesmer.core.agent.prompts import CONTINUATION_PREAMBLE
 from mesmer.core.agent.retry import _completion_with_retry
 from mesmer.core.agent.tools import build_tool_list, dispatch_tool_call
 from mesmer.core.agent.tools.conclude import DEFAULT_RESULT as CONCLUDE_DEFAULT_RESULT
+from mesmer.core.actor import ReactActorSpec, ensure_actor
 from mesmer.core.constants import (
     MAX_CONSECUTIVE_REASONING,
     LogEvent,
@@ -43,7 +44,6 @@ from mesmer.core.constants import (
 
 if TYPE_CHECKING:
     from mesmer.core.agent.context import Context
-    from mesmer.core.module import ModuleConfig
 
 
 # Logger callback type: (event, detail) → None
@@ -90,14 +90,14 @@ def _serialize_message(msg) -> dict:
 
 
 async def run_react_loop(
-    module: "ModuleConfig",
+    actor: ReactActorSpec,
     ctx: "Context",
     instruction: str,
     max_iterations: int = 50,
     log: LogFn | None = None,
 ) -> str:
     """
-    The universal ReAct loop. Runs any module — simple or complex.
+    The universal ReAct loop. Runs any runtime actor — executive or module.
     This is the entire framework runtime.
 
     Features:
@@ -107,16 +107,45 @@ async def run_react_loop(
     - Circuit breaker for models that refuse
     """
     log = log or _noop_log
+    raw_log = getattr(log, "_raw_log", log)
+    actor = ensure_actor(actor)
 
-    tools = build_tool_list(module, ctx)
+    trace_events = {
+        LogEvent.MODULE_START.value,
+        LogEvent.LLM_CALL.value,
+        LogEvent.REASONING.value,
+        LogEvent.TOOL_CALLS.value,
+        LogEvent.TOOL_RESULT.value,
+        LogEvent.CIRCUIT_BREAK.value,
+        LogEvent.HARD_STOP.value,
+        LogEvent.DELEGATE.value,
+        LogEvent.DELEGATE_DONE.value,
+        LogEvent.CONCLUDE.value,
+    }
+
+    current_iteration: int | None = None
+
+    def trace_log(event: str, detail: str = "") -> None:
+        if event in trace_events:
+            ctx.record_agent_trace(
+                event,
+                detail,
+                actor=actor.name,
+                iteration=current_iteration,
+            )
+        raw_log(event, detail)
+
+    trace_log._raw_log = raw_log  # type: ignore[attr-defined]
+
+    tools = build_tool_list(actor, ctx)
     tool_names = [t["function"]["name"] for t in tools]
-    log(LogEvent.MODULE_START.value, f"{module.name} — tools: {', '.join(tool_names)}")
+    trace_log(LogEvent.MODULE_START.value, f"{actor.name} — tools: {', '.join(tool_names)}")
 
     # Build initial messages
-    system_content = module.system_prompt or (
-        f"You are the '{module.name}' module.\n\n"
-        f"Description: {module.description}\n\n"
-        f"Theory: {module.theory}\n\n"
+    system_content = actor.system_prompt or (
+        f"You are the '{actor.name}' module.\n\n"
+        f"Description: {actor.description}\n\n"
+        f"Theory: {actor.theory}\n\n"
         "Use your tools to accomplish the instruction. "
         "Call conclude() when done."
     )
@@ -211,16 +240,14 @@ async def run_react_loop(
                 "tool if useful.\n\n" + "\n".join(rendered)
             )
 
-    # Scratchpad — CURRENT STATE (KV snapshot). Populated at run start
-    # from the graph's latest per-module outputs; auto-updated after
-    # every sub-module delegation. Answers "what does each module's
-    # LATEST conclusion say?". Keyed by module name; any module author
-    # reads e.g. the target-profiler slot for the latest dossier.
+    # Scratchpad — shared whiteboard. This is intentionally not the
+    # per-module output cache; full reports are available through the graph
+    # history below. The scratchpad is concise working state that agents
+    # maintain with update_scratchpad.
     scratchpad_block = ctx.scratchpad.render_for_prompt()
     if scratchpad_block:
         user_content_parts.append(
-            "## Scratchpad — current state (latest output per module, "
-            "this run + carried forward from prior runs)\n" + scratchpad_block
+            "## Scratchpad — shared whiteboard\n" + scratchpad_block
         )
 
     # Module conversation history — TIMELINE. Ordered record of every
@@ -254,14 +281,12 @@ async def run_react_loop(
     # MANAGER sees only its assignment, EMPLOYEE sees a focused job
     # description. Empty string when ctx.belief_graph is None (legacy
     # callers) or empty (brand-new target before bootstrap).
-    belief_context = _build_belief_context(ctx, module)
+    belief_context = _build_belief_context(ctx, actor)
     if belief_context:
         user_content_parts.append(belief_context)
     else:
-        # Legacy fallback only. Once the typed belief graph can render a
-        # decision brief, do not also inject the old module-first frontier
-        # summary; competing planner contracts made the leader ignore
-        # `experiment_id` and fall back to `frontier_id`.
+        # Execution-trace fallback only. Search/frontier planning lives in
+        # the BeliefGraph; AttackGraph context is audit/history.
         graph_context = _build_graph_context(ctx)
         if graph_context:
             user_content_parts.append(f"## Attack Intelligence\n{graph_context}")
@@ -312,12 +337,13 @@ async def run_react_loop(
     consecutive_reasoning = 0
 
     for iteration in range(max_iterations):
+        current_iteration = iteration + 1
         # Depth-prefixed iteration label so nested modules don't confuse the
         # reader when their iteration counters interleave with the leader's.
         indent = "  " * ctx.depth
-        log(
+        trace_log(
             LogEvent.LLM_CALL.value,
-            f"{indent}[{module.name} @ depth={ctx.depth}] "
+            f"{indent}[{actor.name} @ depth={ctx.depth}] "
             f"iteration {iteration + 1}/{max_iterations} — calling {ctx.agent_model}...",
         )
 
@@ -355,14 +381,14 @@ async def run_react_loop(
         if not msg.tool_calls:
             consecutive_reasoning += 1
             reasoning = msg.content or ""
-            log(
+            trace_log(
                 LogEvent.REASONING.value,
                 f"({elapsed:.1f}s) [{consecutive_reasoning}/{MAX_CONSECUTIVE_REASONING}] {reasoning}",
             )
 
             # Hard cap: model is truly refusing
             if consecutive_reasoning >= MAX_CONSECUTIVE_REASONING * 2:
-                log(
+                trace_log(
                     LogEvent.HARD_STOP.value,
                     f"Model refused to use tools after {consecutive_reasoning} turns — auto-concluding",
                 )
@@ -374,7 +400,7 @@ async def run_react_loop(
 
             # Circuit breaker
             if consecutive_reasoning >= MAX_CONSECUTIVE_REASONING:
-                log(
+                trace_log(
                     LogEvent.CIRCUIT_BREAK.value,
                     f"Model not using tools ({consecutive_reasoning} turns) — nudging toward action",
                 )
@@ -399,12 +425,19 @@ async def run_react_loop(
         consecutive_reasoning = 0
 
         call_names = [c.function.name for c in msg.tool_calls]
-        log(LogEvent.TOOL_CALLS.value, f"({elapsed:.1f}s) → {', '.join(call_names)}")
+        trace_log(LogEvent.TOOL_CALLS.value, f"({elapsed:.1f}s) → {', '.join(call_names)}")
 
         # Process tool calls
         for call in msg.tool_calls:
             fn_name = call.function.name
             args = _parse_args(call.function.arguments)
+            ctx.record_agent_trace(
+                LogEvent.TOOL_CALLS.value,
+                fn_name,
+                actor=actor.name,
+                iteration=current_iteration,
+                payload={"name": fn_name, "args": args, "tool_call_id": call.id},
+            )
 
             # ``conclude`` is the one tool that exits the loop. Keep its
             # short-circuit here (not in the dispatch table) so the engine
@@ -420,11 +453,27 @@ async def run_react_loop(
                 if args.get("objective_met", False):
                     ctx.objective_met = True
                     ctx.objective_met_fragment = result_text
-                log(LogEvent.CONCLUDE.value, result_text)
+                ctx.record_agent_trace(
+                    LogEvent.CONCLUDE.value,
+                    result_text,
+                    actor=actor.name,
+                    iteration=current_iteration,
+                    payload={"name": fn_name, "args": args, "tool_call_id": call.id},
+                )
+                raw_log(LogEvent.CONCLUDE.value, result_text)
                 return result_text
 
-            messages.append(
-                await dispatch_tool_call(fn_name, ctx, module, call, args, instruction, log)
+            result_msg = await dispatch_tool_call(
+                fn_name, ctx, actor, call, args, instruction, trace_log
+            )
+            messages.append(result_msg)
+            result_text = str(result_msg.get("content", ""))
+            ctx.record_agent_trace(
+                LogEvent.TOOL_RESULT.value,
+                result_text[:2000],
+                actor=actor.name,
+                iteration=current_iteration,
+                payload={"name": fn_name, "tool_call_id": call.id},
             )
 
             # Early-terminate: the in-loop LLM judge flagged objective_met
@@ -439,7 +488,7 @@ async def run_react_loop(
                     if ctx.objective_met_fragment
                     else "Objective met."
                 )
-                log(LogEvent.CONCLUDE.value, f"[auto] {result_text}")
+                trace_log(LogEvent.CONCLUDE.value, f"[auto] {result_text}")
                 return result_text
 
     return f"Max iterations ({max_iterations}) reached without conclude()."

@@ -1,118 +1,22 @@
-"""Attack Graph — persistent per-target memory of attack attempts + frontier proposer.
+"""Attack Graph — persistent execution trace for target runs.
 
-Every attack attempt is a node. Dead ends are remembered (score ≤ DEAD
-threshold). Promising leads are deepened (score ≥ PROMISING threshold).
-The frontier proposer picks the next move via tier-gated selection
-(simple-before-complex, not UCB) and reads off prior nodes to avoid
-re-walking explored paths.
-
-This is NOT MCTS — there's no UCT/UCB selection rule, no rollouts, no
-backpropagation of values up the tree. It's a scored attack-attempt
-graph with a deterministic frontier proposer. The compounding-across-
-runs property comes from on-disk persistence at
-``~/.mesmer/targets/{hash}/graph.json``, not from a search algorithm.
+Every executed module is a node. Edges mean runtime delegation / sequence, not
+search value propagation. Judge scores and reflections are kept as metadata on
+the execution record, but search concepts such as frontier, dead end, and
+utility ranking belong to the BeliefGraph.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from mesmer.core.constants import (
-    DEAD_SCORE_THRESHOLD,
-    MIN_TOKENS_FOR_SIMILARITY,
-    NodeSource,
-    NodeStatus,
-    PROMISING_SCORE_THRESHOLD,
-    SIMILAR_APPROACH_THRESHOLD,
-)
-
-
-def _approach_tokens(text: str) -> set[str]:
-    """Tokenise an approach description for similarity comparison.
-
-    Keeps words of length >= 4 after lowercasing and stripping punctuation.
-    Short function words are dropped so they don't dominate the Jaccard
-    intersection.
-    """
-    if not text:
-        return set()
-    t = re.sub(r"[^a-z0-9\s]", " ", text.lower())
-    return {w for w in t.split() if len(w) >= 4}
-
-
-def _jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
-
-
-def _apply_tier_gate(
-    live: dict[str, dict],
-) -> tuple[dict[str, dict], dict]:
-    """Implement the "simple before complex" ladder over tiered module stats.
-
-    Input shape — one entry per live module (all_dead modules already dropped):
-    ``{"tier": int, "tried": int, "best": int, "all_dead": False}``.
-
-    Picks the lowest tier that still has a **live** candidate and returns only
-    that tier's entries. "Live" = untried, OR tried with ``best >=
-    PROMISING_SCORE_THRESHOLD`` (worth deepening).
-
-    If no tier is live (every tier is tried-and-unpromising), returns the full
-    ``live`` dict — the escape hatch so a stale tier-0 pool doesn't strand a
-    promising tier-2 lead. Callers then fall back to cross-tier ranking.
-
-    Returns a tuple ``(filtered_live, decision)``. ``decision`` is a small
-    dict that callers can surface through logs:
-
-        {
-            "selected_tier": int | None,  # None when escape hatch fired
-            "escape_hatch": bool,
-            "by_tier": {0: {"live": 2, "dead_or_stale": 1}, 1: ...},
-        }
-
-    The decision dict doesn't depend on the final ranking; it only reflects
-    the gate's filter logic, which is the piece the trace cares about.
-    """
-    decision: dict = {
-        "selected_tier": None,
-        "escape_hatch": False,
-        "by_tier": {},
-    }
-    if not live:
-        return live, decision
-
-    # Group module names by tier.
-    by_tier: dict[int, list[str]] = {}
-    for mod, stats in live.items():
-        by_tier.setdefault(stats["tier"], []).append(mod)
-
-    # Census per tier — how many are live (untried or promising) vs stale.
-    census: dict[int, dict[str, int]] = {}
-    for tier, members in by_tier.items():
-        n_live = sum(
-            1 for m in members
-            if live[m]["tried"] == 0 or live[m]["best"] >= PROMISING_SCORE_THRESHOLD
-        )
-        census[tier] = {"live": n_live, "dead_or_stale": len(members) - n_live}
-    decision["by_tier"] = census
-
-    # Find the lowest tier with a live candidate.
-    for tier in sorted(by_tier.keys()):
-        if census[tier]["live"] > 0:
-            decision["selected_tier"] = tier
-            return {m: live[m] for m in by_tier[tier]}, decision
-
-    # Escape hatch: no tier is live → let cross-tier ranking decide.
-    decision["escape_hatch"] = True
-    return live, decision
+from mesmer.core.constants import NodeSource, NodeStatus
 
 
 # ---------------------------------------------------------------------------
@@ -139,30 +43,27 @@ class AttackNode:
     # ``module_output`` is verbatim.
     module_output: str = ""
     reflection: str = ""                    # why it worked/failed
-    status: str = NodeStatus.FRONTIER.value
+    status: str = NodeStatus.PENDING.value
     children: list[str] = field(default_factory=list)
     depth: int = 0
     timestamp: float = field(default_factory=time.time)
     run_id: str = ""
     source: str = NodeSource.AGENT.value
+    agent_trace: list[dict] = field(default_factory=list)
 
     # --- helpers ---
 
     @property
-    def is_dead(self) -> bool:
-        return self.status == NodeStatus.DEAD
+    def is_failed(self) -> bool:
+        return self.status == NodeStatus.FAILED.value
 
     @property
-    def is_frontier(self) -> bool:
-        return self.status == NodeStatus.FRONTIER
-
-    @property
-    def is_promising(self) -> bool:
-        return self.status == NodeStatus.PROMISING
+    def is_pending(self) -> bool:
+        return self.status == NodeStatus.PENDING.value
 
     @property
     def is_completed(self) -> bool:
-        return self.status == NodeStatus.COMPLETED
+        return self.status == NodeStatus.COMPLETED.value
 
     @property
     def is_leader_verdict(self) -> bool:
@@ -194,6 +95,7 @@ class AttackNode:
             "timestamp": self.timestamp,
             "run_id": self.run_id,
             "source": self.source,
+            "agent_trace": self.agent_trace,
         }
 
     @classmethod
@@ -232,7 +134,7 @@ class AttackGraph:
             parent_id=None,
             module="root",
             approach="initial state — no info yet",
-            status=NodeStatus.ALIVE.value,
+            status=NodeStatus.COMPLETED.value,
             depth=0,
         )
         self.root_id = root.id
@@ -251,7 +153,7 @@ class AttackGraph:
         leaked_info: str = "",
         module_output: str = "",
         reflection: str = "",
-        status: str = NodeStatus.ALIVE.value,
+        status: str = NodeStatus.COMPLETED.value,
         run_id: str = "",
         source: str = NodeSource.AGENT.value,
     ) -> AttackNode:
@@ -276,97 +178,6 @@ class AttackGraph:
             source=source,
         )
 
-        # Auto-classify
-        if status == NodeStatus.ALIVE:
-            self._auto_classify(node)
-
-        self.nodes[node.id] = node
-        if parent:
-            parent.children.append(node.id)
-        return node
-
-    def _auto_classify(self, node: AttackNode) -> None:
-        """Set status on an un-stored node based on its score and the graph.
-
-        Order matters: the same-module-no-gain check takes precedence over
-        the promising threshold. An approach that's been tried twice with
-        the same result is dead even if score is 5 — "promising but stuck"
-        is a worse frontier than "fresh and untested".
-        """
-        score = node.score
-
-        # 1. Dead from score alone.
-        if score <= DEAD_SCORE_THRESHOLD and node.reflection:
-            node.status = NodeStatus.DEAD.value
-            return
-
-        # 2. Dead from same-module-no-gain: this approach was already
-        #    explored under the same module and didn't improve on that
-        #    attempt's score. Keeps the tree from re-walking.
-        prior_score = self._best_similar_score(node)
-        if prior_score is not None and score <= prior_score:
-            node.status = NodeStatus.DEAD.value
-            if not node.reflection:
-                node.reflection = (
-                    f"same-module-no-gain: {node.module} already scored "
-                    f"{prior_score} on a similar approach"
-                )
-            return
-
-        # 3. Promising by score.
-        if score >= PROMISING_SCORE_THRESHOLD:
-            node.status = NodeStatus.PROMISING.value
-
-    def _best_similar_score(self, node: AttackNode) -> int | None:
-        """Highest score seen on a prior node with the same module AND a
-        sufficiently-similar approach string. Returns None if no match.
-        """
-        tokens = _approach_tokens(node.approach)
-        if len(tokens) < MIN_TOKENS_FOR_SIMILARITY:
-            return None
-
-        best: int | None = None
-        for other in self.nodes.values():
-            if other.id == node.id:
-                continue
-            if other.module != node.module:
-                continue
-            if other.status == NodeStatus.FRONTIER:
-                continue  # frontiers are unexplored, can't compare scores
-            if other.module == "root":
-                continue
-            other_tokens = _approach_tokens(other.approach)
-            if len(other_tokens) < MIN_TOKENS_FOR_SIMILARITY:
-                continue
-            if _jaccard(tokens, other_tokens) < SIMILAR_APPROACH_THRESHOLD:
-                continue
-            if best is None or other.score > best:
-                best = other.score
-        return best
-
-    def add_frontier_node(
-        self,
-        parent_id: str,
-        module: str,
-        approach: str,
-        *,
-        source: str = NodeSource.AGENT.value,
-        run_id: str = "",
-    ) -> AttackNode:
-        """Add an unexplored frontier node — a suggested next move."""
-        parent = self.nodes.get(parent_id)
-        depth = (parent.depth + 1) if parent else 1
-
-        node = AttackNode(
-            id=self._make_id(),
-            parent_id=parent_id,
-            module=module,
-            approach=approach,
-            status=NodeStatus.FRONTIER.value,
-            depth=depth,
-            source=source,
-            run_id=run_id,
-        )
         self.nodes[node.id] = node
         if parent:
             parent.children.append(node.id)
@@ -378,208 +189,55 @@ class AttackGraph:
         parent_id: str | None = None,
         run_id: str = "",
     ) -> AttackNode:
-        """Add a human insight as a high-priority frontier node."""
+        """Record a human operator hint as an execution-trace note."""
         pid = parent_id or self.root_id
         if pid is None:
             self.ensure_root()
             pid = self.root_id
 
-        return self.add_frontier_node(
+        return self.add_node(
             parent_id=pid,
             module="human-insight",
             approach=hint_text,
+            status=NodeStatus.COMPLETED.value,
             source=NodeSource.HUMAN.value,
             run_id=run_id,
         )
 
-    def mark_dead(self, node_id: str, reason: str = "") -> None:
+    def mark_failed(self, node_id: str, reason: str = "") -> None:
         node = self.nodes.get(node_id)
         if node:
-            node.status = NodeStatus.DEAD.value
+            node.status = NodeStatus.FAILED.value
             if reason:
                 node.reflection = reason
 
-    def promote_frontier(self, node_id: str) -> AttackNode | None:
-        """Mark a frontier node as being explored (alive)."""
-        node = self.nodes.get(node_id)
-        if node and node.is_frontier:
-            node.status = NodeStatus.ALIVE.value
-            return node
-        return None
-
-    def fulfill_frontier(
+    def append_agent_trace(
         self,
         node_id: str,
         *,
-        approach: str,
-        messages_sent: list[str],
-        target_responses: list[str],
-        score: int,
-        leaked_info: str = "",
-        module_output: str = "",
-        reflection: str = "",
-        run_id: str = "",
-        module: str | None = None,
-    ) -> AttackNode | None:
-        """Fill a frontier node with actual attempt results and flip its
-        status based on score (dead / alive / promising).
-
-        Used when the leader executes a specific frontier suggestion —
-        preserves the parent-child refinement edge instead of creating a
-        disconnected sibling of root. TAP-aligned: parent edge means
-        "child was proposed by reflecting on parent's result."
-
-        If `module` is provided, overrides the stored module name to match
-        the sub-module the leader actually called. This fixes the mismatch
-        where a frontier's stored `module` (from a prior reflection or
-        persisted run) differs from what the leader executed.
-
-        Returns None if the node is missing or is not in frontier status.
-        """
+        event: str,
+        detail: str = "",
+        actor: str = "",
+        depth: int = 0,
+        iteration: int | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        """Append one ReAct runtime event to an execution node."""
         node = self.nodes.get(node_id)
-        if node is None or not node.is_frontier:
-            return None
-
-        node.approach = approach or node.approach
-        node.messages_sent = messages_sent
-        node.target_responses = target_responses
-        node.score = score
-        node.leaked_info = leaked_info
-        node.module_output = module_output
-        node.reflection = reflection
-        node.run_id = run_id or node.run_id
-        node.timestamp = time.time()
-        if module:
-            node.module = module
-
-        # Route through the shared classifier. Start from alive — the helper
-        # escalates to promising or dead based on score and graph context.
-        node.status = NodeStatus.ALIVE.value
-        self._auto_classify(node)
-        return node
-
-    # --- frontier proposal — deterministic next-move selection ---
-
-    def propose_frontier(
-        self,
-        available_modules: list[str],
-        *,
-        parent_id: str | None = None,
-        top_k: int = 3,
-        tiers: dict[str, int] | None = None,
-        gate_decision_out: dict | None = None,
-    ) -> list[dict]:
-        """Rank available modules for the next frontier expansion.
-
-        Deterministic next-move selection — the LLM no longer picks which
-        technique to try, the graph does. Rules, in priority order:
-
-          1. **Tier gate** — "simple before complex". Find the lowest tier
-             that still has a live candidate (untried module, or a tried
-             module that's either promising or not yet fully dead). Filter
-             candidates to that tier. Callers pass ``tiers`` — a mapping
-             ``module_name → tier`` sourced from :meth:`Registry.tiers_for`.
-             When ``tiers`` is ``None``, every module is treated as tier-2 and
-             the gate collapses to a no-op — legacy callers see unchanged
-             behaviour.
-          2. **Escape hatch** — if no tier is live (every tier is saturated
-             with dead-or-unpromising tried modules), fall back to cross-tier
-             ranking so a dead tier-0 pool doesn't strand a promising tier-2
-             lead.
-          3. Untried modules first within the gated tier — unexplored
-             techniques run before re-walking anything (no statistical
-             prior is computed; "untried" is treated as the highest-
-             priority class outright).
-          4. Modules with at least one non-dead attempt, ranked by best score
-             (exploit what worked).
-          5. Exclude: modules whose every prior attempt is dead in the graph
-             (anywhere, not just under this parent). No point retrying a
-             technique the target has decisively rebuffed.
-
-        Returns a list of dicts, each with:
-          - ``module``: str — the chosen technique
-          - ``parent_id``: str — node this frontier will attach under
-          - ``rationale``: str — short human-readable reason for telemetry
-          - ``best_score``: int — 0 if untried, otherwise the prior best
-          - ``tier``: int — the module's attack-cost tier (default 2 when
-            the caller didn't supply the mapping).
-
-        The LLM then refines each proposal into a concrete approach one-liner
-        (see :func:`mesmer.core.agent.judge.refine_approach`). It cannot re-pick
-        modules because it is never shown a menu.
-        """
-        if not available_modules:
-            return []
-
-        attach_to = parent_id or self.root_id
-        explored = self.get_explored_nodes()
-        tiers = tiers or {}
-
-        per_module: dict[str, dict] = {}
-        for mod in available_modules:
-            tier = tiers.get(mod, 2)
-            nodes = [n for n in explored if n.module == mod]
-            if not nodes:
-                per_module[mod] = {
-                    "tried": 0, "best": 0, "all_dead": False, "tier": tier,
-                }
-                continue
-            per_module[mod] = {
-                "tried": len(nodes),
-                "best": max(n.score for n in nodes),
-                "all_dead": all(n.is_dead for n in nodes),
-                "tier": tier,
-            }
-
-        # Drop modules whose every prior attempt is dead — that's a hard
-        # exclude regardless of tier.
-        live = {mod: s for mod, s in per_module.items() if not s["all_dead"]}
-
-        # Tier gate. A tier is "live" if it contains at least one candidate
-        # that's either untried OR promising (best >= PROMISING_SCORE_THRESHOLD).
-        # A tier whose only live members are tried-and-unpromising is stale —
-        # we've probed it and learned nothing worth deepening; the gate should
-        # skip to the next tier rather than keep re-walking.
-        gated_modules, decision = _apply_tier_gate(live)
-
-        # When the caller supplied an out-param dict, copy the decision into
-        # it so the caller can emit a structured trace event. Keeps the
-        # return type stable (still ``list[dict]``) for every existing
-        # caller that doesn't care about the gate metadata.
-        if gate_decision_out is not None:
-            gate_decision_out.clear()
-            gate_decision_out.update(decision)
-
-        ranked = sorted(
-            gated_modules.items(),
-            # Priority key: tier ascending, then untried first (tried > 0 is
-            # False), then best score descending, then module name for stable
-            # ordering.
-            key=lambda x: (x[1]["tier"], x[1]["tried"] > 0, -x[1]["best"], x[0]),
-        )
-
-        results: list[dict] = []
-        for mod, stats in ranked[:top_k]:
-            if stats["tried"] == 0:
-                rationale = "untried — explore new arm"
-            else:
-                rationale = f"deepen {mod} — prior best score {stats['best']}"
-            results.append({
-                "module": mod,
-                "parent_id": attach_to,
-                "rationale": rationale,
-                "best_score": stats["best"],
-                "tier": stats["tier"],
-            })
-        return results
-
-    def edit_approach(self, node_id: str, new_approach: str) -> AttackNode | None:
-        """Update the approach text of a node (typically a frontier)."""
-        node = self.nodes.get(node_id)
-        if node:
-            node.approach = new_approach
-            return node
-        return None
+        if node is None:
+            return
+        item = {
+            "timestamp": time.time(),
+            "event": event,
+            "detail": detail,
+            "actor": actor or node.module,
+            "depth": depth,
+        }
+        if iteration is not None:
+            item["iteration"] = iteration
+        if payload:
+            item["payload"] = payload
+        node.agent_trace.append(item)
 
     # --- queries ---
 
@@ -592,60 +250,34 @@ class AttackGraph:
     def iter_nodes(self) -> Iterator[AttackNode]:
         return iter(self.nodes.values())
 
-    def get_frontier_nodes(self, limit: int = 20) -> list[AttackNode]:
-        """Frontier nodes, sorted: human-source first, then by parent score desc."""
-        frontier = [n for n in self.nodes.values() if n.is_frontier]
+    def get_high_scoring_nodes(self, min_score: int = 7) -> list[AttackNode]:
+        """Executed nodes with useful judge scores, sorted by score desc."""
+        nodes = [
+            n for n in self.get_explored_nodes()
+            if n.score >= min_score and not n.is_leader_verdict
+        ]
+        nodes.sort(key=lambda n: -n.score)
+        return nodes
 
-        def sort_key(n: AttackNode):
-            # human hints get top priority (0), agent gets 1
-            source_rank = 0 if n.source == NodeSource.HUMAN else 1
-            # higher parent score = better
-            parent = self.nodes.get(n.parent_id) if n.parent_id else None
-            parent_score = -(parent.score if parent else 0)
-            return (source_rank, parent_score, -n.timestamp)
-
-        frontier.sort(key=sort_key)
-        return frontier[:limit]
-
-    def get_promising_nodes(self) -> list[AttackNode]:
-        """Nodes with score >= 5, sorted by score desc."""
-        promising = [n for n in self.nodes.values() if n.is_promising]
-        promising.sort(key=lambda n: -n.score)
-        return promising
-
-    def get_dead_nodes(self) -> list[AttackNode]:
-        return [n for n in self.nodes.values() if n.is_dead]
+    def get_failed_nodes(self) -> list[AttackNode]:
+        return [n for n in self.nodes.values() if n.is_failed]
 
     def get_explored_nodes(self) -> list[AttackNode]:
-        """All non-frontier, non-root nodes."""
+        """All non-root execution records."""
         explored_statuses = {
-            NodeStatus.ALIVE,
             NodeStatus.COMPLETED,
-            NodeStatus.PROMISING,
-            NodeStatus.DEAD,
+            NodeStatus.FAILED,
+            NodeStatus.BLOCKED,
+            NodeStatus.SKIPPED,
         }
         return [
             n for n in self.nodes.values()
-            if n.status in explored_statuses and n.module != "root"
+            if n.status in {s.value for s in explored_statuses} and n.module != "root"
         ]
 
     def get_best_score(self) -> int:
         explored = self.get_explored_nodes()
         return max((n.score for n in explored), default=0)
-
-    def latest_explored_node(self) -> AttackNode | None:
-        """The most recently-recorded non-root explored node.
-
-        Used by CONTINUOUS-mode attach-point resolution: in a one-chat arc
-        each new move is a continuation of the previous one, so a "fresh"
-        attempt (no ``frontier_id``) should still dangle under the latest
-        explored node, not root. Returns None when the graph has no
-        explored attempts yet — callers should fall back to root.
-        """
-        explored = self.get_explored_nodes()
-        if not explored:
-            return None
-        return max(explored, key=lambda n: n.timestamp)
 
     def get_path(self, node_id: str) -> list[AttackNode]:
         """Walk from node to root, return path root→node."""
@@ -690,10 +322,9 @@ class AttackGraph:
         s = self.stats()
         lines.append(
             f"Attack graph: {s['total']} nodes "
-            f"({s['by_status'].get(NodeStatus.DEAD.value, 0)} dead, "
-            f"{s['by_status'].get(NodeStatus.PROMISING.value, 0)} promising, "
+            f"({s['by_status'].get(NodeStatus.FAILED.value, 0)} failed, "
             f"{s['by_status'].get(NodeStatus.COMPLETED.value, 0)} completed, "
-            f"{s['by_status'].get(NodeStatus.FRONTIER.value, 0)} frontier) — "
+            f"{s['by_status'].get(NodeStatus.BLOCKED.value, 0)} blocked) — "
             f"best score: {s['best_score']}/10"
         )
         lines.append("")
@@ -715,53 +346,38 @@ class AttackGraph:
                 )
                 for mod, nodes in ordered:
                     best = max(n.score for n in nodes)
-                    dead_count = sum(1 for n in nodes if n.is_dead)
+                    failed_count = sum(1 for n in nodes if n.is_failed)
                     tier = tiers.get(mod, 2)
                     lines.append(
                         f"- [T{tier}] {mod}: {len(nodes)} attempts, "
                         f"best score {best}, "
-                        f"{dead_count} dead ends"
+                        f"{failed_count} failed"
                     )
             else:
                 for mod, nodes in sorted(by_module.items()):
                     best = max(n.score for n in nodes)
-                    dead_count = sum(1 for n in nodes if n.is_dead)
+                    failed_count = sum(1 for n in nodes if n.is_failed)
                     lines.append(
                         f"- {mod}: {len(nodes)} attempts, "
                         f"best score {best}, "
-                        f"{dead_count} dead ends"
+                        f"{failed_count} failed"
                     )
             lines.append("")
 
-        # Best leads
-        promising = self.get_promising_nodes()[:5]
-        if promising:
-            lines.append("## Best Leads")
-            for n in promising:
+        high_scoring = self.get_high_scoring_nodes()[:5]
+        if high_scoring:
+            lines.append("## High-Scoring Executions")
+            for n in high_scoring:
                 lines.append(
                     f"- [{n.module}→{n.approach}] score:{n.score} — {n.leaked_info[:100]}"
                 )
             lines.append("")
 
-        # Dead ends
-        dead = self.get_dead_nodes()[:8]
-        if dead:
-            lines.append("## Dead Ends (do NOT retry)")
-            for n in dead:
+        failed = self.get_failed_nodes()[:8]
+        if failed:
+            lines.append("## Failed Executions")
+            for n in failed:
                 lines.append(f"- ✗ {n.module}→{n.approach}: {n.reflection[:80]}")
-            lines.append("")
-
-        # Frontier
-        frontier = self.get_frontier_nodes(limit=5)
-        if frontier:
-            lines.append("## Frontier (suggested next moves — pass frontier_id to execute)")
-            for n in frontier:
-                parent = self.nodes.get(n.parent_id) if n.parent_id else None
-                parent_info = f"parent score:{parent.score}" if parent else "root"
-                source_tag = " ★ HUMAN" if n.source == NodeSource.HUMAN else ""
-                lines.append(
-                    f"- [{n.id}] {n.module}: {n.approach} ({parent_info}){source_tag}"
-                )
             lines.append("")
 
         return "\n".join(lines[:max_lines])
@@ -779,7 +395,6 @@ class AttackGraph:
         this method preserves temporal order. Same data, different
         read axis.
 
-        Frontier nodes are excluded (they're proposed, not executed).
         Root is excluded (it's a placeholder, not a real module turn).
         Leader-verdict nodes are excluded (they're verdicts, not
         attempts — including them would conflate "the leader's final
@@ -845,7 +460,7 @@ class AttackGraph:
         """
         best: dict[str, int] = {}
         for n in self.iter_nodes():
-            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+            if n.module == "root":
                 continue
             if n.score < min_score:
                 continue
@@ -857,15 +472,12 @@ class AttackGraph:
         """Modules where every observed attempt scored at or below
         ``max_score`` AND at least one attempt ran.
 
-        Signals "don't re-try this against THIS target" to the Planner.
-        Distinct from ``get_dead_nodes()`` which tracks individual-node
-        failures; this is a per-module aggregate.
+        Signals "low-yield modules against THIS target" to the Planner.
+        This is a score aggregate, not an AttackGraph lifecycle status.
         """
         by_mod: dict[str, list[int]] = {}
         for n in self.iter_nodes():
-            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
-                continue
-            if n.status == NodeStatus.COMPLETED.value:
+            if n.module == "root":
                 continue
             by_mod.setdefault(n.module, []).append(n.score)
         return sorted(
@@ -885,7 +497,7 @@ class AttackGraph:
         seen: set[str] = set()
         out: list[str] = []
         for n in self.iter_nodes():
-            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+            if n.module == "root":
                 continue
             leaked = (n.leaked_info or "").strip()
             if not leaked or n.score < min_score:
@@ -908,7 +520,7 @@ class AttackGraph:
         seen: set[str] = set()
         out: list[str] = []
         for n in self.iter_nodes():
-            if n.module == "root" or n.status == NodeStatus.FRONTIER.value:
+            if n.module == "root":
                 continue
             for resp in n.target_responses:
                 s = (resp or "").strip()
@@ -961,16 +573,6 @@ class AttackGraph:
             parts.append("**Verbatim leaks to reference / build on:**\n" + sample + more)
 
         return "\n\n".join(parts)
-
-    def format_dead_ends(self) -> str:
-        """Compact list of dead ends for anti-repetition injection."""
-        dead = self.get_dead_nodes()
-        if not dead:
-            return "(none yet)"
-        return "\n".join(
-            f"- {n.module}→{n.approach}: {n.reflection[:100]}"
-            for n in dead
-        )
 
     def format_explored_approaches(self) -> str:
         """Compact list of all explored approaches for dedup."""

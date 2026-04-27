@@ -155,7 +155,7 @@ Mesmer modules are mostly YAML. They describe an attack role, the theory behind 
 
 | Family | Examples |
 |---|---|
-| **Attacks** | `system-prompt-extraction`, `tool-extraction`, `exploit-analysis`, `exploit-executor` |
+| **Attacks** | `system-prompt-extraction`, `tool-extraction`, `indirect-prompt-injection`, `email-exfiltration-proof` |
 | **Profilers** | `target-profiler` |
 | **Planner** | `attack-planner` |
 | **Cognitive bias** | `foot-in-door`, `authority-bias`, `anchoring` |

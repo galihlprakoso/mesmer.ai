@@ -67,12 +67,12 @@
         <span class="stat-value best">{$visibleStats.bestScore}/10</span>
       </div>
       <div class="stat">
-        <span class="stat-label">Promising</span>
-        <span class="stat-value promising">{$visibleStats.promising}</span>
+        <span class="stat-label">Completed</span>
+        <span class="stat-value promising">{$visibleStats.completed}</span>
       </div>
       <div class="stat">
-        <span class="stat-label">Dead</span>
-        <span class="stat-value dead">{$visibleStats.dead}</span>
+        <span class="stat-label">Failed</span>
+        <span class="stat-value dead">{$visibleStats.failed}</span>
       </div>
     </div>
   {/if}

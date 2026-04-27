@@ -7,9 +7,6 @@
  * llm errors, judge verdicts) lives in the Activity column.
  *
  * Chat messages here are:
- *   - human hints      ← legacy graph frontier nodes (source=human) for
- *                        targets that have them on disk; new hints go
- *                        through /api/leader-chat instead.
  *   - agent questions  ← ask_human events
  *   - human answers    ← human_answer events
  *
@@ -17,25 +14,9 @@
  */
 
 /** Build messages from graph nodes (persistent, load-on-boot).
- *  Only legacy human hints surface — explored attempt outcomes do NOT. */
+ *  AttackGraph is execution trace only; explored outcomes do not become chat. */
 export function messagesFromGraph(graph) {
-  if (!graph || !graph.nodes) return []
-  const msgs = []
-
-  for (const node of Object.values(graph.nodes)) {
-    if (node.status === 'frontier' && node.source === 'human') {
-      msgs.push({
-        kind: 'human',
-        sender: 'human',
-        timestamp: node.timestamp || 0,
-        text: node.approach || '',
-        nodeId: node.id,
-      })
-    }
-  }
-
-  msgs.sort((a, b) => a.timestamp - b.timestamp)
-  return msgs
+  return []
 }
 
 /** Distill messages from the transient event stream (this session only).

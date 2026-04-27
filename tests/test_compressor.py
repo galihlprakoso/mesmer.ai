@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mesmer.core.agent.compressor import maybe_compress
+from mesmer.core.actor import ActorRole, ReactActorSpec, ToolPolicySpec
 from mesmer.core.constants import LogEvent, ScenarioMode
 from mesmer.core.agent.context import Context, Turn
 from mesmer.core.graph import AttackGraph
@@ -35,9 +36,7 @@ def _make_ctx(
     target.send = AsyncMock(return_value="ok")
     target.reset = AsyncMock(return_value=None)
     registry = MagicMock()
-    # Real dict return for tier lookup — `_reflect_and_expand` JSON-serialises
-    # the output into the TIER_GATE event detail, which fails on MagicMock
-    # values. Default tier 2 matches the bare-registry production behaviour.
+    # Default tier 2 matches the bare-registry production behaviour.
     registry.tiers_for = MagicMock(side_effect=lambda names: {n: 2 for n in names})
     registry.tier_of = MagicMock(return_value=2)
     agent_config = AgentConfig(
@@ -324,12 +323,12 @@ class TestCompressionHookedIntoReactLoop:
                         turns=_make_turns(5))
         ctx.completion = _AsyncMock(return_value=_make_completion())
 
-        module = MagicMock()
-        module.name = "test"
-        module.sub_modules = []
-        module.system_prompt = "sys"
-        module.description = "d"
-        module.theory = "t"
+        module = ReactActorSpec(
+            name="test",
+            role=ActorRole.MODULE,
+            system_prompt="sys",
+            tool_policy=ToolPolicySpec(builtin=["conclude"]),
+        )
 
         with patch("mesmer.core.agent.compressor.maybe_compress", new=_AsyncMock(return_value=False)) as mock_compress:
             await run_react_loop(module, ctx, "probe")
@@ -363,12 +362,12 @@ class TestCompressionHookedIntoReactLoop:
                         turns=_make_turns(5))
         ctx.completion = _AsyncMock(return_value=_make_completion())
 
-        module = MagicMock()
-        module.name = "test"
-        module.sub_modules = []
-        module.system_prompt = "sys"
-        module.description = "d"
-        module.theory = "t"
+        module = ReactActorSpec(
+            name="test",
+            role=ActorRole.MODULE,
+            system_prompt="sys",
+            tool_policy=ToolPolicySpec(builtin=["conclude"]),
+        )
 
         with patch("mesmer.core.agent.compressor.maybe_compress", new=_AsyncMock(return_value=False)) as mock_compress:
             await run_react_loop(module, ctx, "probe")
@@ -426,69 +425,6 @@ class TestCompressionHookedIntoJudge:
                 log=lambda *a, **kw: None,
                 exchanges=[Turn(sent="hi", received="hello")],
                 module_result="",
-            )
-
-        assert mock_compress.await_count == 0
-
-
-class TestCompressionHookedIntoReflect:
-    """C9 hook (refine side) — ``_reflect_and_expand`` must compress
-    before iterating refine_approach calls in CONTINUOUS mode."""
-
-    @pytest.mark.asyncio
-    async def test_refine_hook_fires_in_continuous(self):
-        from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.agent.judge import JudgeResult
-        from mesmer.core.agent import _reflect_and_expand
-
-        ctx = _make_ctx(scenario_mode=ScenarioMode.CONTINUOUS,
-                        turns=_make_turns(5))
-        graph = ctx.graph
-        current_node = graph.add_node(
-            graph.root_id, "foo", "prior angle words plenty", score=5,
-        )
-        judge = JudgeResult(5, "", "", "", "")
-
-        async def fake_refine(ctx, *, module, rationale, judge_result, **kw):
-            return "x"
-
-        with patch("mesmer.core.agent.compressor.maybe_compress",
-                   new=_AsyncMock(return_value=False)) as mock_compress, \
-             patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
-            await _reflect_and_expand(
-                ctx, judge, current_node,
-                log=lambda *a, **kw: None,
-                available_modules=["foo", "bar"],
-            )
-
-        # Exactly once — not per-candidate, so refine_approach sees a stable
-        # compressed view across all slots.
-        assert mock_compress.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_refine_hook_skipped_in_trials(self):
-        from unittest.mock import AsyncMock as _AsyncMock
-        from mesmer.core.agent.judge import JudgeResult
-        from mesmer.core.agent import _reflect_and_expand
-
-        ctx = _make_ctx(scenario_mode=ScenarioMode.TRIALS,
-                        turns=_make_turns(5))
-        graph = ctx.graph
-        current_node = graph.add_node(
-            graph.root_id, "foo", "prior angle words plenty", score=5,
-        )
-        judge = JudgeResult(5, "", "", "", "")
-
-        async def fake_refine(ctx, *, module, rationale, judge_result, **kw):
-            return "x"
-
-        with patch("mesmer.core.agent.compressor.maybe_compress",
-                   new=_AsyncMock(return_value=False)) as mock_compress, \
-             patch("mesmer.core.agent.judge.refine_approach", new=fake_refine):
-            await _reflect_and_expand(
-                ctx, judge, current_node,
-                log=lambda *a, **kw: None,
-                available_modules=["foo", "bar"],
             )
 
         assert mock_compress.await_count == 0

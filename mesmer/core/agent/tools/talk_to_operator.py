@@ -19,9 +19,9 @@ from mesmer.core.agent.tools.base import tool_result
 from mesmer.core.constants import LogEvent, ToolName
 
 if TYPE_CHECKING:
+    from mesmer.core.actor import ReactActorSpec
     from mesmer.core.agent.context import Context
     from mesmer.core.agent.engine import LogFn
-    from mesmer.core.module import ModuleConfig
 
 
 NAME = ToolName.TALK_TO_OPERATOR
@@ -54,7 +54,7 @@ SCHEMA = {
 
 async def handle(
     ctx: Context,
-    module: ModuleConfig,
+    module: "ReactActorSpec",
     call,
     args: dict,
     log: LogFn,

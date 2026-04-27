@@ -78,8 +78,7 @@ class TestHintCommand:
 
             # Verify the graph has the hint
             saved_graph = mock_mem.save_graph.call_args[0][0]
-            frontier = saved_graph.get_frontier_nodes()
-            human = [n for n in frontier if n.source == "human"]
+            human = [n for n in saved_graph.get_explored_nodes() if n.source == "human"]
             assert len(human) == 1
             assert "calendar API" in human[0].approach
 
@@ -108,7 +107,6 @@ class TestGraphShow:
             root = g.ensure_root()
             g.add_node(root.id, "foot-in-door", "philosophy", score=7, leaked_info="design")
             g.add_node(root.id, "authority-bias", "Stanford", score=1, reflection="detected")
-            g.add_frontier_node(root.id, "foot-in-door", "tools")
             g.run_counter = 3
 
             mock_mem.load_graph.return_value = g

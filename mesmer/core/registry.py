@@ -87,10 +87,8 @@ class Registry:
     def tier_of(self, name: str) -> int:
         """Return the attack-cost tier for a module, or the default.
 
-        Unknown modules fall back to :data:`DEFAULT_TIER` (2, cognitive) so the
-        frontier ranker never KeyErrors on a typoed ``sub_modules`` entry.
-        The registry is the single source of truth for tier lookup;
-        :meth:`propose_frontier` calls this through :meth:`tiers_for`.
+        Unknown modules fall back to :data:`DEFAULT_TIER` (2, cognitive).
+        The registry is the single source of truth for tier lookup.
         """
         mod = self.modules.get(name)
         return mod.tier if mod else DEFAULT_TIER
@@ -132,16 +130,6 @@ class Registry:
                                 "description": (
                                     "Maximum conversation turns to give this module. "
                                     "Leave empty for unlimited."
-                                ),
-                            },
-                            "frontier_id": {
-                                "type": "string",
-                                "description": (
-                                    "If this call executes a suggested 'Frontier' node "
-                                    "(see Attack Intelligence), pass its ID here. The "
-                                    "graph will then record the attempt as a refinement "
-                                    "of that frontier's parent. Omit when making a fresh "
-                                    "attempt not on the frontier list."
                                 ),
                             },
                             "experiment_id": {

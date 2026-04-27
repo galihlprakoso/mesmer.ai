@@ -20,7 +20,6 @@ JUDGE_SYSTEM = _load("judge_system")
 CONTINUOUS_JUDGE_ADDENDUM = _load("judge_continuous_addendum")
 JUDGE_USER = _load("judge_user")
 REFINE_APPROACH_PROMPT = _load("refine_approach")
-REFLECT_PROMPT = _load("reflect")
 SUMMARY_SYSTEM = _load("summary_system")
 EXECUTIVE_SYSTEM = _load("executive")
 
@@ -37,7 +36,6 @@ __all__ = [
     "CONTINUOUS_JUDGE_ADDENDUM",
     "JUDGE_USER",
     "REFINE_APPROACH_PROMPT",
-    "REFLECT_PROMPT",
     "SUMMARY_SYSTEM",
     "EXECUTIVE_SYSTEM",
     "EXTRACT_EVIDENCE_SYSTEM",

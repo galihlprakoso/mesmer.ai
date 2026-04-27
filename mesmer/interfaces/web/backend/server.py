@@ -60,15 +60,6 @@ class DebriefRequest(BaseModel):
     scenario_path: str
 
 
-class FrontierActionRequest(BaseModel):
-    scenario_path: str
-
-
-class EditFrontierRequest(BaseModel):
-    scenario_path: str
-    approach: str
-
-
 class SaveScratchpadRequest(BaseModel):
     scenario_path: str
     content: str
@@ -674,36 +665,6 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             current_run_task.cancel()
             return {"status": "stopping"}
         return {"status": "no_run_active"}
-
-    # ----- API: Frontier mutations -----
-
-    @app.delete("/api/frontier/{node_id}")
-    async def skip_frontier(node_id: str, req: FrontierActionRequest):
-        """Mark a frontier node as dead (skipped). Persists and broadcasts."""
-        scenario = load_scenario(req.scenario_path)
-        memory = TargetMemory(scenario.target)
-        g = memory.load_graph()
-        if g.get(node_id) is None:
-            return JSONResponse({"error": f"Node not found: {node_id}"}, status_code=404)
-        g.mark_dead(node_id, reason="Skipped by human")
-        memory.save_graph(g)
-        bus.set_graph(g)
-        bus.emit_graph_snapshot()
-        return {"status": "skipped", "node_id": node_id}
-
-    @app.patch("/api/frontier/{node_id}")
-    async def edit_frontier(node_id: str, req: EditFrontierRequest):
-        """Edit the approach text of a frontier node. Persists and broadcasts."""
-        scenario = load_scenario(req.scenario_path)
-        memory = TargetMemory(scenario.target)
-        g = memory.load_graph()
-        node = g.edit_approach(node_id, req.approach.strip())
-        if node is None:
-            return JSONResponse({"error": f"Node not found: {node_id}"}, status_code=404)
-        memory.save_graph(g)
-        bus.set_graph(g)
-        bus.emit_graph_snapshot()
-        return {"status": "updated", "node_id": node_id}
 
     # ----- API: Scratchpad + Chat (replaces the old /api/plan + /api/hint) -----
 

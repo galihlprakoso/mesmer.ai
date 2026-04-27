@@ -104,7 +104,11 @@ _FAMILY_MODULE_HINTS: dict[str, tuple[str, ...]] = {
     "delimiter-injection": ("delimiter-injection", "fake-function-injection"),
     "tool-misuse": ("fake-function-injection", "hallucinated-tool-probing", "tool-extraction"),
     "cognitive-overload": ("cognitive-overload", "pragmatic-reframing"),
-    "composite": ("attack-planner", "exploit-analysis", "exploit-executor"),
+    "composite": (
+        "attack-planner",
+        "indirect-prompt-injection",
+        "email-exfiltration-proof",
+    ),
     "unknown": ("target-profiler", "attack-planner", "direct-ask"),
 }
 
@@ -121,10 +125,9 @@ _FAMILY_EXPECTED_SIGNALS: dict[str, str] = {
     "unknown": "target emits any signal that can support or refute the hypothesis",
 }
 
-# Tokeniser for similarity heuristics (novelty, repetition, dead-end).
-# Matches the legacy AttackGraph._approach_tokens pattern: keep words
-# >= 4 chars after lowercasing + stripping punctuation, drop stopwords
-# implicitly via length.
+# Tokeniser for similarity heuristics (novelty, repetition, dead-end):
+# keep words >= 4 chars after lowercasing + stripping punctuation, drop
+# stopwords implicitly via length.
 _TOKEN_RE = re.compile(r"[a-z0-9]{4,}")
 
 

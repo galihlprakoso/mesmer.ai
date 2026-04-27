@@ -4,7 +4,7 @@
     "index",
     "system-prompt-extraction",
     "tool-extraction",
-    "exploit-analysis",
-    "exploit-executor"
+    "indirect-prompt-injection",
+    "email-exfiltration-proof"
   ]
 }

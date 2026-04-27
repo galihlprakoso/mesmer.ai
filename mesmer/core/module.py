@@ -1,4 +1,4 @@
-"""Module — the universal building block. Every module is a ReAct agent."""
+"""Module — authored attack/planner/profiler capability definitions."""
 
 from __future__ import annotations
 
@@ -54,10 +54,13 @@ class SubModuleEntry:
 
 @dataclass
 class ModuleConfig:
-    """
-    Configuration for a module, loaded from ``module.yaml``.
+    """Configuration for a registry module, loaded from ``module.yaml``.
 
-    Every module is a ReAct agent defined by:
+    A module can be adapted into a runtime ReAct actor, but it is not the only
+    kind of actor. Scenario executives are synthesized separately and share the
+    same runtime interface without being registry modules.
+
+    Every authored module is defined by:
     - name: unique identifier
     - description: what it does (agent reads this to decide when to use it)
     - theory: cognitive science basis (agent reads this to reason about why/when)
@@ -67,9 +70,8 @@ class ModuleConfig:
       evaluating attempts of THIS module (e.g. target-profiler is judged on
       profile quality, not extraction). Composed with the stock rubric and
       any scenario-level additions.
-    - tier: attack cost / complexity bucket. Drives the "simple first"
-      frontier ladder enforced by :meth:`AttackGraph.propose_frontier` via
-      :meth:`Registry.tiers_for`. Semantics:
+    - tier: attack cost / complexity bucket used by planner/search code.
+      Semantics:
 
       * **0** — naive / direct: one-shot request, no delegation, no multi-turn.
         Cheapest. A real-world red-teamer's first probe.
@@ -92,6 +94,7 @@ class ModuleConfig:
     system_prompt: str = ""
     sub_modules: list[SubModuleEntry] = field(default_factory=list)
     parameters: dict = field(default_factory=dict)
+    tool_policy: dict | None = None
     judge_rubric: str = ""
     # When True, the shared target is reset (new session from the target's POV)
     # before this module runs. Breaks the target's compounding memory across
@@ -100,15 +103,6 @@ class ModuleConfig:
     reset_target: bool = False
     # Attack cost bucket — see class docstring for semantics.
     tier: int = DEFAULT_TIER
-    # Marks the synthesized scenario-scoped executive that runs at depth=0.
-    # Set True only by ``runner.execute_run`` when it builds the in-memory
-    # ModuleConfig for the executive — never authored in YAML, never set on
-    # registry-loaded managers. Drives tool-list gating in
-    # ``agent/tools/__init__.py::build_tool_list``: executives get
-    # ``ask_human`` / ``talk_to_operator`` / ``update_scratchpad`` and lose
-    # ``send_message``; non-executives are the inverse.
-    is_executive: bool = False
-
     def __post_init__(self) -> None:
         # Coerce any plain strings that tests or callers pass directly.
         self.sub_modules = [
@@ -127,6 +121,33 @@ class ModuleConfig:
         if self.theory:
             parts.append(f"\nTheory: {self.theory}")
         return "\n".join(parts)
+
+    def as_actor(self):
+        """Adapt this authored module to the runtime ReAct actor contract."""
+        from mesmer.core.actor import ActorRole, ReactActorSpec, ToolPolicySpec
+
+        tool_policy = (
+            ToolPolicySpec(**self.tool_policy)
+            if self.tool_policy is not None
+            else ToolPolicySpec(
+                dispatch_submodules=bool(self.sub_modules),
+                builtin=["send_message", "conclude"],
+            )
+        )
+
+        return ReactActorSpec(
+            name=self.name,
+            role=ActorRole.MODULE,
+            description=self.description,
+            theory=self.theory,
+            system_prompt=self.system_prompt,
+            sub_modules=list(self.sub_modules),
+            parameters=dict(self.parameters),
+            judge_rubric=self.judge_rubric,
+            reset_target=self.reset_target,
+            tier=self.tier,
+            tool_policy=tool_policy,
+        )
 
 
 def _coerce_tier(raw: object, module_name: str) -> int:
@@ -168,6 +189,7 @@ def load_module_config(path: Path) -> ModuleConfig | None:
         system_prompt=data.get("system_prompt", ""),
         sub_modules=_parse_sub_modules(data.get("sub_modules", [])),
         parameters=data.get("parameters", {}),
+        tool_policy=data.get("tool_policy"),
         judge_rubric=data.get("judge_rubric", ""),
         reset_target=bool(data.get("reset_target", False)),
         tier=_coerce_tier(data.get("tier"), name),

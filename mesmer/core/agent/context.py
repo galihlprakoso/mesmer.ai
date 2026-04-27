@@ -271,6 +271,7 @@ class Context:
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
         active_experiment_id: str | None = None,
+        graph_parent_id: str | None = None,
         depth: int = 0,
         scenario_mode: ScenarioMode = ScenarioMode.TRIALS,
         # Internal — set by child()
@@ -293,9 +294,9 @@ class Context:
         self._last_key_used: str = ""
         self.human_broker = human_broker
         # TargetMemory handle — bound on the top-level context only, propagated
-        # via child() so leader-only tools (update_scratchpad) can persist
-        # without re-deriving the target hash. ``None`` for tests / direct
-        # invocations that don't go through execute_run.
+        # via child() so update_scratchpad can persist without re-deriving the
+        # target hash. ``None`` for tests / direct invocations that don't go
+        # through execute_run.
         self.target_memory = target_memory
         # Operator <> leader chat queue. Mutable, *shared* across parent and
         # child (same list reference) so the WS handler can push from the web
@@ -321,6 +322,9 @@ class Context:
         # Set when a parent dispatches a tool with `experiment_id`; inherited
         # by deeper children so employee modules get the same narrow brief.
         self.active_experiment_id = active_experiment_id
+        # AttackGraph hierarchy is delegation hierarchy. This points at the
+        # execution node that owns new child delegations from this context.
+        self.graph_parent_id = graph_parent_id
 
         # Shared across parent/child — same list reference
         self.turns: list[Turn] = _turns if _turns is not None else []
@@ -357,7 +361,7 @@ class Context:
         # independent trials (default, TRIALS) or moves inside one continuous
         # target conversation (CONTINUOUS). Propagated unchanged to child
         # contexts. Concerns target memory semantics; chat / autonomy mode
-        # is now driven entirely by ``ModuleConfig.is_executive``.
+        # is now driven by the runtime actor role.
         self.scenario_mode: ScenarioMode = scenario_mode
 
         # Per-run telemetry accumulator (tokens + LLM wall-clock). The
@@ -384,21 +388,39 @@ class Context:
         self.objective_met: bool = False
         self.objective_met_fragment: str = ""
 
-        # Short-term per-run memory. Populated at run start by
-        # ``execute_run`` from ``graph.latest_outputs_by_module()`` so
-        # cross-run knowledge (prior profiler dossier, prior plans,
-        # prior attack write-ups) is on the blackboard before the first
-        # iteration. Auto-updated after every sub-module delegation —
-        # ``sub_module.handle`` writes ``scratchpad[module.name] =
-        # conclude_text``. Rendered into every module's user message by
-        # :mod:`mesmer.core.agent.engine`. See
-        # :mod:`mesmer.core.scratchpad` for the full contract.
+        # Shared whiteboard plus latest module-output cache. The whiteboard is
+        # rendered into prompts; the module-output cache supports ordered phase
+        # gates and handoff checks without cluttering the whiteboard.
         #
         # Late-imported to keep core/context-layer import order legible:
         # scratchpad.py lives at core/ top level, context.py sits mid-way.
         from mesmer.core.scratchpad import Scratchpad as _Scratchpad
 
         self.scratchpad: _Scratchpad = _Scratchpad()
+
+    def record_agent_trace(
+        self,
+        event: str,
+        detail: str = "",
+        *,
+        actor: str = "",
+        iteration: int | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        """Persist one ReAct event on the currently-running AttackGraph node."""
+        if self.graph is None or not self.graph_parent_id:
+            return
+        self.graph.append_agent_trace(
+            self.graph_parent_id,
+            event=event,
+            detail=detail,
+            actor=actor,
+            depth=self.depth,
+            iteration=iteration,
+            payload=payload,
+        )
+        if self.log is not None:
+            self.log(LogEvent.GRAPH_UPDATE.value, "agent_trace")
 
     @property
     def agent_model(self) -> str:
@@ -509,22 +531,22 @@ class Context:
                     return 0
 
             try:
-                self.log(
+                payload = {
+                    "role": role.value,
+                    "model": kwargs["model"],
+                    "elapsed_s": round(elapsed, 3),
+                    "prompt_tokens": _usage_val("prompt_tokens"),
+                    "completion_tokens": _usage_val("completion_tokens"),
+                    "total_tokens": _usage_val("total_tokens"),
+                    "n_messages": len(messages),
+                    "tools": len(tools) if tools else 0,
+                }
+                detail = _json.dumps(payload, sort_keys=True, default=str)
+                self.log(LogEvent.LLM_COMPLETION.value, detail)
+                self.record_agent_trace(
                     LogEvent.LLM_COMPLETION.value,
-                    _json.dumps(
-                        {
-                            "role": role.value,
-                            "model": kwargs["model"],
-                            "elapsed_s": round(elapsed, 3),
-                            "prompt_tokens": _usage_val("prompt_tokens"),
-                            "completion_tokens": _usage_val("completion_tokens"),
-                            "total_tokens": _usage_val("total_tokens"),
-                            "n_messages": len(messages),
-                            "tools": len(tools) if tools else 0,
-                        },
-                        sort_keys=True,
-                        default=str,
-                    ),
+                    detail,
+                    payload=payload,
                 )
             except Exception:
                 # Logging is observability. Never let a broken sink
@@ -558,6 +580,7 @@ class Context:
         max_turns: int | None = None,
         log=None,
         active_experiment_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
+        graph_parent_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
     ) -> str:
         """Delegate to a sub-module with a scoped turn budget.
 
@@ -575,12 +598,12 @@ class Context:
         """
         from mesmer.core.agent import run_react_loop
 
-        module = self.registry.get(name)
-        if module is None:
+        module_config = self.registry.get(name)
+        if module_config is None:
             return f"Error: module '{name}' not found in registry"
 
         fresh_session = False
-        if module.reset_target:
+        if module_config.reset_target:
             if self.scenario_mode == ScenarioMode.CONTINUOUS:
                 # Continuous mode forbids target resets — the single target
                 # conversation IS the point. Warn once per occurrence so
@@ -611,13 +634,19 @@ class Context:
             if active_experiment_id is _ACTIVE_EXPERIMENT_UNSET
             else active_experiment_id
         )
+        child_graph_parent_id = (
+            self.graph_parent_id
+            if graph_parent_id is _ACTIVE_EXPERIMENT_UNSET
+            else graph_parent_id
+        )
 
         child = self.child(
             max_turns=max_turns,
             target_fresh_session=fresh_session,
             active_experiment_id=child_active_experiment_id,
+            graph_parent_id=child_graph_parent_id,
         )
-        result = await run_react_loop(module, child, instruction, log=log)
+        result = await run_react_loop(module_config.as_actor(), child, instruction, log=log)
 
         self.module_log.append(
             ModuleRun(
@@ -647,6 +676,7 @@ class Context:
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
         active_experiment_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
+        graph_parent_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
     ) -> Context:
         """Create a child context — shares target + turns + graph, own budget.
 
@@ -663,6 +693,11 @@ class Context:
             self.active_experiment_id
             if active_experiment_id is _ACTIVE_EXPERIMENT_UNSET
             else active_experiment_id
+        )
+        child_graph_parent_id = (
+            self.graph_parent_id
+            if graph_parent_id is _ACTIVE_EXPERIMENT_UNSET
+            else graph_parent_id
         )
 
         child = Context(
@@ -688,6 +723,7 @@ class Context:
             target_fresh_session=target_fresh_session,
             attacker_model_override=attacker_model_override or self.attacker_model_override,
             active_experiment_id=child_active_experiment_id,
+            graph_parent_id=child_graph_parent_id,
             depth=self.depth + 1,  # deeper in the module tree
             scenario_mode=self.scenario_mode,  # inherit CONTINUOUS/TRIALS
             _turns=self.turns,  # same list reference
@@ -702,10 +738,9 @@ class Context:
         # completion/delegate/judge events land in the same stream as the
         # leader's. Otherwise only the leader's iteration would be traced.
         child.log = self.log
-        # Scratchpad is run-scoped — SAME reference so a child's write
-        # (its own conclude() being auto-pushed to scratchpad[module.name]
-        # by sub_module.handle) is immediately visible when control
-        # returns to the parent for its next iteration.
+        # Scratchpad is run-scoped — SAME reference so whiteboard edits and
+        # latest module-output writes are immediately visible when control
+        # returns to the parent.
         child.scratchpad = self.scratchpad
         return child
 

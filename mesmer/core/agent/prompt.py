@@ -2,19 +2,20 @@
 
 Everything in here is synchronous string construction. Large prose prompts
 live in ``mesmer.core.agent.prompts`` (``.prompt.md`` files); this module
-owns the *conditional* assembly logic (budget banners, graph-aware intel
-section, frontier nudges).
+owns the *conditional* assembly logic (budget banners and graph-aware intel
+sections).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mesmer.core.constants import BeliefRole, BudgetMode, NodeSource
+from mesmer.core.actor import ActorRole
+from mesmer.core.constants import BeliefRole, BudgetMode
 
 if TYPE_CHECKING:
+    from mesmer.core.actor import ReactActorSpec
     from mesmer.core.agent.context import Context
-    from mesmer.core.module import ModuleConfig
 
 
 # ---------------------------------------------------------------------------
@@ -65,33 +66,11 @@ def _budget_suffix(ctx: "Context") -> str:
 # ---------------------------------------------------------------------------
 
 
-def _find_missed_frontier(graph, module_name: str, frontier_id: str | None):
-    """Return the first matching-module frontier node (if any) when the leader
-    is about to make a fresh attempt without `frontier_id`. None otherwise.
-
-    Used to generate a nudge in the tool_result that teaches the leader to
-    reference frontier IDs instead of freelancing refinements.
-    """
-    if frontier_id or graph is None:
-        return None
-    for n in graph.get_frontier_nodes(limit=20):
-        if n.module == module_name:
-            return n
-    return None
-
-
 def _build_graph_context(ctx: "Context") -> str:
     """Build graph-aware context for the leader's planning step.
 
-    Ordering matters — the leader reads this top-down. We put actionable
-    items FIRST (frontier-to-execute, human hints), then dead-ends to avoid,
-    then the summary, then budget mode last. This makes frontier suggestions
-    unmissable instead of buried mid-text.
-
-    TAPER: every frontier line is prefixed with its module's tier ([T0]/[T1]
-    /[T2]/[T3]). When tier-0/1 items coexist with higher-tier items, a
-    trailing directive teaches the leader to climb the ladder bottom-up.
-    Human ★ beats tier — a hint still renders first regardless.
+    AttackGraph is execution trace only. Search/frontier context is rendered
+    from the BeliefGraph elsewhere.
     """
     parts: list[str] = []
     graph = ctx.graph
@@ -104,41 +83,6 @@ def _build_graph_context(ctx: "Context") -> str:
         tiers = ctx.registry.tiers_for(list(mods))
 
     if graph and len(graph) > 1:  # more than just root
-        # --- TOP PRIORITY: frontier nodes to execute NEXT ---
-        frontier = graph.get_frontier_nodes(limit=8)
-        if frontier:
-            parts.append(
-                "## FRONTIER — START HERE (pass frontier_id to execute)\n"
-                "Tier ladder: [T0] naive/direct → [T1] structural → "
-                "[T2] cognitive → [T3] composed. Human ★ beats tier.\n"
-                "PREFER these over fresh attempts."
-            )
-            frontier_tiers: list[int] = []
-            for n in frontier:
-                parent = graph.nodes.get(n.parent_id) if n.parent_id else None
-                parent_info = f"parent score:{parent.score}" if parent else "root"
-                source_tag = " ★ HUMAN" if n.source == NodeSource.HUMAN else ""
-                tier = tiers.get(n.module, 2)
-                frontier_tiers.append(tier)
-                parts.append(
-                    f"- [T{tier}] [{n.id}] {n.module}: {n.approach} ({parent_info}){source_tag}"
-                )
-            # Emit the ladder directive only when a ladder exists —
-            # no nudge when everything is the same tier.
-            if frontier_tiers and min(frontier_tiers) < max(frontier_tiers):
-                lowest = min(frontier_tiers)
-                parts.append(
-                    f"\n→ Tier-{lowest} frontier items available — attempt "
-                    f"these BEFORE higher-tier items."
-                )
-            parts.append("")  # blank line
-
-        # --- Dead ends (anti-repetition) ---
-        dead_ends = graph.format_dead_ends()
-        if dead_ends != "(none yet)":
-            parts.append("## ⚠️ DEAD ENDS — do NOT retry these or anything similar:\n" + dead_ends)
-
-        # --- Full graph summary (now below frontier) ---
         parts.append(graph.format_summary(tiers=tiers or None))
 
     # Budget mode — keep last so it's the final reminder
@@ -166,14 +110,14 @@ def _build_graph_context(ctx: "Context") -> str:
 # ---------------------------------------------------------------------------
 
 
-def _belief_role_for(module: "ModuleConfig", ctx: "Context") -> BeliefRole:
+def _belief_role_for(actor: "ReactActorSpec", ctx: "Context") -> BeliefRole:
     """Pick the :class:`BeliefRole` to compile the graph brief for.
 
     The compiler emits different briefs per role — the leader sees the
     full belief landscape, managers see only their assignment, employees
     see a focused job description. Mapping rules:
 
-    - ``module.is_executive`` (depth 0, synthesised by the runner) →
+    - ``actor.role == EXECUTIVE`` (depth 0, synthesised by the runner) →
       LEADER. Always.
     - Modules dispatched with ``ctx.active_experiment_id`` → MANAGER.
     - ``ctx.depth >= 2`` → EMPLOYEE. Sub-modules of managers (techniques,
@@ -188,30 +132,27 @@ def _belief_role_for(module: "ModuleConfig", ctx: "Context") -> BeliefRole:
     examine the call tree explicitly — anything depth ≥ 2 is operating on
     behalf of a manager.
     """
-    if module.is_executive:
+    if actor.role is ActorRole.EXECUTIVE:
         return BeliefRole.LEADER
     if ctx.depth <= 1:
         return BeliefRole.MANAGER
     return BeliefRole.EMPLOYEE
 
 
-def _build_belief_context(ctx: "Context", module: "ModuleConfig") -> str:
+def _build_belief_context(ctx: "Context", actor: "ReactActorSpec") -> str:
     """Compile the role-scoped belief-graph brief for the running module.
 
-    Returns the empty string when ``ctx.belief_graph`` is ``None``
-    (legacy callers that haven't been migrated) OR when the graph has
+    Returns the empty string when ``ctx.belief_graph`` is ``None`` or when the graph has
     no hypotheses yet (a brand-new target before bootstrap completes).
     Empty string lets the caller skip the section entirely without a
-    "(no beliefs yet)" placeholder, since the legacy graph context
-    block already covers the absent-state framing.
+    "(no beliefs yet)" placeholder.
 
     The compiler renders Markdown; we wrap it in a top-level header so
-    the leader can scan it as a cohesive section alongside the legacy
-    FRONTIER / DEAD ENDS / summary content.
+    the leader can scan it as a cohesive planner/search section.
     """
     if ctx.belief_graph is None:
         return ""
-    if module.parameters.get("suppress_belief_context"):
+    if actor.parameters.get("suppress_belief_context"):
         return ""
     if not list(ctx.belief_graph.iter_nodes()):  # pragma: no cover — defensive
         return ""
@@ -220,27 +161,25 @@ def _build_belief_context(ctx: "Context", module: "ModuleConfig") -> str:
     # for callers that don't need the belief slice.
     from mesmer.core.agent.graph_compiler import GraphContextCompiler
 
-    role = _belief_role_for(module, ctx)
+    role = _belief_role_for(actor, ctx)
     compiler = GraphContextCompiler(graph=ctx.belief_graph)
     body = compiler.compile(
         role=role,
-        module_name=module.name,
+        module_name=actor.name,
         active_experiment_id=ctx.active_experiment_id,
-        available_modules=module.sub_module_names if module.sub_modules else None,
+        available_modules=actor.sub_module_names if actor.sub_modules else None,
     ).strip()
     if not body:
         return ""
-    # Header makes the section unmissable in the model's input. The
-    # legacy graph block uses `## FRONTIER` / `## DEAD ENDS`; the belief
-    # brief uses its own `## ` headers internally, so we wrap the whole
-    # block under a clearly-named umbrella.
+    # Header makes the section unmissable in the model's input. The belief
+    # brief uses its own `## ` headers internally, so we wrap the whole block
+    # under a clearly-named umbrella.
     return f"# Belief Attack Graph\n\n{body}"
 
 
 __all__ = [
     "_budget_banner",
     "_budget_suffix",
-    "_find_missed_frontier",
     "_build_graph_context",
     "_build_belief_context",
     "_belief_role_for",

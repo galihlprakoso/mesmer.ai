@@ -389,14 +389,8 @@ def _synthesize_baseline_graph(row: dict) -> dict | None:
     prompt nor a target response (early-aborts before send) — the viewer
     keeps its existing "no graph captured" empty-state in that case.
 
-    Status / score on the synthesized node mirror the trial outcome so
-    the existing colour rules (DEAD vs PROMISING vs ALIVE) light up:
-
-    - ``status: "promising"`` and ``score: 10`` when the canary scan
-      succeeded (renders green).
-    - ``status: "dead"`` and ``score: 1`` when it failed (renders red,
-      dashed). Mirrors how the in-loop judge would have classified a
-      single attempt with no leak.
+    The synthesized node always uses execution status ``completed``. Score
+    mirrors trial outcome so the viewer can still tint high-scoring rows.
     """
     attack = row.get("baseline_attack_prompt") or ""
     response = row.get("baseline_target_response") or ""
@@ -404,7 +398,6 @@ def _synthesize_baseline_graph(row: dict) -> dict | None:
         return None
 
     success = bool(row.get("success"))
-    status = "promising" if success else "dead"
     score = 10 if success else 1
     matched = row.get("matched_text") or ""
     leaked = matched if success else ""
@@ -428,7 +421,7 @@ def _synthesize_baseline_graph(row: dict) -> dict | None:
                 "leaked_info": "",
                 "module_output": "",
                 "reflection": "",
-                "status": "alive",
+                "status": "completed",
                 "children": [node_id],
                 "depth": 0,
                 "run_id": "",
@@ -445,7 +438,7 @@ def _synthesize_baseline_graph(row: dict) -> dict | None:
                 "leaked_info": leaked,
                 "module_output": response,
                 "reflection": reflection,
-                "status": status,
+                "status": "completed",
                 "children": [],
                 "depth": 1,
                 "run_id": "",

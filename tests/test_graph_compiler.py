@@ -10,6 +10,7 @@ from __future__ import annotations
 from mesmer.core.agent.beliefs import apply_evidence_to_beliefs, rank_frontier
 from mesmer.core.agent.graph_compiler import GraphContextCompiler
 from mesmer.core.agent.prompt import _belief_role_for, _build_belief_context
+from mesmer.core.actor import ActorRole, ReactActorSpec
 from mesmer.core.belief_graph import (
     BeliefGraph,
     EvidenceCreateDelta,
@@ -24,7 +25,7 @@ from mesmer.core.belief_graph import (
     make_hypothesis,
     make_strategy,
 )
-from mesmer.core.module import ModuleConfig, SubModuleEntry
+from mesmer.core.module import SubModuleEntry
 from mesmer.core.constants import (
     BeliefRole,
     EvidenceType,
@@ -127,10 +128,10 @@ def test_belief_role_for_executive_only_gets_leader_brief() -> None:
         depth = 0
         active_experiment_id = None
 
-    module = ModuleConfig(
+    module = ReactActorSpec(
         name="scenario:executive",
+        role=ActorRole.EXECUTIVE,
         sub_modules=[SubModuleEntry(name="system-prompt-extraction")],
-        is_executive=True,
     )
 
     assert _belief_role_for(module, Ctx()) is BeliefRole.LEADER
@@ -141,10 +142,10 @@ def test_belief_role_for_registry_manager_with_submodules_stays_manager() -> Non
         depth = 1
         active_experiment_id = None
 
-    module = ModuleConfig(
+    module = ReactActorSpec(
         name="system-prompt-extraction",
+        role=ActorRole.MODULE,
         sub_modules=[SubModuleEntry(name="target-profiler")],
-        is_executive=False,
     )
 
     assert _belief_role_for(module, Ctx()) is BeliefRole.MANAGER
@@ -155,10 +156,10 @@ def test_belief_context_can_be_suppressed_for_fixed_scenario_executive() -> None
         belief_graph = _build_demo_graph()[0]
         active_experiment_id = None
 
-    module = ModuleConfig(
+    module = ReactActorSpec(
         name="scenario:executive",
+        role=ActorRole.EXECUTIVE,
         parameters={"suppress_belief_context": True},
-        is_executive=True,
     )
 
     assert _build_belief_context(Ctx(), module) == ""

@@ -4,10 +4,10 @@ These verify that the runner / evaluation / engine / prompt changes
 actually populate the belief graph during a sub-module dispatch — not
 just that the Session 1 modules work in isolation.
 
-The legacy AttackGraph path is unchanged; these tests run with
-``ctx.belief_graph`` bound to a fresh :class:`BeliefGraph` and check
-that the post-attempt pipeline mirrors the attempt + extractor +
-belief deltas + frontier rank.
+The AttackGraph execution-trace path still runs; these tests bind
+``ctx.belief_graph`` to a fresh :class:`BeliefGraph` and check that the
+post-attempt pipeline mirrors the attempt + extractor + belief deltas +
+frontier rank.
 """
 
 from __future__ import annotations

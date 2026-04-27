@@ -29,12 +29,12 @@ from mesmer.core.agent.tools import (
     update_scratchpad,
 )
 from mesmer.core.agent.tools.base import tool_result
+from mesmer.core.actor import ReactActorSpec, ToolPolicySpec, ensure_actor
 from mesmer.core.constants import ToolName
 
 if TYPE_CHECKING:
     from mesmer.core.agent.context import Context
     from mesmer.core.agent.engine import LogFn
-    from mesmer.core.module import ModuleConfig
 
 
 # Static built-in handlers keyed by enum name. ``conclude`` is absent
@@ -48,48 +48,51 @@ _BUILTIN_HANDLERS = {
     ToolName.TALK_TO_OPERATOR: talk_to_operator.handle,
 }
 
+_BUILTIN_SCHEMAS = {
+    ToolName.SEND_MESSAGE.value: send_message.SCHEMA,
+    ToolName.ASK_HUMAN.value: ask_human.SCHEMA,
+    ToolName.UPDATE_SCRATCHPAD.value: update_scratchpad.SCHEMA,
+    ToolName.TALK_TO_OPERATOR.value: talk_to_operator.SCHEMA,
+    ToolName.CONCLUDE.value: conclude.SCHEMA,
+}
 
-def build_tool_list(module: ModuleConfig, ctx: Context) -> list[dict]:
-    """Assemble the OpenAI ``tools=`` list for a module + context.
 
-    Two roles, two tool shapes (gated by ``module.is_executive``):
+def resolve_tool_policy(actor: ReactActorSpec) -> ToolPolicySpec:
+    """Resolve the declarative tool policy for an actor."""
 
-      - **Executive** (synthesized at run start, always at depth=0): owns
-        the operator conversation. Gets ``ask_human``,
-        ``talk_to_operator``, ``update_scratchpad``, and dispatch tools
-        for every manager in ``module.sub_modules``. **Does NOT get
-        ``send_message``** — the executive never talks to the target
-        directly; that's a manager's job.
-      - **Manager / employee** (registry-loaded, ``is_executive=False``):
-        runs heads-down. Gets any sub-module dispatch tools. It also gets
-        ``send_message`` unless the module opts out with
-        ``parameters.allow_target_access: false``. Pure planning modules
-        use that opt-out so the prompt does not have to fight an available
-        target-I/O tool. Non-executives never get ``ask_human`` /
-        ``talk_to_operator`` / ``update_scratchpad`` — only the executive
-        talks to the operator.
+    actor = ensure_actor(actor)
+    if actor.tool_policy is None:
+        raise ValueError(f"Actor {actor.name!r} has no tool_policy")
+    return actor.tool_policy
 
-    Order matters only for prompt compactness; the LLM sees all schemas
-    at once. Sub-module tools come first because they're the meaningful
-    attack surface.
-    """
+
+def build_tool_list(actor: ReactActorSpec, ctx: Context) -> list[dict]:
+    """Materialize an actor's declarative tool policy into OpenAI schemas."""
+    actor = ensure_actor(actor)
+    policy = resolve_tool_policy(actor)
     tools: list[dict] = []
-    if module.sub_modules:
-        tools.extend(ctx.registry.as_tools(module.sub_module_names))
-    if module.is_executive:
-        tools.append(ask_human.SCHEMA)
-        tools.append(talk_to_operator.SCHEMA)
-        tools.append(update_scratchpad.SCHEMA)
-    elif module.parameters.get("allow_target_access", True) is not False:
-        tools.append(send_message.SCHEMA)
-    tools.append(conclude.SCHEMA)
+
+    if policy.dispatch_submodules and actor.sub_modules:
+        tools.extend(ctx.registry.as_tools(actor.sub_module_names))
+
+    for name in policy.builtin:
+        schema = _BUILTIN_SCHEMAS.get(str(name))
+        if schema is None:
+            raise ValueError(f"Unknown built-in tool grant: {name!r}")
+        tools.append(schema)
+
+    if policy.external:
+        raise ValueError(
+            "External tool grants are declared but no external tool resolver is configured."
+        )
+
     return tools
 
 
 async def dispatch_tool_call(
     fn_name: str,
     ctx: Context,
-    module: ModuleConfig,
+    actor: ReactActorSpec,
     call,
     args: dict,
     instruction: str,
@@ -107,10 +110,10 @@ async def dispatch_tool_call(
         name = None
 
     if name in _BUILTIN_HANDLERS:
-        return await _BUILTIN_HANDLERS[name](ctx, module, call, args, log)
+        return await _BUILTIN_HANDLERS[name](ctx, actor, call, args, log)
     if fn_name in ctx.registry:
         return await sub_module.handle(
-            ctx, module, call, fn_name, args, instruction, log
+            ctx, actor, call, fn_name, args, instruction, log
         )
     return tool_result(call.id, f"Unknown tool: {fn_name}")
 
@@ -118,5 +121,6 @@ async def dispatch_tool_call(
 __all__ = [
     "build_tool_list",
     "dispatch_tool_call",
+    "resolve_tool_policy",
     "tool_result",
 ]

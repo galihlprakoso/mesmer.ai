@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from mesmer.core.agent.context import HumanQuestionBroker
-from mesmer.core.constants import NodeSource, ScenarioMode
+from mesmer.core.constants import ScenarioMode
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory
 from mesmer.core.runner import RunConfig, execute_run, BUILTIN_MODULES
@@ -150,8 +150,6 @@ def _make_verbose_log():
             "judge_verdict": ("dim blue",     "\u2696"),
             "judge_error":   ("red",          "\u2696\u2717"),
             "graph_update":  ("cyan",         "\U0001f4ca"),
-            "frontier":      ("green",        "\U0001f33f"),
-            "tier_gate":     ("bold green",   "\U0001f6aa"),  # door
             "reflect_error": ("red",          "\U0001f4ad\u2717"),
             "send_error":    ("bold red",     "\u2192\u2717"),
             "throttle_wait": ("yellow",       "\u23f8"),
@@ -262,30 +260,26 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
 
 
 def _print_run_summary(graph: AttackGraph):
-    """Print post-run summary with frontier suggestions."""
+    """Print post-run execution summary."""
     stats = graph.stats()
-    promising = graph.get_promising_nodes()[:3]
-    dead = graph.get_dead_nodes()
-    frontier = graph.get_frontier_nodes(limit=5)
+    high_scoring = graph.get_high_scoring_nodes()[:3]
+    failed = graph.get_failed_nodes()
 
     lines = []
-    lines.append(f"{stats['total']} nodes, {stats['by_status'].get('dead', 0)} dead, best score: {stats['best_score']}/10")
+    lines.append(
+        f"{stats['total']} nodes, "
+        f"{stats['by_status'].get('failed', 0)} failed, "
+        f"best score: {stats['best_score']}/10"
+    )
     lines.append("")
 
-    if promising:
-        lines.append("[bold]Key findings:[/bold]")
-        for n in promising:
+    if high_scoring:
+        lines.append("[bold]High-scoring executions:[/bold]")
+        for n in high_scoring:
             lines.append(f"  \u2605 {n.module}\u2192{n.approach[:60]} (score:{n.score})")
-    if dead:
-        dead_mods = set(n.module for n in dead)
-        lines.append(f"  \u2717 Dead ends: {', '.join(dead_mods)}")
-    lines.append("")
-
-    if frontier:
-        lines.append("[bold]Frontier (suggested next moves):[/bold]")
-        for i, n in enumerate(frontier, 1):
-            tag = " \u2605 HUMAN" if n.source == NodeSource.HUMAN else ""
-            lines.append(f"  {i}. {n.approach[:70]}{tag}")
+    if failed:
+        failed_mods = set(n.module for n in failed)
+        lines.append(f"  \u2717 Failed: {', '.join(failed_mods)}")
     lines.append("")
     lines.append("[dim]\U0001f4a1 Pass feedback on next run with --hint[/dim]")
 
@@ -334,35 +328,24 @@ def graph_show(scenario_path):
         border_style="cyan",
     ))
 
-    promising = g.get_promising_nodes()[:5]
-    if promising:
-        table = Table(title="Promising Nodes")
+    high_scoring = g.get_high_scoring_nodes()[:5]
+    if high_scoring:
+        table = Table(title="High-Scoring Executions")
         table.add_column("Module", style="cyan")
         table.add_column("Approach", style="white", max_width=50)
         table.add_column("Score", style="green", justify="right")
         table.add_column("Leaked Info", style="yellow", max_width=40)
-        for n in promising:
+        for n in high_scoring:
             table.add_row(n.module, n.approach[:50], str(n.score), n.leaked_info[:40])
         console.print(table)
 
-    frontier = g.get_frontier_nodes(limit=10)
-    if frontier:
-        table = Table(title="Frontier (next moves)")
-        table.add_column("#", style="dim", justify="right")
-        table.add_column("Module", style="cyan")
-        table.add_column("Approach", style="white", max_width=60)
-        table.add_column("Source", style="yellow")
-        for i, n in enumerate(frontier, 1):
-            table.add_row(str(i), n.module, n.approach[:60], n.source)
-        console.print(table)
-
-    dead = g.get_dead_nodes()[:8]
-    if dead:
-        table = Table(title="Dead Ends")
+    failed = g.get_failed_nodes()[:8]
+    if failed:
+        table = Table(title="Failed Executions")
         table.add_column("Module", style="red")
         table.add_column("Approach", style="white", max_width=50)
         table.add_column("Reason", style="dim", max_width=50)
-        for n in dead:
+        for n in failed:
             table.add_row(n.module, n.approach[:50], n.reflection[:50])
         console.print(table)
 
@@ -400,7 +383,7 @@ def hint(scenario_path, text):
     memory.save_graph(g)
 
     console.print(f"[bold yellow]\U0001f4a1 Hint saved:[/bold yellow] {text.strip()[:100]}")
-    console.print(f"[dim]Node {node.id} added as high-priority frontier[/dim]")
+    console.print(f"[dim]Node {node.id} added as a human execution note[/dim]")
 
 
 # ---------------------------------------------------------------------------

@@ -1,578 +1,551 @@
 # Mesmer Execution and Visualization Architecture
 
-This document explains how an attack run actually moves through the agentic
-system and how that run becomes the graph shown in the web UI.
+This document explains how a Mesmer run moves through the runtime and how that
+runtime becomes the graph shown in the web UI.
 
-The key idea: a Mesmer run is not one monolithic agent. It is a recursive tree
-of ReAct loops using one shared run context. The executive delegates to manager
-modules, managers may delegate to lower modules, leaf modules talk to the
-target, and every completed delegation is judged, written to graph state, and
-fed back into context for the next decision.
+The important distinction:
+
+- The **executive** is the scenario-level coordinator. It talks to the operator
+  and dispatches managers.
+- **Managers and employee modules** do the target-facing work.
+- The **scratchpad** is one shared working whiteboard rendered into prompts.
+- `module_outputs` is a separate latest-output cache used for phase gates and
+  precise handoff checks.
+- The **AttackGraph** is the audit log and visualization source.
+- The **BeliefGraph** is planner state: hypotheses, evidence, and ranked
+  experiments.
+- The **UI graph** is a projection of persisted graph state plus a few
+  live-only synthetic nodes.
+
+Do not read a high-scoring AttackGraph node as "the next phase has valid
+structured input." AttackGraph records execution; judge score is metadata. The
+next phase still receives the shared whiteboard plus prior module outputs and
+may decide that the prior artifact is too thin or missing required report
+sections.
+
+## 1. High-Level Flow
 
 ```mermaid
 flowchart LR
-  Scenario["Scenario YAML<br/>target + objective + ordered modules"]
-  Executive["Runtime executive<br/>scenario_stem:executive<br/>not registered on disk"]
+  Scenario["Scenario YAML<br/>target + objective + manager list"]
+  Executive["Synthesized executive<br/>scenario-stem:executive"]
   Context["Shared Context<br/>target, turns, scratchpad,<br/>AttackGraph, BeliefGraph"]
-  Modules["Recursive module ReAct loops<br/>manager / employee modules"]
+  Manager["Manager / employee ReAct loops"]
   Target["Target adapter<br/>send_message"]
-  Judge["Judge / extractor calls<br/>score, evidence, belief deltas"]
-  Graphs["Persisted state<br/>graph.json + belief_graph.json<br/>conversation + scratchpad.md"]
-  UI["Web visualization<br/>leader timeline + node detail"]
+  Judge["Judge + evidence extractors"]
+  Stores["Persistent stores<br/>graph.json, belief_graph.json,<br/>scratchpad.md, chat logs"]
+  UI["Web UI<br/>Attack Graph + Belief Map + details"]
 
   Scenario --> Executive
   Executive --> Context
-  Context --> Modules
-  Modules --> Target
-  Target --> Modules
-  Modules --> Judge
-  Judge --> Graphs
-  Modules --> Graphs
-  Graphs --> Context
-  Graphs --> UI
+  Executive --> Manager
+  Context --> Manager
+  Manager --> Target
+  Target --> Manager
+  Manager --> Judge
+  Judge --> Stores
+  Manager --> Stores
+  Stores --> Context
+  Stores --> UI
 ```
 
-## Mental Model
+One run is recursive: the executive has a ReAct loop, every manager has its own
+ReAct loop, and a manager may dispatch lower modules. They share context by
+reference, but each role sees a different tool list.
 
-One run has five layers:
+## 2. Runtime Layers
 
-| Layer | What it does | Where it lives |
+| Layer | Purpose | Source |
 |---|---|---|
-| Scenario | Declares the target, objective, leader prompt, and ordered manager modules. | `scenarios/*.yaml` |
-| Runtime executive | A synthesized top-level module named `<scenario_stem>:executive`. It coordinates managers and talks to the operator. | Created in `execute_run`; not written to disk |
-| Shared context | The blackboard for this run: target handle, turns, scratchpad, graphs, telemetry, operator queue, budgets. | `mesmer/core/agent/context.py` |
-| Recursive modules | Each module gets its own ReAct loop but shares the same context objects. | `run_react_loop` + `sub_module.handle` |
-| Graph projection | Persisted graph data is projected into a leader-centric tree for the UI. | `graph.json` -> `buildLeaderTimeline` |
+| Scenario | Declares target, objective, optional leader prompt, and manager list. | `scenarios/*.yaml` |
+| Executive | Runtime-only scenario coordinator. Dispatches managers and talks to the operator. | Synthesized in `mesmer/core/runner.py` |
+| Runtime actor | The shared interface consumed by the ReAct loop. Both modules and the executive adapt into this. | `mesmer/core/actor.py` |
+| Context | Shared run state: target, turns, scratchpad, graphs, telemetry, operator queue. | `mesmer/core/agent/context.py` |
+| Modules | Registry-loaded managers, planners, profilers, and attack techniques. | `modules/**/module.yaml` |
+| AttackGraph | Persistent execution audit and UI tree source. | `mesmer/core/graph.py` |
+| BeliefGraph | Typed planner state. | `mesmer/core/belief_graph.py` |
+| UI projection | Converts graph snapshots into the visible leader timeline. | `leader-timeline.js` |
 
-The UI graph is an execution view, not a raw storage dump. It hides storage
-roots, can synthesize a temporary "active manager" while a run is live, filters
-stale ordered-manager frontier proposals, and picks a leader verdict node as
-the visible root after a run finishes.
+## 3. Executive vs Module
 
-## Run Bootstrap
+Conceptually, the executive is **not** a normal user-authored attack module. It
+is the scenario agent.
 
-`mesmer/core/runner.py::execute_run` prepares the complete runtime before the
-first LLM call.
+Implementation-wise, both the executive and modules adapt into
+`ReactActorSpec`, the runtime contract consumed by the ReAct engine. This keeps
+authored module metadata (`ModuleConfig`) separate from runtime actor identity.
 
-```mermaid
-flowchart TD
-  Start([execute_run]) --> LoadScenario["Load scenario + registry"]
-  LoadScenario --> Validate["Validate scenario.modules exist"]
-  Validate --> SynthExec["Synthesize executive ModuleConfig<br/>name = scenario_stem:executive<br/>sub_modules = scenario.modules<br/>ordered_modules = scenario.modules"]
-  SynthExec --> Target["Create target adapter"]
-  Target --> AttackGraph["Load or create AttackGraph<br/>graph.ensure_root()<br/>run_counter += 1"]
-  AttackGraph --> BeliefGraph["Load or create BeliefGraph<br/>--fresh wipes belief graph"]
-  BeliefGraph --> SeedTraits["Seed declared target traits<br/>from scenario target system_prompt"]
-  SeedTraits --> Hints["Add human hints<br/>as high-priority frontier nodes"]
-  Hints --> Context["Create shared Context<br/>target, registry, objective,<br/>turns, graph, belief_graph, run_id"]
-  Context --> ScratchpadSeed["Seed scratchpad from graph history<br/>oldest to newest, latest output per module"]
-  ScratchpadSeed --> ExecPad["Load executive scratchpad.md<br/>unless --fresh"]
-  ExecPad --> BeliefBootstrap["Bootstrap hypotheses and frontier experiments<br/>if belief graph has no active hypotheses"]
-  BeliefBootstrap --> Loop["run_react_loop(executive)"]
-  Loop --> LeaderVerdict["Write leader verdict node<br/>source = leader<br/>status = promising/dead"]
-  LeaderVerdict --> Save["Save graph, belief graph,<br/>conversation, scratchpad"]
-```
+Runtime invariants:
 
-Important bootstrap invariants:
+- The executive is synthesized in memory as `<scenario-stem>:executive`.
+- It is not loaded from `modules/**/module.yaml`.
+- It is not discoverable through the registry.
+- It is built as `ExecutiveSpec(...).as_actor()` with `ActorRole.EXECUTIVE`.
+- Registry modules become actors through `ModuleConfig.as_actor()` with
+  `ActorRole.MODULE`.
+- It appears in the graph only as the run's final `source="leader"` verdict
+  node, or as a live synthetic UI root before the verdict exists.
 
-- The executive is runtime-only. It is not in the registry and should not appear
-  as a normal module definition.
-- `ordered_modules` comes directly from `scenario.modules` when the scenario has
-  a leader prompt.
-- The scratchpad starts populated from previous graph outputs, so cross-run
-  knowledge is available before the first manager is called.
-- The leader verdict node is written once, after the executive loop exits. It is
-  marked `source = "leader"` so attempt-centric planners can skip it.
+So the executive is not a module. The common abstraction is now runtime actor:
+modules and executives are both actors while running, but only modules are
+registry-authored capabilities.
 
-## Role and Tool Boundaries
+## 4. Tool Boundaries
 
-Tool access is role-gated. This is deliberate context engineering: the model
-should only see tools appropriate to the role it is currently playing.
+Tool exposure is declarative. Each `ReactActorSpec` has a `ToolPolicySpec`.
+Normal actor construction fills that policy in `ExecutiveSpec.as_actor()` or
+`ModuleConfig.as_actor()`. `build_tool_list()` only materializes the policy into
+tool schemas. A runtime actor without a policy fails closed instead of deriving
+tools from role or parameters.
 
 ```mermaid
 flowchart TD
-  Module["ModuleConfig"] --> IsExec{"module.is_executive?"}
-
-  IsExec -- yes --> ExecTools["Executive tools<br/>- manager dispatch tools<br/>- ask_human<br/>- talk_to_operator<br/>- update_scratchpad<br/>- conclude"]
-  ExecTools --> ExecNo["No send_message<br/>executive cannot talk directly to target"]
-
-  IsExec -- no --> HasSubs{"has sub_modules?"}
-  HasSubs -- yes --> ChildTools["sub-module dispatch tools"]
-  HasSubs -- no --> LeafTools["no child dispatch tools"]
-  ChildTools --> TargetAccess{"allow_target_access != false?"}
-  LeafTools --> TargetAccess
-  TargetAccess -- yes --> Send["send_message"]
-  TargetAccess -- no --> NoSend["no target I/O tool"]
-  Send --> NonExecEnd["conclude"]
-  NoSend --> NonExecEnd
+  Sources["Actor source<br/>ExecutiveSpec or ModuleConfig"]
+  Sources --> Adapter["as_actor()<br/>fills ReactActorSpec.tool_policy"]
+  Adapter --> Actor["ReactActorSpec<br/>name, role, sub_modules, tool_policy"]
+  Actor --> Resolve["resolve_tool_policy(actor)"]
+  Resolve --> Policy["ToolPolicySpec<br/>dispatch_submodules<br/>builtin tool names<br/>external grants"]
+  Policy --> Materialize["build_tool_list()<br/>materialize schemas"]
+  Materialize --> SubTools["registry tools for sub_modules<br/>when dispatch_submodules = true"]
+  Materialize --> Builtins["built-in schemas by name<br/>send_message / ask_human / conclude / ..."]
+  Materialize --> External["external grants<br/>fail closed until resolver exists"]
+  SubTools --> Done["OpenAI tool schemas"]
+  Builtins --> Done
+  External --> Done
 ```
 
-| Role | Can dispatch modules? | Can talk to target? | Can talk to operator? | Can update scratchpad directly? |
+| Actor | Dispatch modules | Talk to target | Talk to operator | Update persistent scratchpad |
 |---|---:|---:|---:|---:|
 | Executive | Yes, scenario managers | No | Yes | Yes |
-| Manager | Yes, if it declares sub-modules | Usually yes | No | No direct tool; its `conclude()` auto-writes |
-| Employee / leaf | No, unless configured with sub-modules | Usually yes | No | No direct tool; its `conclude()` auto-writes |
+| Manager | Yes, if it declares sub-modules | Usually yes | No | No direct tool |
+| Employee / leaf | Usually no | Usually yes | No | No direct tool |
+| Pure planner | Maybe | No, when opted out | No | No direct tool |
 | Judge / extractor | No | No | No | No |
 
-This prevents the executive from bypassing managers and prevents worker modules
-from consuming human/operator messages meant for the leader.
+### ToolPolicySpec
 
-## Prompt Construction
+`ToolPolicySpec` currently has three fields:
 
-Every call to `run_react_loop` builds a fresh prompt for that module. The
-context block is not just "conversation so far"; it is a deliberately layered
-decision packet.
+| Field | Meaning |
+|---|---|
+| `dispatch_submodules` | Whether to expose dynamic registry tools for `actor.sub_modules`. |
+| `builtin` | Ordered list of built-in tool names such as `send_message`, `ask_human`, and `conclude`. |
+| `external` | Reserved list for future MCP/plugin grants. Declaring these currently fails closed until a resolver exists. |
+
+This makes tool exposure data-driven without opening arbitrary tools by
+default. Future MCP or plugin support should add an explicit resolver and
+allowlist entries here rather than bypassing `build_tool_list()`.
+
+Declare module tool exposure in top-level YAML:
+
+```yaml
+tool_policy:
+  dispatch_submodules: false
+  builtin:
+    - conclude
+```
+
+Use this for pure reasoning/planning modules that should only read scratchpad,
+history, graph context, or child outputs. Example: `attack-planner` should
+produce a strategy, not improvise target messages directly, so its policy omits
+`send_message`.
+
+The executive never receives `send_message` because its
+`ExecutiveSpec.as_actor()` policy does not grant it.
+
+## 5. Run Bootstrap
+
+`execute_run()` prepares the runtime before the first LLM call.
 
 ```mermaid
 flowchart TD
-  Prompt["LLM prompt for current module"] --> System["system:<br/>CONTINUATION_PREAMBLE if needed<br/>+ module.system_prompt"]
-  Prompt --> User["user content"]
-  User --> Assignment["Instruction + overall objective"]
-  User --> Operator["Operator messages<br/>leader only, drained once"]
-  User --> Scratch["Scratchpad snapshot<br/>latest output per module"]
-  User --> History["Module conversation history<br/>timeline of prior module outputs"]
+  Start([execute_run]) --> Load["Load scenario + registry"]
+  Load --> Validate["Validate scenario.modules exist"]
+  Validate --> Synth["Build ExecutiveSpec<br/>name = scenario_stem:executive<br/>ordered_modules = scenario.modules"]
+  Synth --> Actor["ExecutiveSpec.as_actor()<br/>ReactActorSpec(role=EXECUTIVE)"]
+  Actor --> Target["Create target adapter"]
+  Target --> AG["Load/create AttackGraph<br/>ensure_root<br/>run_counter += 1"]
+  AG --> BG["Load/create BeliefGraph<br/>--fresh clears prior graph state"]
+  BG --> ScratchSeed["Seed scratchpad from graph history<br/>latest module_output per module"]
+  ScratchSeed --> ExecPad["Load scratchpad.md<br/>into executive slot"]
+  ExecPad --> Context["Create shared Context"]
+  Context --> Loop["run_react_loop(executive)"]
+  Loop --> Verdict["Write leader verdict node<br/>source = leader"]
+  Verdict --> Save["Save graph, belief graph,<br/>conversation, scratchpad.md"]
+```
+
+Important details:
+
+- `scenario.modules` becomes the executive's dispatchable manager list.
+- When a scenario has a leader prompt, that list also becomes
+  `ordered_modules`.
+- The executive's persistent notes live in `scratchpad.md`.
+- Module slots in the in-memory scratchpad are rebuilt from graph history at run
+  start and updated as managers conclude.
+
+## 6. Prompt Construction
+
+Every actor gets a fresh prompt each ReAct iteration. The prompt is a layered
+decision packet, not just a transcript.
+
+```mermaid
+flowchart TD
+  Prompt["Prompt for current actor"]
+  Prompt --> System["System prompt<br/>module.system_prompt"]
+  Prompt --> User["User content"]
+  User --> Objective["Current instruction + overall objective"]
+  User --> Operator["Operator messages<br/>executive only"]
+  User --> Scratch["Scratchpad snapshot<br/>latest output per slot"]
+  User --> History["Module conversation history<br/>timeline"]
   User --> Experience["Learned experience<br/>worked/failed patterns"]
-  User --> Belief["Belief graph decision brief<br/>ranked experiments, hypotheses,<br/>dead zones, role-scoped tasks"]
-  User --> Fallback["AttackGraph frontier fallback<br/>only if belief brief is empty"]
-  User --> TargetFrame["Target transcript framing<br/>conversation so far OR prior intel<br/>depending on reset/fresh session"]
-  User --> Lessons["Module log<br/>sibling lessons in this run"]
-  User --> Budget["Turn budget banner"]
-  Prompt --> Tools["tools array<br/>role-gated schemas"]
+  User --> Belief["Belief brief<br/>role-scoped hypotheses + experiments"]
+  User --> TargetFrame["Target transcript or prior intel"]
+  User --> Budget["Budget banner"]
+  Prompt --> Tools["Role-gated tool schemas"]
 ```
 
-The main context channels are different on purpose:
+Channels have different meanings:
 
-| Channel | Shape | Purpose |
-|---|---|---|
-| Scratchpad | Key-value snapshot, latest output per module | "What is the current best handoff from each module?" |
-| Module conversation history | Ordered timeline from graph history | "What happened, in what order?" |
-| Learned experience | Aggregated graph-derived lessons | "Which techniques worked or failed against this target?" |
-| Belief graph brief | Typed planner state | "What hypotheses and frontier experiments should this role care about?" |
-| Target transcript | Raw target exchanges | "What has the target actually seen in this session?" |
-| Tool result | Immediate child-to-parent handoff | "What did the just-run module conclude, and how did the judge score it?" |
+| Channel | Meaning |
+|---|---|
+| Scratchpad | Shared markdown whiteboard for concise working state. |
+| Module outputs | Latest raw `conclude()` text by module name. |
+| Module history | Ordered record of what ran. |
+| Target transcript | Raw target exchanges in the current target session. |
+| Tool result | Immediate child-to-parent return value. |
+| AttackGraph | Persistent attempt audit and UI source. |
+| BeliefGraph | Typed planning state and ranked experiments. |
 
-Prompt correctness depends on keeping these separate. If target turns are shown
-as if the target remembers them after a reset, the attacking model will make
-bad moves. If scratchpad and timeline are conflated, a later thin retry can
-erase a stronger structured artifact. The implementation handles both cases:
-fresh target sessions are rendered as "prior intel", and structured artifact
-markers prevent a thin retry from overwriting a valid earlier artifact.
+When debugging, first ask: "Which channel was supposed to carry this
+information?"
 
-## Recursive Agentic Execution
+## 7. Scratchpad Contract
 
-Every module uses the same ReAct loop:
+The scratchpad is one shared markdown whiteboard rendered into prompts. It is
+not the per-module output cache.
 
-1. Build messages and tools.
-2. Call the model.
-3. If it calls a tool, dispatch the tool and append the tool result.
-4. If it calls `conclude`, return that result to its parent.
-5. If it only reasons repeatedly, nudge it to pick a tool or conclude.
+```markdown
+## Scratchpad — shared whiteboard
 
-Delegating to a sub-module creates a child context. The child context is a new
-module run, but it shares the important run state by reference: target, turns,
-scratchpad, AttackGraph, BeliefGraph, module log, telemetry, and operator
-message queue.
+## Target
+research-l1, Acme Corp research assistant
 
-```mermaid
-sequenceDiagram
-  participant Exec as Executive ReAct loop
-  participant Dispatch as sub_module.handle
-  participant Child as Child module ReAct loop
-  participant Target as Target adapter
-  participant Scratch as Shared scratchpad
-  participant Judge as Judge / extractor
-  participant AG as AttackGraph
-  participant BG as BeliefGraph
+## Tool Surface
+- search/read path likely available
+- email side effect likely available
 
-  Exec->>Dispatch: call manager tool(instruction, frontier_id?, experiment_id?)
-  Dispatch->>Dispatch: enforce ordered phase gate
-  Dispatch->>Dispatch: auto-bind matching experiment_id
-  Dispatch->>Child: ctx.run_module(manager, instruction)
-
-  loop child ReAct iterations
-    Child->>Child: build role-scoped prompt + tools
-    alt needs target I/O
-      Child->>Target: send_message(text)
-      Target-->>Child: reply
-      Child->>BG: extract evidence from this target turn
-    else delegates further
-      Child->>Dispatch: call lower module tool
-    else done
-      Child-->>Dispatch: conclude(result)
-    end
-  end
-
-  Dispatch->>Scratch: scratchpad[manager] = conclude(result)
-  Dispatch->>Dispatch: slice sub_turns from shared ctx.turns
-  Dispatch->>Judge: evaluate attempt from sub_turns + module_result
-  Judge-->>Dispatch: JudgeResult(score, leaked_info, dead_end, suggested_next)
-  Dispatch->>AG: add fresh node or fulfill frontier node
-  Dispatch->>BG: create Attempt, extract evidence, update beliefs, rank frontier
-  alt not ordered phase and node is not dead
-    Dispatch->>AG: reflect and add frontier proposals
-  else ordered phase or dead node
-    Dispatch->>AG: no generic frontier expansion
-  end
-  Dispatch-->>Exec: tool_result(result + judge digest + raw target evidence)
-  Exec->>Exec: next decision or conclude(objective_met)
+## Next Step
+Run indirect-prompt-injection against the protocol-update retrieval path.
 ```
 
-The parent does not see the child's raw internal LLM messages. It sees the
-child's `conclude()` text, judge digest, and target evidence included in the
-tool result. The scratchpad then carries the child's authored output forward to
-every later module.
+The framework still keeps a separate `module_outputs` cache:
 
-## Sub-Module Delegation Algorithm
+```text
+module_outputs["system-prompt-extraction"] = latest raw conclude text
+module_outputs["tool-extraction"] = latest raw conclude text
+module_outputs["indirect-prompt-injection"] = latest raw conclude text
+```
 
-`mesmer/core/agent/tools/sub_module.py::handle` is the main execution pipeline.
+That cache is for ordered phase gates and audit handoffs. Full history remains
+in the AttackGraph.
+
+Dataflow:
 
 ```mermaid
 flowchart TD
-  Start([manager tool call]) --> Order{"executive ordered phase?"}
-  Order -- yes --> PriorDone{"all prior ordered modules<br/>have scratchpad output?"}
-  PriorDone -- no --> Block["return tool_result:<br/>phase order blocked"]
-  PriorDone -- yes --> Warn["append handoff warning<br/>for missing artifact markers"]
-  Order -- no --> FrontierNudge["check missed AttackGraph frontier"]
-  Warn --> Bind
-  FrontierNudge --> Bind
-  Bind["bind frontier_id / experiment_id<br/>drop stale mismatched experiment"]
-  Bind --> DelegateLog["log DELEGATE JSON"]
-  DelegateLog --> MarkBG["mark belief frontier EXECUTING<br/>when experiment_id is valid"]
-  MarkBG --> RunChild["ctx.run_module(child)<br/>recursive run_react_loop"]
-  RunChild --> Scratch["auto-write child conclude text<br/>to scratchpad[child_module]"]
-  Scratch --> Slice["sub_turns = ctx.turns[turns_before:]"]
-  Slice --> Judge["judge attempt<br/>target exchanges + artifact output"]
-  Judge --> Graph["update AttackGraph"]
-  Graph --> Belief["mirror into BeliefGraph"]
-  Belief --> Reflect{"ordered phase or dead node?"}
-  Reflect -- yes --> NoExpand["skip generic frontier expansion"]
-  Reflect -- no --> Expand["reflect + propose frontier"]
-  NoExpand --> Result["return tool_result to parent"]
-  Expand --> Result
+  GraphHistory["graph conversation_history()"] --> ModuleCache["Seed module_outputs<br/>latest raw output by module"]
+  ModuleCache --> PhaseGate["Ordered phase gates<br/>marker checks"]
+
+  PersistedPad["scratchpad.md"] --> Whiteboard["Shared scratchpad whiteboard"]
+  PatchTool["update_scratchpad<br/>content or operations"] --> Whiteboard
+  Whiteboard --> Prompt["Rendered into every prompt"]
+
+  ChildResult["child conclude(result)"] --> AutoWrite["sub_module.handle writes<br/>module_outputs[child_name] = result"]
+  AutoWrite --> PhaseGate
 ```
 
-The ordered phase gate only blocks true phase skipping. For example, the
-executive cannot run `exploit-executor` before `exploit-analysis` has written
-anything to scratchpad. Missing artifact markers are advisory warnings, not a
-hard stop, so a manager can still proceed while seeing a handoff warning.
+Rules:
 
-## Node Creation Algorithm
+- A module's `conclude()` text is auto-written to `module_outputs[module_name]`.
+- Latest output wins in `module_outputs`.
+- `update_scratchpad` updates the shared whiteboard. It accepts either full
+  replacement `content` or patch `operations`.
+- The graph remains the complete timeline.
+- Structured artifacts can declare required marker strings. If a retry output
+  lacks markers and the prior output had them, the prior module output is
+  preserved.
+- The framework does not parse every report into a typed schema. Module prompts
+  are responsible for saying what they need from the whiteboard and graph
+  history.
 
-AttackGraph nodes are created after a delegated module returns. The child
-module's LLM loop itself is not automatically a graph node until
-`sub_module.handle` finishes the judge/update pipeline.
+## 8. Why A High-Scoring Phase Can Still Fail The Next Phase
+
+In a multi-manager run, execution status, judge score, and handoff quality are
+different signals. For the dvllm research demo:
+
+1. `indirect-prompt-injection` produced an output.
+2. The judge scored it `7/10`, so the AttackGraph node is visually high-signal.
+3. The output shown in the detail panel might be thin: it may say a
+   protocol-update path exists, but not include the exact retrieval path or
+   verbatim target evidence.
+4. `email-exfiltration-proof` expects usable evidence from the prior
+   `indirect-prompt-injection` output, especially a retrieval path and an
+   instruction-following quote.
+5. The ordered phase gate sees that
+   `module_outputs["indirect-prompt-injection"]` is non-empty, so it allows the
+   phase to run.
+6. Marker checks can detect missing required sections, but today that is an
+   advisory handoff warning, not a hard blocker.
+7. The proof manager reads the handoff context, cannot find a usable injection
+   artifact, and concludes that email proof cannot proceed.
+
+That means the graph algorithm is internally consistent, but it exposes a
+quality gap:
+
+- The AttackGraph status answers: "Did this execution complete, fail, or get
+  blocked/skipped?"
+- The judge score answers: "How useful did the evaluator think the result was?"
+- The module-output contract answers: "Did this module produce the artifact the
+  next phase needs?"
+
+Those are not the same question.
+
+If we want stricter behavior, there are two implementation options:
+
+- Make ordered artifact requirements hard blockers for later phases.
+- Keep the warning, but teach the executive to rerun or repair a thin prior
+  artifact before dispatching the next phase.
+
+The current code intentionally chooses the second shape: proceed with a warning
+so later phases can honestly report "no usable findings" instead of the runtime
+loop getting stuck.
+
+## 9. Delegation Pipeline
+
+`sub_module.handle()` is the main delegation path.
 
 ```mermaid
 flowchart TD
-  Result["module result + sub_turns + judge_result"] --> Artifact{"no target turns<br/>but has module_output?"}
-  Artifact -- yes --> Completed["status = completed<br/>score hidden in UI<br/>used for planner/catalog artifacts"]
-  Artifact -- no --> Scored["score from judge<br/>status initially alive"]
-
-  Completed --> ParentChoice
-  Scored --> ParentChoice
-
-  ParentChoice{"valid frontier_id?"}
-  ParentChoice -- yes --> Fulfill["fulfill existing frontier node<br/>same id becomes explored attempt"]
-  ParentChoice -- no --> Mode{"scenario mode"}
-  Mode -- TRIALS --> RootChild["attach as child of root<br/>independent rollout sibling"]
-  Mode -- CONTINUOUS --> LeafChild["attach under latest explored node<br/>one conversation path"]
-
-  Fulfill --> Classify
-  RootChild --> Classify
-  LeafChild --> Classify
-
-  Classify["auto-classify<br/>promising / alive / completed / dead"]
-  Classify --> Mirror["mirror attempt into BeliefGraph"]
-  Mirror --> ExpandGate{"node dead?<br/>or ordered executive phase?"}
-  ExpandGate -- yes --> Terminal["no new generic frontier children"]
-  ExpandGate -- no --> Frontier["propose top-k frontier modules<br/>then LLM refines approach text"]
+  Call["Executive or manager calls child tool"] --> Ordered{"Ordered executive phase?"}
+  Ordered -- yes --> Prior{"Prior ordered modules<br/>have module output?"}
+  Prior -- no --> Block["Return phase-order block<br/>child does not run"]
+  Prior -- yes --> Markers["Check artifact markers<br/>append handoff warning if missing"]
+  Ordered -- no --> Bind["Bind experiment_id if present"]
+  Markers --> Bind
+  Bind --> Run["ctx.run_module(child)<br/>recursive ReAct loop"]
+  Run --> Write["Write child conclude text<br/>to module_outputs[child]"]
+  Write --> Slice["Slice target turns added by child"]
+  Slice --> Judge["Judge result<br/>score, leak, dead_end, suggested_next"]
+  Judge --> AG["Update AttackGraph"]
+  AG --> BG["Update BeliefGraph"]
+  BG --> Return["Return tool_result to parent"]
 ```
 
-Status is not "currently running". It is the latest judged lifecycle state:
+Parent actors do not see a child's private LLM scratch messages. They see:
 
-| Status | Meaning | UI behavior |
-|---|---|---|
-| `frontier` | Proposed next move, not executed yet. | Dashed/proposed node; detail shows "Proposed Move". |
-| `alive` | Judged but not decisive. It may be useful later, but it is not a win. | Gray attempt node; score can be shown. |
-| `completed` | Artifact-only output, usually planner/catalog work with no target exchange. | Output node; score hidden. |
-| `promising` | Strong result or objective signal. | Green "worked" attempt. |
-| `dead` | Low value, explicit dead end, or no-gain duplicate. | Red terminal attempt; should not generate new frontier. |
+- the child's `conclude()` text,
+- judge digest,
+- recent raw target evidence included in the tool result,
+- later scratchpad and graph history.
 
-Dead nodes are terminal for frontier expansion. If a graph visually shows
-children under a dead node, that is either historical persisted data from an
-older run or a UI projection issue, not the intended algorithm. Current
-execution skips `_reflect_and_expand` for dead nodes.
+## 10. AttackGraph Contract
 
-## Ordered Scenario Phases
+AttackGraph parentage is the runtime delegation hierarchy. A node is created
+when a module is delegated, starts as `running`, and is completed after the
+module returns and judge metadata is available.
 
-For scenarios with a leader prompt, the executive receives `ordered_modules`
-from `scenario.modules`. In the full red-team scenario that means the leader is
-expected to coordinate manager phases in a declared order.
+```mermaid
+flowchart TD
+  Dispatch["Parent actor delegates child module"] --> Create["Create child AttackGraph node<br/>parent = dispatching actor"]
+  Create --> Run["Run child ReAct loop"]
+  Run --> Done["Child result + target turns + judge"]
+  Done --> Turns{"Target turns?"}
+  Turns -- no --> Completed["Artifact-style output<br/>status completed"]
+  Turns -- yes --> Scored["Scored execution<br/>status completed"]
+  Completed --> End["Update the existing execution node"]
+  Scored --> End
+```
+
+`scenario_mode` affects target session semantics only. It does not choose
+AttackGraph parents. Chronological order is represented by timestamps; ancestry
+is represented only by delegation.
+
+Each execution node also carries `agent_trace`: the ReAct process for that
+actor. This is separate from target exchanges. Target exchanges answer "what
+did the attacker say to the target?"; `agent_trace` answers "what did this
+actor think, call, delegate, and conclude?"
+
+```mermaid
+flowchart TD
+  Node["AttackNode<br/>executive / manager / child"] --> Trace["agent_trace[]"]
+  Trace --> LLM["llm_call / llm_completion"]
+  Trace --> Reason["reasoning"]
+  Trace --> Tools["tool_calls / tool_result"]
+  Trace --> Delegate["delegate / delegate_done"]
+  Trace --> Conclude["conclude"]
+  Node --> Exchanges["messages_sent[]<br/>target_responses[]"]
+```
+
+Node status means execution lifecycle only:
+
+| Status | Meaning |
+|---|---|
+| `pending` | Reserved for an execution record that has not started. |
+| `running` | Live synthetic/UI state or an in-progress execution. |
+| `completed` | Module ran to conclusion. Judge score may still be low. |
+| `failed` | Runtime/tool execution failed. |
+| `blocked` | Runtime guard prevented execution. |
+| `skipped` | Runtime intentionally skipped execution. |
+
+## 11. Ordered Scenario Phases
+
+For authored multi-manager scenarios, the executive receives the declared
+manager order.
 
 ```mermaid
 flowchart LR
-  M1["system-prompt-extraction"] --> Pad1["scratchpad[M1]"]
-  Pad1 --> M2["exploit-analysis"]
-  M2 --> Pad2["scratchpad[M2]"]
-  Pad2 --> M3["exploit-executor"]
-  M3 --> Pad3["scratchpad[M3]"]
-  Pad3 --> Exec["executive conclude<br/>objective_met true/false"]
+  SPE["system-prompt-extraction"] --> SPEOut["module_outputs[SPE]"]
+  SPEOut --> TE["tool-extraction"]
+  TE --> TEOut["module_outputs[tool-extraction]"]
+  TEOut --> IPI["indirect-prompt-injection"]
+  IPI --> IPIOut["module_outputs[indirect-prompt-injection]"]
+  IPIOut --> EEP["email-exfiltration-proof"]
+  EEP --> EEPOut["module_outputs[email-exfiltration-proof]"]
+  EEPOut --> Done["executive conclude"]
 ```
 
-A successful earlier phase does not automatically end the whole scenario. For
-example, `system-prompt-extraction` can do its job and still be followed by
-`exploit-analysis` because the scenario objective may require analysis,
-cataloging, or execution after extraction. The judge's `objective_met` field is
-advisory. The run terminates only when the executive calls `conclude` and sets
-`objective_met`.
+Order enforcement:
 
-Ordered manager calls also skip generic AttackGraph frontier expansion. This is
-important: the ordered executive should not finish `system-prompt-extraction`
-and then receive a generic proposed `system-prompt-extraction` child just
-because the frontier expander wants more exploration. Generic exploration is
-useful for free-form managers, not for fixed scenario phase edges.
+- Later phases are blocked only if an earlier ordered phase has no module output.
+- Missing required artifact markers create a handoff warning.
+- Ordered phase calls skip generic frontier expansion.
+- The executive decides final `objective_met`; judge `objective_met` is
+  advisory.
 
-## Scratchpad Dataflow
+This means "phase 2 has a node" and "phase 2 wrote a usable catalog" are
+different checks.
 
-The scratchpad is the run's short-term blackboard. It is a key-value map
-rendered into every module prompt.
+## 12. BeliefGraph Contract
+
+The BeliefGraph is planner state, not the UI execution tree.
 
 ```mermaid
 flowchart TD
-  History["graph.conversation_history()<br/>oldest to newest"] --> Seed["run-start scratchpad seed<br/>scratchpad[module] = latest module_output"]
-  PersistedExec["scratchpad.md<br/>executive slot"] --> Seed
-  Seed --> Prompt["render into every module prompt<br/>## Scratchpad"]
+  Bootstrap["No active hypotheses"] --> Hyp["Generate hypotheses"]
+  Hyp --> FX["Generate frontier experiments"]
+  FX --> Rank["Rank experiments"]
+  Rank --> Brief["Render role-scoped brief"]
 
-  ChildConclude["child conclude(result)"] --> AutoWrite["sub_module.handle<br/>scratchpad[child_module] = result"]
-  AutoWrite --> Prompt
-
-  ExecTool["executive update_scratchpad tool"] --> ExecSlot["scratchpad[executive_name]"]
-  ExecSlot --> Prompt
-
-  Prompt --> LaterModule["later manager / employee<br/>reads current state"]
-```
-
-Scratchpad rules:
-
-- Module outputs are latest-wins by module name.
-- Graph history is still the full timeline; scratchpad is only the latest
-  snapshot.
-- Structured artifacts can be protected by required markers. If a previous
-  `exploit-analysis` output had a required marker and a retry returns a thin
-  summary without that marker, the prior artifact is preserved.
-- The executive's scratchpad slot is persisted separately as `scratchpad.md` so
-  operator-edited notes survive across runs.
-
-This is why a later manager can use previous extraction results without asking
-the target again: the prior module's `conclude()` text has been pushed into the
-shared scratchpad.
-
-## Communication Channels
-
-The system has several communication channels. They are intentionally not the
-same thing.
-
-| Channel | Producer | Consumer | Persistence | Purpose |
-|---|---|---|---|---|
-| LLM `messages` list | One ReAct loop | Same loop only | Ephemeral | Tool-call transcript for the current module. |
-| `ctx.turns` | `send_message` | Judges, graph updater, future prompts | Persisted in CONTINUOUS mode | Raw attacker-target transcript. |
-| Tool result | Child tool handler | Parent LLM loop | Ephemeral, then can be summarized by parent | Immediate handoff from child to parent. |
-| Scratchpad | Runner seed, sub-module conclude, executive tool | Every module prompt | Executive slot persisted; module slots rebuilt from graph | Latest cross-module working memory. |
-| AttackGraph | Graph updater, frontier expander, runner leader verdict | UI, prompt history, learned experience | `graph.json` | Execution audit, statuses, module outputs, frontier proposals. |
-| BeliefGraph | Evidence extractor, hypothesis updater, frontier ranker | Prompt belief brief, planner | `belief_graph.json` + delta log | Typed hypotheses, evidence, attempts, ranked experiments. |
-| Operator queue | Web UI / human broker | Executive prompt only | Runtime queue | Mid-run human instructions. |
-| Telemetry/log | Context, tools, judge, graph pipeline | CLI/web trace | Runtime/event stream | Forensic execution trace. |
-
-When debugging, ask which channel carried the information. A target reply in
-`ctx.turns` does not mean the executive saw that raw reply directly. The
-executive usually sees it through the child's tool result, scratchpad summary,
-and later graph history.
-
-## Belief Graph Pipeline
-
-The BeliefGraph is a typed planning layer next to the legacy AttackGraph. It is
-not just a visualization artifact.
-
-```mermaid
-flowchart TD
-  Bootstrap["fresh run or no active hypotheses"] --> Hypotheses["generate hypotheses"]
-  Hypotheses --> Frontier["generate frontier experiments"]
-  Frontier --> Rank["rank frontier"]
-  Rank --> Brief["render role-scoped belief brief<br/>into module prompt"]
-
-  Send["send_message target reply"] --> TurnEvidence["extract evidence from single turn"]
-  TurnEvidence --> ApplyTurn["apply evidence to beliefs"]
-  ApplyTurn --> Rank
-
-  Attempt["delegated module completes"] --> AttemptNode["AttemptCreateDelta"]
-  AttemptNode --> Evidence["extract evidence from attempt exchanges<br/>and module output"]
-  Evidence --> Apply["apply evidence to beliefs"]
+  Turn["Target reply"] --> TurnEvidence["Extract evidence"]
+  TurnEvidence --> Apply["Apply evidence to beliefs"]
   Apply --> Rank
+
+  Attempt["Module completes"] --> AttemptDelta["Create attempt node"]
+  AttemptDelta --> AttemptEvidence["Extract evidence from attempt"]
+  AttemptEvidence --> Apply
 ```
-
-The belief graph answers planner questions that are hard to infer from a flat
-execution tree:
-
-- What do we believe about this target?
-- Which evidence supports or refutes those beliefs?
-- Which frontier experiment tests the highest-value hypothesis?
-- Which experiment is currently executing?
-- Which parts of the search space are dead zones?
 
 The executive can pass `experiment_id` when dispatching a manager. The handler
-validates that the experiment matches the module. If the id is stale or belongs
-to another module, it is dropped or auto-bound to the correct matching
-experiment. This avoids blaming the model for planner-contract drift.
+validates that the experiment belongs to the chosen module. If not, it drops or
+auto-binds the id so attempts do not attach to the wrong hypothesis.
 
-## AttackGraph vs BeliefGraph
+## 13. UI Projection
 
-| Concern | AttackGraph | BeliefGraph |
-|---|---|---|
-| Primary use | Execution audit and UI tree | Planner state and hypothesis tracking |
-| Node types | Attempts, frontiers, root, leader verdict | Target, hypothesis, evidence, attempt, frontier experiment |
-| Main persistence | `graph.json` | `belief_graph.json` and delta log |
-| Parent semantics | Causal execution/proposal edges | Typed edges such as support/refute/tested-by |
-| Prompt rendering | History, learned experience, fallback frontier | Role-scoped decision brief |
-| UI rendering | Directly projected into leader timeline | Indirect; informs context and future attempts |
-
-The AttackGraph says "what ran and what did it produce?" The BeliefGraph says
-"what do we believe now, and what should be tested next?"
-
-## Visualization Pipeline
-
-The frontend does not render raw `graph.json` as-is. It builds a leader-centric
-timeline.
+The frontend drops the storage root, then renders the exact `parent_id`
+execution tree. It must not infer hierarchy from scenario YAML, active module
+stack, module names, or timestamps.
 
 ```mermaid
 flowchart TD
-  GraphJson["graph.json snapshot"] --> Build["buildLeaderTimeline"]
-  ScenarioMeta["scenario metadata<br/>ordered modules"] --> Build
-  ActiveTop["activeModuleTop<br/>only while run is live"] --> Build
-
-  Build --> DropRoot["drop storage root"]
-  DropRoot --> FilterRun["optional run_id filter"]
-  FilterRun --> Partition["partition nodes:<br/>leader verdict, real attempts, frontiers"]
-  Partition --> HideOrdered["hide ordered manager frontier nodes<br/>parent and child both ordered managers"]
-  HideOrdered --> RootChoice{"leader verdict exists?"}
-  RootChoice -- yes --> UseVerdict["use leader verdict as visible root"]
-  RootChoice -- no --> SyntheticLeader["synthesize live leader orchestrator root"]
-  UseVerdict --> SyntheticManager
-  SyntheticLeader --> SyntheticManager
-  SyntheticManager["synthesize temporary active manager<br/>only when activeModuleTop is set<br/>and no real manager node exists"]
-  SyntheticManager --> Nest["nest manager sub-module attempts<br/>using known manager-submodule map"]
-  Nest --> Attach["attach frontier children<br/>unless node is collapsed"]
-  Attach --> Render["D3/Svelte graph render<br/>NodeDetail sidebar"]
+  Snapshot["graph.json snapshot"] --> Build["buildLeaderTimeline"]
+  ScenarioMeta["scenario metadata<br/>label only"] --> Build
+  Build --> DropRoot["Drop storage root"]
+  DropRoot --> Filter["Optional run_id filter"]
+  Filter --> Root{"leader node exists?"}
+  Root -- yes --> Leader["Use newest source=leader node as visible root"]
+  Root -- no --> SyntheticLeader["Synthesize empty pre-run executive root"]
+  Leader --> Children["Attach children by parent_id only"]
+  SyntheticLeader --> Children
+  Children --> Render["D3 render + NodeDetail"]
 ```
 
-Visualization-specific node types:
+Visual node types:
 
 | Visual node | Persisted? | Meaning |
 |---|---:|---|
-| Leader orchestrator root | No, when run is still active | UI shell for an in-progress run before leader verdict exists. |
-| Leader verdict square | Yes | Final executive result for the run. |
-| Real attempt | Yes | A completed delegated module execution. |
-| Frontier/proposed node | Yes | A proposed next move that has not executed. |
-| Synthetic active manager | No | Temporary grouping shell while a manager is currently running. |
+| Synthetic executive root | No | Empty shell before a run has created its executive node. |
+| Executive node | Yes | Scenario executive; created at run start, completed at run end. |
+| Manager / child node | Yes | Delegated module execution. Parentage is exact `parent_id`. |
 
-The synthetic active manager must disappear after the run. If it remains in a
-completed graph, the UI is inventing state that the backend did not persist.
+Visual colors:
 
-## Node Detail Semantics
-
-`NodeDetail.svelte` renders sections based on node shape:
-
-| Data field | UI label | Meaning |
-|---|---|---|
-| `module_output` on normal modules | `Output` | The module's `conclude()` text. |
-| `module_output` on `attack-planner` | `Plan` | Same field, domain-specific label. |
-| `leaked_info` / `reflection` | `Judge Review` | Judge-extracted signal and score rationale. |
-| `approach` + exchanges | `Execution Trace` | Instruction and attacker-target messages. |
-| frontier `approach` | `Proposed Move` | Suggested but not yet executed action. |
-| module config | `Module Definition` | Static YAML/module metadata. |
-
-There is no special backend field called `report`. Older UI wording used
-"Report" for the module's authored output, but the data field is
-`module_output`. The current UI should consistently show authored output as
-`Output`, except for planner nodes where `Plan` is clearer.
-
-## Reading Common Graph States
-
-| What you see | What it means |
+| Color | Meaning |
 |---|---|
-| Green manager/attempt | Judged promising or fulfilled an objective signal. |
-| Gray attempt | Completed and judged inconclusive. It is not necessarily running. |
-| Gray synthetic manager with little detail | Temporary live grouping shell; not persisted and should only show while active. |
-| Red attempt | Dead end, low score, or no-gain duplicate. It should be terminal for new frontier expansion. |
-| Blue/output-like completed node | Artifact-only module output; useful handoff, not target I/O. |
-| Dashed/proposed child | Frontier proposal. It has not executed yet. |
-| Repeated same module under an old run | Multiple independent attempts by the same module, usually from retries or historical runs. |
-| Same ordered manager proposed under itself | Stale/invalid ordered-manager frontier; UI should filter it and ordered phase calls should not generate it. |
+| Amber | `running` execution node. |
+| Blue | `completed` execution node with no high score. |
+| Green | High-scoring completed execution. |
+| Red | `failed` or `blocked`. |
+| Gray | `pending` or `skipped`. |
 
-The graph can contain historical data from before a bug fix. The renderer
-should make historical data understandable, but the backend algorithm defines
-the invariant for new runs.
+## 14. Node Detail Semantics
 
-## Correctness Invariants
+| Field | UI meaning |
+|---|---|
+| `module_output` | The module's raw `conclude()` text. |
+| `messages_sent` / `target_responses` | Target exchanges added by that module. |
+| `leaked_info` / `reflection` | Judge interpretation. |
+| `score` | Judge score. Useful, but not a schema-validity proof. |
+| `source="leader"` | Executive verdict node. |
 
-These are the rules the implementation should preserve:
+The detail panel is useful for auditing exactly why a later module complained.
+For a tool-injection run, an `indirect-prompt-injection` detail may show a thin
+output, not a full retrieval-path artifact with verbatim target evidence.
 
-1. The executive never sends target messages directly.
-2. A delegated module run creates at most one real AttackGraph attempt node
-   when its handler finishes.
-3. Dead nodes do not get new generic frontier expansions.
-4. Ordered executive phases do not generate generic manager frontier children.
-5. Phase order is blocked only when a prior ordered manager has not written any
-   scratchpad output.
-6. Missing artifact markers warn the next phase but do not permanently block
-   progress.
-7. Scratchpad is a latest-output snapshot; graph history is the complete
-   timeline.
-8. A valid structured artifact should not be overwritten by a later thin retry.
-9. Judge output is advisory for objective completion. The executive decides
-   final `objective_met`.
-10. Belief `experiment_id` must match the module being dispatched.
-11. Synthetic UI nodes are never persisted and should only exist to explain
-   currently running work.
-12. UI status labels describe lifecycle state, not always live process state.
+## 15. Common Misreads
 
-## Debugging Checklist
+| What you see | Correct reading |
+|---|---|
+| High-score `indirect-prompt-injection` | Judge liked the attempt; not proof that a complete retrieval-path artifact exists. |
+| `email-exfiltration-proof` with low score | Proof phase ran and concluded no usable side-effect result. |
+| Executive displayed on graph | Runtime coordinator or final verdict, not a disk module. |
+| `attack-planner` has no target exchange | Expected when its `tool_policy` does not grant `send_message`. |
+| Synthetic manager appears/disappears during live run | UI grouping shell based on active module stack. |
 
-When a graph looks wrong, trace it in this order:
+## 16. Debugging Checklist
 
-1. Check the persisted node fields in `graph.json`: `status`, `source`,
-   `module`, `parent_id`, `run_id`, `module_output`, `messages_sent`,
+When a graph looks wrong:
+
+1. Inspect the node in `graph.json`: `module`, `status`, `source`,
+   `parent_id`, `run_id`, `module_output`, `messages_sent`,
    `target_responses`.
-2. Check whether the node is real or synthetic in `buildLeaderTimeline`.
-3. Check whether it is a frontier (`status = frontier`) or an attempt.
-4. Check whether it is historical data from an older run.
-5. Check the `DELEGATE` log event for the exact manager instruction,
-   `frontier_id`, and `experiment_id`.
-6. Check `ctx.turns` slicing: the graph node should only contain target
-   exchanges added by that delegated module.
-7. Check scratchpad after delegation: the module's `conclude()` text should be
-   visible under `scratchpad[module]`.
-8. Check the judge verdict: low scores, explicit `dead_end`, or no-gain
-   heuristics can turn a node red even when it produced a useful artifact.
-9. Check belief deltas: a stale or mismatched `experiment_id` should not attach
-   the attempt to the wrong belief frontier.
-10. Check UI projection filters: ordered-manager frontier proposals and
-    post-run synthetic managers should not render as real work.
+2. Decide if the node is real or synthetic in `buildLeaderTimeline()`.
+3. Check the module output cache for the module, not just graph status.
+4. For ordered phases, check missing marker warnings in the delegated
+   instruction.
+5. Check the `DELEGATE` event JSON for exact instruction and `experiment_id`.
+6. Check turn slicing: the node should only include target exchanges added by
+   that delegated module.
+7. Check judge output, but remember it is not a structured artifact validator.
+8. Check BeliefGraph deltas for stale or mismatched `experiment_id`.
+9. Check whether historical graph data predates current invariants.
 
-## Source Map
+## 17. Source Map
 
 | Concern | File |
 |---|---|
-| Run bootstrap, executive synthesis, scratchpad seeding, leader verdict | `mesmer/core/runner.py` |
-| Shared context, model routing, child context sharing | `mesmer/core/agent/context.py` |
-| ReAct loop, prompt assembly, circuit breaker, conclude short-circuit | `mesmer/core/agent/engine.py` |
-| Tool list and dispatch table | `mesmer/core/agent/tools/__init__.py` |
-| Target I/O and per-turn evidence extraction | `mesmer/core/agent/tools/send_message.py` |
-| Sub-module delegation, scratchpad write, graph/belief update pipeline | `mesmer/core/agent/tools/sub_module.py` |
-| Judge calls, AttackGraph update, BeliefGraph update, frontier expansion | `mesmer/core/agent/evaluation.py` |
-| Judge LLM prompt/contracts | `mesmer/core/agent/judge.py` |
-| AttackGraph data model and frontier proposal | `mesmer/core/graph.py` |
-| Scratchpad contract | `mesmer/core/scratchpad.py` |
-| Node status/source enums | `mesmer/core/constants.py` |
-| UI leader timeline projection | `mesmer/interfaces/web/frontend/src/lib/leader-timeline.js` |
-| Graph canvas render | `mesmer/interfaces/web/frontend/src/components/AttackGraph.svelte` |
-| Node detail sidebar | `mesmer/interfaces/web/frontend/src/components/NodeDetail.svelte` |
+| Run bootstrap, executive synthesis, leader verdict | `mesmer/core/runner.py` |
+| Runtime actor abstraction | `mesmer/core/actor.py` |
+| Authored module config and module-to-actor adapter | `mesmer/core/module.py` |
+| Tool policy materialization | `mesmer/core/agent/tools/__init__.py` |
+| ReAct loop and prompt construction | `mesmer/core/agent/engine.py` |
+| Shared context and child contexts | `mesmer/core/agent/context.py` |
+| Sub-module delegation and scratchpad writes | `mesmer/core/agent/tools/sub_module.py` |
+| Target I/O | `mesmer/core/agent/tools/send_message.py` |
+| Executive operator tools | `ask_human.py`, `talk_to_operator.py`, `update_scratchpad.py` |
+| Judge and graph/belief updates | `mesmer/core/agent/evaluation.py` |
+| AttackGraph model | `mesmer/core/graph.py` |
+| Scratchpad model | `mesmer/core/scratchpad.py` |
+| BeliefGraph model | `mesmer/core/belief_graph.py` |
+| Attack graph UI projection | `mesmer/interfaces/web/frontend/src/lib/leader-timeline.js` |
+| Attack graph canvas | `mesmer/interfaces/web/frontend/src/components/AttackGraph.svelte` |
+| Node detail panel | `mesmer/interfaces/web/frontend/src/components/NodeDetail.svelte` |

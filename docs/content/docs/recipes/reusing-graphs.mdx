@@ -27,8 +27,8 @@ meaningfully better than run #1.
 
 ## When `--fresh` is wrong
 
-- You're iterating with hints. `--fresh` deletes the HUMAN-sourced
-  frontier nodes you just added.
+- You're iterating with hints. `--fresh` ignores the HUMAN-sourced
+  execution notes you just added.
 - You're benchmarking. `mesmer bench` always starts each trial fresh
   by design (each trial is independent); calling `--fresh` from the
   CLI is for one-off `mesmer run` invocations.

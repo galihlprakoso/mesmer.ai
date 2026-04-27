@@ -24,10 +24,6 @@
     return $moduleTiers[name] ?? 2
   }
 
-  function isFrontier(node) {
-    return node?.status === 'frontier'
-  }
-
   function isSyntheticManager(node) {
     return !!node?._isSyntheticManager
   }
@@ -71,6 +67,7 @@
         (_, i) => ({ sent: node.messages_sent?.[i], got: node.target_responses?.[i] }),
       )
     : []
+  $: agentTrace = node?.agent_trace || []
 
   function plainText(markdown) {
     return (markdown || '')
@@ -95,7 +92,6 @@
 
   function outcomeTitle(n) {
     if (!n) return ''
-    if (isFrontier(n)) return truncate(n.approach, 120) || 'Proposed move'
     if (isSyntheticManager(n)) return 'Manager is running'
     const heading = firstLine(n.module_output || '')
     if (heading) return truncate(heading, 120)
@@ -104,7 +100,7 @@
   }
 
   function isArtifactOutput(n) {
-    if (!n || isFrontier(n) || n._isLeaderOrchestrator) return false
+    if (!n || n._isLeaderOrchestrator) return false
     if (n.status === 'completed') return true
     const hasOutput = !!(n.module_output || '').trim()
     const hasMessages = (n.messages_sent?.length ?? 0) || (n.target_responses?.length ?? 0)
@@ -119,7 +115,7 @@
   }
 
   function scoreLabel(n) {
-    if (!n || isFrontier(n) || n._isLeaderOrchestrator || isSyntheticManager(n)) return ''
+    if (!n || n._isLeaderOrchestrator || isSyntheticManager(n)) return ''
     if (isArtifactOutput(n)) return ''
     return Number.isFinite(n.score) ? `Score ${n.score}/10` : ''
   }
@@ -127,6 +123,27 @@
   function outputLabel(n) {
     if (n?.module === 'attack-planner') return 'Plan'
     return 'Output'
+  }
+
+  function traceLabel(event) {
+    return String(event || '').replace(/_/g, ' ')
+  }
+
+  function tracePreview(item) {
+    if (!item) return ''
+    if (item.payload && Object.keys(item.payload).length) {
+      return JSON.stringify(item.payload, null, 2)
+    }
+    return item.detail || ''
+  }
+
+  function traceTime(ts) {
+    if (!ts) return ''
+    try {
+      return new Date(ts * 1000).toLocaleTimeString()
+    } catch {
+      return ''
+    }
   }
 </script>
 
@@ -153,11 +170,6 @@
           <b>{$isRunning ? 'LEADER · RUNNING' : 'LEADER · IDLE'}</b>
           The orchestrator module that picks which sub-module to delegate to
           and decides when the objective is met.
-        </div>
-      {:else if isFrontier(node)}
-        <div class="frontier-banner">
-          <b>FRONTIER · PROPOSED</b>
-          A frontier proposal — suggested as a next move but not yet executed.
         </div>
       {/if}
 
@@ -186,16 +198,36 @@
             <pre>{node._scenarioObjective}</pre>
           </details>
         {/if}
+      {/if}
 
-      {:else if isFrontier(node)}
-        {#if node.approach}
-          <details class="detail-section" open>
-            <summary>Proposed Move</summary>
-            <pre>{node.approach}</pre>
-          </details>
-        {/if}
+      {#if agentTrace.length}
+        <details class="detail-section" open>
+          <summary>Agent Trace</summary>
+          <div class="agent-trace">
+            {#each agentTrace as item}
+              <div class="trace-row {item.event}">
+                <div class="trace-head">
+                  <span class="trace-event">{traceLabel(item.event)}</span>
+                  {#if item.iteration}
+                    <span class="trace-meta">iter {item.iteration}</span>
+                  {/if}
+                  {#if item.actor}
+                    <span class="trace-meta">{item.actor}</span>
+                  {/if}
+                  {#if traceTime(item.timestamp)}
+                    <span class="trace-meta">{traceTime(item.timestamp)}</span>
+                  {/if}
+                </div>
+                {#if tracePreview(item)}
+                  <pre class="trace-detail">{tracePreview(item)}</pre>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </details>
+      {/if}
 
-      {:else}
+      {#if !node._isLeaderOrchestrator}
         {#if node.module_output}
           <details class="detail-section" open>
             <summary>{outputLabel(node)}</summary>
@@ -370,18 +402,14 @@
     background: var(--bg-tertiary);
     color: var(--text-muted);
   }
-  .status-badge.promising {
-    background: hsla(155 100% 42% / 0.12);
-    border-color: var(--phosphor);
-    color: var(--phosphor);
-    text-shadow: var(--phosphor-glow);
-  }
-  .status-badge.dead {
+  .status-badge.failed,
+  .status-badge.blocked {
     background: rgba(239, 68, 68, 0.12);
     border-color: var(--red);
     color: var(--red);
   }
-  .status-badge.alive {
+  .status-badge.pending,
+  .status-badge.skipped {
     background: rgba(168, 162, 158, 0.10);
     border-color: var(--text-muted);
     color: var(--text);
@@ -393,16 +421,10 @@
     color: var(--blue);
   }
   .status-badge.running {
-    background: hsla(155 100% 42% / 0.12);
-    border-color: var(--phosphor);
-    color: var(--phosphor);
+    background: color-mix(in srgb, var(--amber) 14%, transparent);
+    border-color: var(--amber);
+    color: var(--amber);
   }
-  .status-badge.frontier {
-    background: transparent;
-    border: 1px dashed var(--text-muted);
-    color: var(--text-muted);
-  }
-
   .score-pill {
     display: inline-flex;
     align-items: center;
@@ -476,9 +498,9 @@
   }
 
   /* ---------- Markdown rendering for module output ----------
-     Modules emit structured markdown reports (exploit-analysis is the
-     canonical example, but tool-extraction / system-prompt-extraction
-     also frequently emit headers + lists). The styles below give those
+     Managers emit structured markdown reports (email-exfiltration-proof is
+     the strongest proof dossier example, but tool-extraction /
+     system-prompt-extraction also frequently emit headers + lists). The styles below give those
      reports a comfortable read against the panel's narrow width. */
   .md-render {
     font-size: 12px;
@@ -656,6 +678,70 @@
     margin-bottom: 8px;
   }
 
+  /* ---------- agent trace ---------- */
+  .agent-trace {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .trace-row {
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--text-muted);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.02);
+    padding: 6px 7px;
+  }
+  .trace-row.llm_call,
+  .trace-row.llm_completion {
+    border-left-color: var(--cyan);
+  }
+  .trace-row.tool_calls,
+  .trace-row.tool_result,
+  .trace-row.delegate,
+  .trace-row.delegate_done {
+    border-left-color: var(--blue);
+  }
+  .trace-row.reasoning {
+    border-left-color: #a78bfa;
+  }
+  .trace-row.conclude {
+    border-left-color: var(--phosphor);
+  }
+  .trace-row.hard_stop,
+  .trace-row.circuit_break {
+    border-left-color: var(--red);
+  }
+  .trace-head {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-bottom: 5px;
+  }
+  .trace-event {
+    color: var(--text);
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .trace-meta {
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+  .trace-detail {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
   /* ---------- module definition content ---------- */
   .config-tag {
     display: inline-block;
@@ -732,25 +818,6 @@
   }
 
   /* ---------- banners ---------- */
-  .frontier-banner {
-    background: rgba(245, 158, 11, 0.08);
-    border: 1px solid var(--amber);
-    color: #fde68a;
-    padding: 8px 10px;
-    border-radius: 4px;
-    font-size: 11px;
-    line-height: 1.55;
-  }
-  .frontier-banner b {
-    display: block;
-    font-family: var(--font-pixel);
-    font-size: 0.6875rem;
-    color: var(--amber);
-    margin-bottom: 4px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    font-weight: 400;
-  }
   .leader-banner {
     background: hsla(155 100% 42% / 0.08);
     border: 1px solid hsla(155 100% 42% / 0.5);

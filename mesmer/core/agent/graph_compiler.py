@@ -463,7 +463,7 @@ class GraphContextCompiler:
         / employee's assignment.
 
         Order of preference:
-          1. Exact ``experiment_id`` lookup (only accepts FRONTIER nodes).
+          1. Exact ``experiment_id`` lookup (only accepts FrontierExperiment nodes).
           2. Highest-utility EXECUTING experiment whose module matches.
           3. Highest-utility PROPOSED experiment whose module matches.
           4. None — caller renders the no-assignment fallback.

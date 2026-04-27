@@ -148,19 +148,8 @@
   .node { cursor: pointer; }
   .node:hover circle { r: 16; }
 
-  /* Frontier nodes — proposed but never delegated to. Visually demoted so
-     they read as "ghost" siblings rather than real attempts. The dashed
-     stroke is the same dialect as DEAD nodes but with lower opacity, so
-     a quick scan separates "tried-and-died" (DEAD) from "never-tried"
-     (FRONTIER). */
-  .node.frontier circle {
-    fill-opacity: 0.35;
-    stroke-dasharray: 4 3;
-    stroke-opacity: 0.7;
-  }
-  .node.frontier text { opacity: 0.65; }
-
-  .node.dead circle { stroke-dasharray: 3 2; opacity: .7; }
+  .node.failed circle,
+  .node.blocked circle { stroke-dasharray: 3 2; opacity: .7; }
 
   /* Selection — the user's interaction signal MUST dominate winner glow.
      Bright cyan ring + drop-shadow so a click is unmistakable, even when
@@ -253,16 +242,12 @@
     color: #a7f3d0; padding: 6px 8px; border-radius: 5px;
     font-family: var(--mono); font-size: 11px; word-break: break-word;
   }
-  /* Banner shown at the top of the side panel for FRONTIER nodes —
-     proposals the leader never executed. Catches the user thinking
-     "this module ran and produced nothing" when actually it was
-     never invoked. */
-  #detail .frontier-banner {
+  #detail .info-banner {
     background: rgba(245,158,11,.08); border: 1px solid var(--warn);
     color: #fde68a; padding: 8px 10px; border-radius: 5px;
     margin-bottom: 12px; font-size: 11px; line-height: 1.55;
   }
-  #detail .frontier-banner b {
+  #detail .info-banner b {
     display: block; font-family: var(--mono); font-size: 11px;
     color: var(--warn); margin-bottom: 4px; letter-spacing: .04em;
   }
@@ -366,7 +351,6 @@
     <span class="tier-dot" style="background:var(--t2); margin-left:6px"></span>T2
     <span class="tier-dot" style="background:var(--t3); margin-left:6px"></span>T3
     <span class="tier-dot" style="background:var(--t-baseline); margin-left:10px"></span>baseline
-    <span style="display:inline-block;width:8px;height:8px;border-radius:50%;border:1.5px dashed var(--muted);margin:0 4px 0 10px;vertical-align:middle;opacity:.6"></span>frontier (proposed, never ran)
     <span style="display:inline-block;width:9px;height:9px;margin:0 4px 0 14px;vertical-align:middle;background:var(--ok);border:1px solid rgba(255,255,255,.3);border-radius:1px"></span>leader ✓
     <span style="display:inline-block;width:9px;height:9px;margin:0 4px 0 10px;vertical-align:middle;background:var(--err);border:1px solid rgba(255,255,255,.3);border-radius:1px"></span>leader ✗
     <span style="margin-left:14px;color:#fbbf24">★ winner</span>
@@ -579,48 +563,32 @@
 
   /* Leader-orchestration timeline.
    *
-   * The persisted graph stores parent/child as TAP-style refinement
-   * pointers — a fulfilled-frontier child sits under whichever attempt
-   * proposed it. Visually that reads as "target-profiler delegated to
-   * attack-planner", which is wrong: the LEADER orchestrates every
-   * delegation and the modules don't talk to each other.
+   * The persisted graph stores parent/child execution links. Visually that
+   * can read as "target-profiler delegated to attack-planner", which is
+   * wrong: the LEADER orchestrates every delegation and the modules don't
+   * talk to each other.
    *
    * This synthesizer rebuilds the hierarchy as the user's mental model
    * actually maps:
    *
    *   root ─→ LEADER (synthetic) ─→ 1. target-profiler
-   *                                  └─ frontier-A (dashed, never ran)
-   *                                  └─ frontier-B (dashed)
    *                              ─→ 2. attack-planner
-   *                                  └─ frontier-C (dashed)
    *                              ─→ 3. <next ran module>
    *                              ─→ leader-verdict (square, terminator)
    *
    * Real delegations are SIBLINGS under LEADER, ordered by timestamp.
-   * Frontier proposals stay attached to the attempt that produced them
-   * (so the user can see "which attempt's reflection proposed this")
-   * but are visually demoted via the .frontier class.
-   *
    * The leader-verdict is always the LAST child of LEADER regardless of
-   * where the persisted graph attaches it — the storage parent (most
-   * recent timestamp) sometimes lands on a frontier sibling, which is a
-   * graph-data quirk that shouldn't bleed into the visualisation. */
+   * where the persisted graph attaches it. */
   function buildLeaderTimeline(nodes, rootId, collapsed) {
     if (!rootId || !nodes[rootId]) return null;
     const root = nodes[rootId];
 
     // Bucket all non-root nodes:
-    const ranAttempts = [];          // status != frontier, source != leader
-    const frontierByParent = {};     // parentId → [frontier-node]
+    const ranAttempts = [];
     let leaderVerdict = null;
     for (const [id, n] of Object.entries(nodes)) {
       if (id === rootId) continue;
       if (n.source === "leader") { leaderVerdict = n; continue; }
-      if (n.status === "frontier") {
-        const p = n.parent_id || rootId;
-        (frontierByParent[p] ||= []).push(n);
-        continue;
-      }
       ranAttempts.push(n);
     }
 
@@ -630,15 +598,6 @@
     ranAttempts.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)
                                 || a.id.localeCompare(b.id));
 
-    function attachFrontier(parentNode) {
-      const props = frontierByParent[parentNode.id] || [];
-      return props.map(n => ({
-        ...n,
-        _childIds: n.children || [],
-        children: [],   // frontier proposals are leaves in the timeline view
-      }));
-    }
-
     // Build the synthetic LEADER node carrying every real delegation
     // plus the leader-verdict terminator.
     const leaderId = "__leader__";
@@ -646,7 +605,7 @@
       ...n,
       _childIds: n.children || [],
       _seqNum: idx + 1,                   // 1-based index for label
-      children: collapsed.has(n.id) ? [] : attachFrontier(n),
+      children: [],
     }));
     if (leaderVerdict) {
       leaderChildren.push({
@@ -739,11 +698,6 @@
       return node.status === "promising"
         ? "baseline · ✓ matched"
         : "baseline · ✗ no match";
-    }
-    if (node.status === "frontier") {
-      // Frontier proposals don't have meaningful scores — make that clear
-      // by using a "proposed" marker instead of "s0".
-      return `${mod} · proposed`;
     }
     return `${mod} · s${s}`;
   }
@@ -869,7 +823,6 @@
         let cls = "node";
         if (d.data._isLeaderOrchestrator) cls += " leader-orchestrator";
         else if (isLeaderVerdict(d.data)) cls += " leader";
-        else if (d.data.status === "frontier") cls += " frontier";
         else if (d.data.status === "dead") cls += " dead";
         if (d.data.id === pane.winId) cls += " winning";
         // Restore selected highlight after redraw if the user had one.
@@ -897,10 +850,10 @@
       .append("polygon")
       .attr("points", "0,-14 14,0 0,14 -14,0");
 
-    // Real sub-module attempts + frontier proposals + root → circles.
+    // Real sub-module attempts + root → circles.
     nodeSel.filter(d => !isLeaderVerdict(d.data) && !d.data._isLeaderOrchestrator)
       .append("circle")
-      .attr("r", d => d.data.status === "frontier" ? 11 : 14)
+      .attr("r", 14)
       .attr("fill", d => colorFor(trial, d.data))
       .attr("stroke", "rgba(255,255,255,.2)");
 
@@ -918,9 +871,7 @@
       .attr("y", 30).attr("text-anchor", "middle")
       .text(d => shortLabel(d.data));
 
-    // Sequence number above the node — only on actually-ran sub-modules.
-    // Tells the user "this was the leader's Nth call". Frontier nodes
-    // don't get one because they were never called.
+    // Sequence number above the node — only on sub-modules the leader called.
     nodeSel.filter(d => typeof d.data._seqNum === "number")
       .append("text")
       .attr("class", "seq-num")
@@ -1077,7 +1028,6 @@
 
     const tier = tierOf(trial, node.module);
     const tierLbl = (tier === 0 || tier) ? `T${tier}` : "—";
-    const isFrontier = node.status === "frontier";
     const isWinning = (
       (trial.trace?.winning_module === node.module || (trial.arm === "baseline" && node.module === "baseline"))
       && node.id === pickWinningNodeId(trial)
@@ -1093,19 +1043,6 @@
 
     const modCfg = MODULES[node.module] || null;
 
-    // Frontier banner — make it unmistakable that this node was proposed
-    // but never delegated to. Closes the "why is this module empty?"
-    // confusion when the user clicks a dashed grey ghost node.
-    const frontierBanner = isFrontier ? `
-      <div class="frontier-banner">
-        <b>⚠ Frontier proposal — never executed</b>
-        The leader's reflection-and-expand step proposed this approach as a candidate
-        next move, but the leader did not pick it up. No target turns ran, no judge
-        scored anything, no exchange was captured. This is what's left on the
-        frontier when the trial's turn budget ends or the leader concludes early.
-      </div>
-    ` : "";
-
     const winnerBanner = isWinning ? `
       <div class="winner-banner">
         <b>★ Winning node</b>
@@ -1117,10 +1054,9 @@
 
     el.innerHTML = `
       <h2>${esc(node.module)}${typeof node._seqNum === "number" ? ` <span class="pill">#${node._seqNum}</span>` : ""}</h2>
-      ${frontierBanner}
       ${winnerBanner}
       <div class="row"><span>tier</span><b><span class="tier-dot" style="background:${colorFor(trial, node)}"></span>${tierLbl}</b></div>
-      <div class="row"><span>score</span><b>${isFrontier ? "—" : (node.score ?? 0)}</b></div>
+      <div class="row"><span>score</span><b>${node.score ?? 0}</b></div>
       <div class="row"><span>status</span><b>${esc(node.status || "?")}</b></div>
       <div class="row"><span>source</span><b>${esc(node.source || "?")}</b></div>
       <div class="row"><span>depth</span><b>${node.depth ?? 0}</b></div>
@@ -1132,8 +1068,8 @@
       <div class="row"><span>target model</span><b class="long">${esc(trial.target_model || "—")}</b></div>
       ${node.approach ? `
         <section>
-          <h3>${isFrontier ? "Proposed approach" : "Instruction"}
-            <span class="h-tag">${isFrontier ? "frontier.approach (would-have-been)" : "delegate.approach"}</span></h3>
+          <h3>Instruction
+            <span class="h-tag">delegate.approach</span></h3>
           <pre>${esc(node.approach)}</pre>
         </section>` : ""}
       ${pairs.length ? `
@@ -1143,12 +1079,12 @@
             ${p.got ? `<div class="msg them"><span class="lbl">target → attacker</span>${esc(p.got)}</div>` : ""}
           `).join("")}
         </section>` : ""}
-      ${node.leaked_info && !isFrontier ? `
+      ${node.leaked_info ? `
         <section><h3>Leaked info <span class="h-tag">judge extract</span></h3>
           <div class="leaked">🎯 ${esc(node.leaked_info)}</div></section>` : ""}
-      ${node.reflection && !isFrontier ? `
+      ${node.reflection ? `
         <section><h3>Reflection</h3><pre>${esc(node.reflection)}</pre></section>` : ""}
-      ${node.module_output && !isFrontier ? `
+      ${node.module_output ? `
         <section><h3>Module output (conclude)</h3><pre>${esc(node.module_output)}</pre></section>` : ""}
       ${modCfg ? renderModuleConfig(modCfg) : ""}
       ${trial.target_system_prompt ? `
@@ -1163,7 +1099,7 @@
   function renderLeaderOrchestratorPanel(trial, node) {
     const el = document.getElementById("detail");
     const ranCount = (node.children || []).filter(
-      c => c.source !== "leader" && c.status !== "frontier"
+      c => c.source !== "leader"
     ).length;
     const verdict = (node.children || []).find(c => c.source === "leader");
     const verdictText = verdict
@@ -1171,12 +1107,13 @@
       : "(no verdict node)";
     el.innerHTML = `
       <h2>leader <span class="pill">${esc(trial.arm)}</span></h2>
-      <div class="frontier-banner" style="border-color:var(--accent);background:rgba(122,162,247,.08);color:#cdd6f4">
+      <div class="info-banner" style="border-color:var(--accent);background:rgba(122,162,247,.08);color:#cdd6f4">
         <b style="color:var(--accent)">Synthetic node — viz construct</b>
         The leader is mesmer's orchestration loop. It picks the next sub-module
-        from the frontier, delegates to it, reads the judge verdict, then loops
-        until the objective is met or the turn budget is exhausted. Sub-modules
-        below this node are listed in the order the leader actually called them.
+        from the current plan, delegates to it, reads the judge verdict, then
+        loops until the objective is met or the turn budget is exhausted.
+        Sub-modules below this node are listed in the order the leader actually
+        called them.
       </div>
       <div class="row"><span>module</span><b class="long">${esc(trial.target_model || "—")}'s leader run</b></div>
       <div class="row"><span>real delegations</span><b>${ranCount}</b></div>
@@ -1190,15 +1127,11 @@
         <pre>The graph is laid out as the leader's call timeline:
 
   root ─▶ LEADER ─▶ #1 first delegation
-                   │   └─ frontier-A (proposed, never ran)
-                   │   └─ frontier-B (proposed, never ran)
                    ▶ #2 second delegation
                    ▶ ...
                    ▶ leader-verdict  (square — run terminator)
 
 Solid coloured circles are real delegations the leader made.
-Dashed muted circles are frontier proposals (status=frontier) —
-candidates the leader's reflection step proposed but never picked.
 Click any node for its full instruction + module config + exchange.</pre>
       </section>
     `;
@@ -1247,10 +1180,10 @@ Click any node for its full instruction + module config + exchange.</pre>
         drawTree(pane);
       } else if (act === "collapse") {
         pane.collapsed = new Set();
-        // Collapse every actually-ran sub-module so its frontier-children
-        // disappear — leaves a clean leader-timeline of real delegations.
+        // Collapse every sub-module branch to leave a clean leader-timeline
+        // of real delegations.
         for (const [id, n] of Object.entries(pane.trial.graph.nodes)) {
-          if ((n.children || []).length && n.status !== "frontier" && n.source !== "leader") {
+          if ((n.children || []).length && n.source !== "leader") {
             pane.collapsed.add(id);
           }
         }

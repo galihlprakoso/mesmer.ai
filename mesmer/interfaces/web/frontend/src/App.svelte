@@ -16,10 +16,8 @@
 
   let unsubscribe
   let sidebarOpen = false
-  // Graph view toggle: 'attack' shows the legacy AttackGraph (attempt
-  // history tree); 'belief' shows the typed Belief Attack Graph (the
-  // planner's belief landscape). Both run side-by-side at the data
-  // level — the toggle just picks which one to render.
+  // Graph view toggle: 'attack' shows the AttackGraph execution tree;
+  // 'belief' shows the typed Belief Attack Graph planner landscape.
   let graphView = 'attack'
   // Default the bottom (chat) panel open — under the executive layer
   // every run is conversational by default; the chat IS the primary

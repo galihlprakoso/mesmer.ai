@@ -7,8 +7,9 @@ Mesmer makes three model decisions per run:
 
 1. **Attacker** (`agent.model`) — drives ReAct loops, picks techniques,
    crafts target messages.
-2. **Judge** (`agent.judge_model`) — scores attempts, proposes
-   frontier nodes. Falls back to `agent.model` if unset.
+2. **Judge** (`agent.judge_model`) — scores attempts and extracts
+   structured evidence for the belief graph. Falls back to `agent.model`
+   if unset.
 3. **Compressor** (`agent.compression_model`) — summarises old
    conversation turns in CONTINUOUS mode. Falls back to
    `judge_model` → `model`.

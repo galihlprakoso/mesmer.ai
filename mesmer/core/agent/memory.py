@@ -8,9 +8,9 @@ Storage layout:
     │       │                    # AND canonical source of module outputs —
     │       │                    # every AttackNode carries module_output)
     │       ├── profile.md       # optional free-form human notes
-    │       ├── scratchpad.md    # the leader's persistent working notes —
-    │       │                    # seeded into ctx.scratchpad[scenario.module]
-    │       │                    # at run start; the leader can rewrite it
+    │       ├── scratchpad.md    # shared markdown whiteboard —
+    │       │                    # seeded into ctx.scratchpad.content
+    │       │                    # at run start; agents can rewrite or patch it
     │       │                    # via the update_scratchpad tool. Migrated
     │       │                    # from the old plan.md on first init.
     │       ├── chat.jsonl       # append-only operator <> leader chat log
@@ -108,12 +108,11 @@ class TargetMemory:
 
     @property
     def scratchpad_path(self) -> Path:
-        """Persisted leader-scratchpad doc.
+        """Persisted shared scratchpad whiteboard.
 
-        Loaded into ``ctx.scratchpad[scenario.module]`` at run start;
-        rewritten by the leader's ``update_scratchpad`` tool and by the
-        operator via the web UI's leader-chat. No magic — it's just one
-        slot of the per-run scratchpad with file-backed persistence.
+        Loaded into ``ctx.scratchpad.content`` at run start; rewritten by
+        ``update_scratchpad`` and by the operator via the web UI's
+        leader-chat.
         """
         return self.base_dir / "scratchpad.md"
 
@@ -153,10 +152,10 @@ class TargetMemory:
     def belief_graph_path(self) -> Path:
         """Belief graph snapshot — typed planner state.
 
-        Sibling of ``graph_path``; the legacy AttackGraph keeps its own
+        Sibling of ``graph_path``; AttackGraph keeps its own execution-trace
         file. Both load/save independently so the belief graph can be
         deleted (or rebuilt from the delta log) without touching the
-        legacy attempt history.
+        execution history.
         """
         return self.base_dir / "belief_graph.json"
 
