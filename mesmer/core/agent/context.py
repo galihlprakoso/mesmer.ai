@@ -543,11 +543,6 @@ class Context:
                 }
                 detail = _json.dumps(payload, sort_keys=True, default=str)
                 self.log(LogEvent.LLM_COMPLETION.value, detail)
-                self.record_agent_trace(
-                    LogEvent.LLM_COMPLETION.value,
-                    detail,
-                    payload=payload,
-                )
             except Exception:
                 # Logging is observability. Never let a broken sink
                 # take down the actual run.

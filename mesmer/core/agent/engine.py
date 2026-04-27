@@ -89,6 +89,32 @@ def _serialize_message(msg) -> dict:
     return d
 
 
+def _json_safe(value):
+    """Clone provider-shaped payloads into JSON-safe data for graph traces."""
+    return json.loads(json.dumps(value, default=str))
+
+
+def _usage_payload(response) -> dict:
+    usage_obj = getattr(response, "usage", None)
+
+    def _usage_val(attr: str) -> int:
+        if usage_obj is None:
+            return 0
+        if isinstance(usage_obj, dict):
+            return int(usage_obj.get(attr, 0) or 0)
+        raw = getattr(usage_obj, attr, 0) or 0
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "prompt_tokens": _usage_val("prompt_tokens"),
+        "completion_tokens": _usage_val("completion_tokens"),
+        "total_tokens": _usage_val("total_tokens"),
+    }
+
+
 async def run_react_loop(
     actor: ReactActorSpec,
     ctx: "Context",
@@ -110,29 +136,9 @@ async def run_react_loop(
     raw_log = getattr(log, "_raw_log", log)
     actor = ensure_actor(actor)
 
-    trace_events = {
-        LogEvent.MODULE_START.value,
-        LogEvent.LLM_CALL.value,
-        LogEvent.REASONING.value,
-        LogEvent.TOOL_CALLS.value,
-        LogEvent.TOOL_RESULT.value,
-        LogEvent.CIRCUIT_BREAK.value,
-        LogEvent.HARD_STOP.value,
-        LogEvent.DELEGATE.value,
-        LogEvent.DELEGATE_DONE.value,
-        LogEvent.CONCLUDE.value,
-    }
-
     current_iteration: int | None = None
 
     def trace_log(event: str, detail: str = "") -> None:
-        if event in trace_events:
-            ctx.record_agent_trace(
-                event,
-                detail,
-                actor=actor.name,
-                iteration=current_iteration,
-            )
         raw_log(event, detail)
 
     trace_log._raw_log = raw_log  # type: ignore[attr-defined]
@@ -363,6 +369,8 @@ async def run_react_loop(
 
         t0 = time.time()
 
+        request_messages = _json_safe(messages)
+        request_tools = _json_safe(tools)
         response = await _completion_with_retry(ctx, messages, tools, log)
         if response is None:
             return "LLM error: all retries exhausted (see logs above)"
@@ -373,6 +381,22 @@ async def run_react_loop(
         # provider blips) and retries with backoff. If the retry budget is
         # exhausted, it returns None, which we handle above.
         msg = response.choices[0].message
+        ctx.record_agent_trace(
+            LogEvent.LLM_CALL.value,
+            f"{actor.name} iteration {iteration + 1}",
+            actor=actor.name,
+            iteration=current_iteration,
+            payload={
+                "model": ctx.agent_model,
+                "elapsed_s": round(elapsed, 3),
+                "request": {
+                    "messages": request_messages,
+                    "tools": request_tools,
+                },
+                "response": _serialize_message(msg),
+                "usage": _usage_payload(response),
+            },
+        )
 
         # Append assistant message
         messages.append(_serialize_message(msg))
@@ -431,13 +455,6 @@ async def run_react_loop(
         for call in msg.tool_calls:
             fn_name = call.function.name
             args = _parse_args(call.function.arguments)
-            ctx.record_agent_trace(
-                LogEvent.TOOL_CALLS.value,
-                fn_name,
-                actor=actor.name,
-                iteration=current_iteration,
-                payload={"name": fn_name, "args": args, "tool_call_id": call.id},
-            )
 
             # ``conclude`` is the one tool that exits the loop. Keep its
             # short-circuit here (not in the dispatch table) so the engine
@@ -454,11 +471,16 @@ async def run_react_loop(
                     ctx.objective_met = True
                     ctx.objective_met_fragment = result_text
                 ctx.record_agent_trace(
-                    LogEvent.CONCLUDE.value,
-                    result_text,
+                    "tool_call",
+                    fn_name,
                     actor=actor.name,
                     iteration=current_iteration,
-                    payload={"name": fn_name, "args": args, "tool_call_id": call.id},
+                    payload={
+                        "name": fn_name,
+                        "args": args,
+                        "tool_call_id": call.id,
+                        "result": result_text,
+                    },
                 )
                 raw_log(LogEvent.CONCLUDE.value, result_text)
                 return result_text
@@ -469,11 +491,16 @@ async def run_react_loop(
             messages.append(result_msg)
             result_text = str(result_msg.get("content", ""))
             ctx.record_agent_trace(
-                LogEvent.TOOL_RESULT.value,
-                result_text[:2000],
+                "tool_call",
+                fn_name,
                 actor=actor.name,
                 iteration=current_iteration,
-                payload={"name": fn_name, "tool_call_id": call.id},
+                payload={
+                    "name": fn_name,
+                    "args": args,
+                    "tool_call_id": call.id,
+                    "result": result_text,
+                },
             )
 
             # Early-terminate: the in-loop LLM judge flagged objective_met

@@ -1,6 +1,12 @@
 <script>
   import { marked } from 'marked'
-  import { selectedNode, moduleTiers, isRunning } from '../lib/stores.js'
+  import {
+    selectedNode,
+    moduleTiers,
+    isRunning,
+    selectedScenario,
+    selectedTargetHash,
+  } from '../lib/stores.js'
 
   // GFM tables, autolinks, sane line breaks. We don't enable raw HTML
   // because module_output is LLM-generated — sanitize-by-omission is
@@ -68,6 +74,12 @@
       )
     : []
   $: agentTrace = node?.agent_trace || []
+  $: debugRef = node ? [
+    `scenario=${$selectedScenario || ''}`,
+    `target_hash=${$selectedTargetHash || ''}`,
+    `run_id=${node.run_id || ''}`,
+    `node_id=${node.id || ''}`,
+  ].join('\n') : ''
 
   function plainText(markdown) {
     return (markdown || '')
@@ -137,12 +149,85 @@
     return item.detail || ''
   }
 
+  function traceMessages(item) {
+    return item?.payload?.request?.messages || []
+  }
+
+  function traceTools(item) {
+    return item?.payload?.request?.tools || []
+  }
+
+  function traceResponse(item) {
+    return item?.payload?.response || {}
+  }
+
+  function traceUsage(item) {
+    return item?.payload?.usage || {}
+  }
+
+  function messageContent(message) {
+    const content = message?.content
+    if (typeof content === 'string') return content
+    if (content === undefined || content === null) return ''
+    return JSON.stringify(content, null, 2)
+  }
+
+  function toolName(tool) {
+    return tool?.function?.name || tool?.name || 'tool'
+  }
+
+  function toolDescription(tool) {
+    return tool?.function?.description || tool?.description || ''
+  }
+
+  function toolParameters(tool) {
+    return tool?.function?.parameters || tool?.parameters || null
+  }
+
+  function callArgs(call) {
+    const raw = call?.function?.arguments
+    if (!raw) return ''
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2)
+    } catch {
+      return raw
+    }
+  }
+
+  function traceModel(item) {
+    return item?.payload?.model || ''
+  }
+
+  function traceElapsed(item) {
+    const elapsed = item?.payload?.elapsed_s
+    return Number.isFinite(elapsed) ? `${elapsed}s` : ''
+  }
+
+  function pretty(value) {
+    if (value === undefined || value === null) return ''
+    if (typeof value === 'string') return value
+    return JSON.stringify(value, null, 2)
+  }
+
+  function rawJson(value) {
+    return JSON.stringify(value, null, 2)
+  }
+
   function traceTime(ts) {
     if (!ts) return ''
     try {
       return new Date(ts * 1000).toLocaleTimeString()
     } catch {
       return ''
+    }
+  }
+
+  async function copyDebugRef() {
+    if (!debugRef) return
+    try {
+      await navigator.clipboard.writeText(debugRef)
+    } catch {
+      // Clipboard can be unavailable in non-secure browser contexts.
     }
   }
 </script>
@@ -179,6 +264,21 @@
           {#if scoreLabel(node)}
             <span class="score-pill">{scoreLabel(node)}</span>
           {/if}
+        </div>
+      {/if}
+      {#if debugRef}
+        <div class="debug-ref">
+          <div class="debug-line">
+            <span class="debug-key">Run</span>
+            <span class="debug-value" title={node.run_id || ''}>{node.run_id || 'none'}</span>
+            <button on:click={copyDebugRef} title="Copy scenario, target hash, run ID, and node ID">
+              Copy Debug Ref
+            </button>
+          </div>
+          <div class="debug-line">
+            <span class="debug-key">Node</span>
+            <span class="debug-value" title={node.id || ''}>{node.id || 'none'}</span>
+          </div>
         </div>
       {/if}
     </div>
@@ -218,7 +318,92 @@
                     <span class="trace-meta">{traceTime(item.timestamp)}</span>
                   {/if}
                 </div>
-                {#if tracePreview(item)}
+                {#if item.event === 'llm_call'}
+                  <div class="trace-summary">
+                    {#if traceModel(item)}<span>{traceModel(item)}</span>{/if}
+                    {#if traceElapsed(item)}<span>{traceElapsed(item)}</span>{/if}
+                    {#if traceUsage(item).total_tokens !== undefined}
+                      <span>{traceUsage(item).total_tokens} tok</span>
+                    {/if}
+                  </div>
+                  <div class="trace-subtitle">Request messages</div>
+                  {#each traceMessages(item) as message, i}
+                    <div class="trace-message {message.role || 'message'}">
+                      <div class="trace-message-head">
+                        <span>{message.role || 'message'}</span>
+                        <span>#{i + 1}</span>
+                      </div>
+                      <pre class="trace-prose">{messageContent(message)}</pre>
+                      <details class="trace-raw">
+                        <summary>Raw JSON</summary>
+                        <pre class="trace-detail">{rawJson(message)}</pre>
+                      </details>
+                    </div>
+                  {/each}
+                  {#if traceTools(item).length}
+                    <details class="trace-nested">
+                      <summary>Tools exposed · {traceTools(item).length}</summary>
+                      {#each traceTools(item) as tool}
+                        <details class="trace-tool">
+                          <summary>{toolName(tool)}</summary>
+                          {#if toolDescription(tool)}
+                            <div class="trace-tool-desc">{toolDescription(tool)}</div>
+                          {/if}
+                          {#if toolParameters(tool)}
+                            <details class="trace-raw">
+                              <summary>Parameters</summary>
+                              <pre class="trace-detail">{pretty(toolParameters(tool))}</pre>
+                            </details>
+                          {/if}
+                          <details class="trace-raw">
+                            <summary>Raw JSON</summary>
+                            <pre class="trace-detail">{rawJson(tool)}</pre>
+                          </details>
+                        </details>
+                      {/each}
+                    </details>
+                  {/if}
+                  <div class="trace-subtitle">Assistant response</div>
+                  {#if traceResponse(item).content}
+                    <div class="trace-message assistant">
+                      <div class="trace-message-head"><span>assistant</span></div>
+                      <pre class="trace-prose">{traceResponse(item).content}</pre>
+                    </div>
+                  {/if}
+                  {#if traceResponse(item).tool_calls?.length}
+                    {#each traceResponse(item).tool_calls as call}
+                      <div class="trace-call-card">
+                        <div class="trace-call-name">{call.function?.name || 'tool_call'}</div>
+                        <pre class="trace-prose">{callArgs(call)}</pre>
+                        <details class="trace-raw">
+                          <summary>Raw JSON</summary>
+                          <pre class="trace-detail">{rawJson(call)}</pre>
+                        </details>
+                      </div>
+                    {/each}
+                  {/if}
+                  {#if item.payload?.usage}
+                    <div class="trace-usage">
+                      <span>prompt {traceUsage(item).prompt_tokens ?? 0}</span>
+                      <span>completion {traceUsage(item).completion_tokens ?? 0}</span>
+                      <span>total {traceUsage(item).total_tokens ?? 0}</span>
+                    </div>
+                    <details class="trace-raw">
+                      <summary>Raw JSON</summary>
+                      <pre class="trace-detail">{rawJson(item.payload)}</pre>
+                    </details>
+                  {/if}
+                {:else if item.event === 'tool_call'}
+                  <div class="trace-call-name">{item.payload?.name || item.detail}</div>
+                  <div class="trace-subtitle">Arguments</div>
+                  <pre class="trace-prose">{pretty(item.payload?.args)}</pre>
+                  <div class="trace-subtitle">Result</div>
+                  <pre class="trace-prose">{pretty(item.payload?.result)}</pre>
+                  <details class="trace-raw">
+                    <summary>Raw JSON</summary>
+                    <pre class="trace-detail">{rawJson(item.payload)}</pre>
+                  </details>
+                {:else if tracePreview(item)}
                   <pre class="trace-detail">{tracePreview(item)}</pre>
                 {/if}
               </div>
@@ -437,6 +622,58 @@
     border: 1px solid var(--border);
     color: var(--text-muted);
     background: var(--bg-tertiary);
+  }
+  .debug-ref {
+    margin-top: 8px;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+  }
+  .debug-line {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    margin-bottom: 5px;
+  }
+  .debug-line:last-child {
+    margin-bottom: 0;
+  }
+  .debug-key {
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.5625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    flex: 0 0 auto;
+  }
+  .debug-value {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+  .debug-ref button {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.5625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 3px 6px;
+    cursor: pointer;
+  }
+  .debug-ref button:hover {
+    border-color: var(--phosphor);
+    color: var(--phosphor);
   }
 
   .detail-content {
@@ -691,14 +928,10 @@
     background: rgba(255, 255, 255, 0.02);
     padding: 6px 7px;
   }
-  .trace-row.llm_call,
-  .trace-row.llm_completion {
+  .trace-row.llm_call {
     border-left-color: var(--cyan);
   }
-  .trace-row.tool_calls,
-  .trace-row.tool_result,
-  .trace-row.delegate,
-  .trace-row.delegate_done {
+  .trace-row.tool_call {
     border-left-color: var(--blue);
   }
   .trace-row.reasoning {
@@ -740,6 +973,105 @@
     margin: 0;
     max-height: 260px;
     overflow-y: auto;
+  }
+  .trace-detail.compact {
+    color: var(--text-muted);
+    max-height: none;
+    margin-top: 6px;
+  }
+  .trace-summary,
+  .trace-usage {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin: 4px 0 8px;
+  }
+  .trace-summary span,
+  .trace-usage span {
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+  .trace-subtitle {
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 8px 0 5px;
+  }
+  .trace-nested,
+  .trace-tool {
+    background: rgba(255, 255, 255, 0.015);
+    margin: 5px 0;
+    padding: 4px 6px;
+  }
+  .trace-nested > summary,
+  .trace-tool > summary {
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .trace-message,
+  .trace-call-card {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.018);
+    padding: 7px 8px;
+    margin: 5px 0;
+  }
+  .trace-message.system { border-left: 2px solid var(--phosphor); }
+  .trace-message.user { border-left: 2px solid var(--cyan); }
+  .trace-message.assistant { border-left: 2px solid var(--blue); }
+  .trace-message.tool { border-left: 2px solid var(--amber); }
+  .trace-message-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.5625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+  .trace-prose {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    max-height: 320px;
+    overflow-y: auto;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .trace-call-name {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    margin: 2px 0 6px;
+  }
+  .trace-tool-desc {
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1.45;
+    margin: 4px 0 6px;
+  }
+  .trace-raw {
+    margin-top: 6px;
+    background: rgba(255, 255, 255, 0.012);
+  }
+  .trace-raw > summary {
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   /* ---------- module definition content ---------- */

@@ -898,13 +898,14 @@ The stanza stays scenario-agnostic — no dataset vocabulary, no module
 roster, no recognition heuristics. Anti-overfit regex scan in
 `tests/test_objective_awareness.py::test_stanza_is_scenario_agnostic`.
 
-**Spec authors:** the scenario `objective:` text is shown to ALL modules
-(executive + managers + employees). Do NOT include executive-only call
-templates like `OBJECTIVE MET — <fragment>` in the objective text —
-sub-modules will copy the format verbatim. Tell the executive to call
-`conclude(objective_met=true)` and describe what the `result` text
-should contain. The bench spec in
-`benchmarks/specs/tensor-trust-extraction.yaml` is the canonical example.
+**Spec authors:** the scenario `objective:` text is shown to ALL actors
+(executive + managers + employees). Keep it as the shared outcome and
+success condition only. Do not put executive procedure there: no phase
+plans, no "run module X", no dispatch order, and no executive-only call
+templates. Put orchestration in `leader_prompt:`. Child modules receive
+the objective as context for judging relevance, so procedural text in
+`objective:` leaks into their prompts and makes them reason about parent
+or sibling work they cannot run.
 
 ### The executive is a synthesised module (recorded like any other)
 
@@ -916,11 +917,13 @@ returns. The executive's node is created by `execute_run`
 after the top-level `run_react_loop` returns.
 
 Each `AttackNode` carries `agent_trace[]`, a node-local ReAct timeline:
-`llm_call`, `llm_completion`, `reasoning`, `tool_calls`, `tool_result`,
-`delegate`, `delegate_done`, and `conclude`. This is what the web
-NodeDetail panel renders as "Agent Trace". Do not rely on the global
-event feed as the operator-facing trace; the node is the durable debug
-artifact.
+only `llm_call` and `tool_call`. `llm_call` stores the exact request
+messages, exposed tool schemas, assistant response, usage, model, and
+elapsed time. `tool_call` stores name, args, tool_call_id, and result.
+Delegating to a sub-module is represented as a normal `tool_call`
+because that is what the parent LLM invoked. The global event feed can
+still emit lifecycle events like `delegate` / `delegate_done`, but those
+must not be rendered as node Agent Trace steps.
 
 The executive itself is **synthesised in memory at run start** (not
 loaded from any `module.yaml`):

@@ -170,7 +170,6 @@ class LogEvent(str, Enum):
     # Attacker reasoning
     REASONING = "reasoning"
     TOOL_CALLS = "tool_calls"
-    TOOL_RESULT = "tool_result"
     CIRCUIT_BREAK = "circuit_break"
     HARD_STOP = "hard_stop"
 

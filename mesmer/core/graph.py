@@ -211,6 +211,26 @@ class AttackGraph:
             if reason:
                 node.reflection = reason
 
+    def finalize_running_nodes(
+        self,
+        *,
+        run_id: str = "",
+        status: str = NodeStatus.FAILED.value,
+        reflection: str = "Run ended before this execution node finalized.",
+    ) -> list[AttackNode]:
+        """Close stale in-progress nodes before persisting a completed run."""
+        finalized: list[AttackNode] = []
+        for node in self.nodes.values():
+            if node.status != NodeStatus.RUNNING.value:
+                continue
+            if run_id and node.run_id != run_id:
+                continue
+            node.status = status
+            if reflection and not node.reflection:
+                node.reflection = reflection
+            finalized.append(node)
+        return finalized
+
     def append_agent_trace(
         self,
         node_id: str,

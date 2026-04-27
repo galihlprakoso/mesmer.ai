@@ -373,16 +373,13 @@ is represented only by delegation.
 Each execution node also carries `agent_trace`: the ReAct process for that
 actor. This is separate from target exchanges. Target exchanges answer "what
 did the attacker say to the target?"; `agent_trace` answers "what did this
-actor think, call, delegate, and conclude?"
+actor send to the LLM, what did the LLM return, and which tools ran?"
 
 ```mermaid
 flowchart TD
   Node["AttackNode<br/>executive / manager / child"] --> Trace["agent_trace[]"]
-  Trace --> LLM["llm_call / llm_completion"]
-  Trace --> Reason["reasoning"]
-  Trace --> Tools["tool_calls / tool_result"]
-  Trace --> Delegate["delegate / delegate_done"]
-  Trace --> Conclude["conclude"]
+  Trace --> LLM["llm_call<br/>request messages + tools<br/>response message + usage"]
+  Trace --> Tool["tool_call<br/>name + args + result"]
   Node --> Exchanges["messages_sent[]<br/>target_responses[]"]
 ```
 

@@ -43,6 +43,31 @@ class TestAttackGraphExecutionTrace:
         assert node.reflection == "transport error"
         assert graph.get_failed_nodes() == [node]
 
+    def test_finalize_running_nodes_closes_only_matching_run(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        stale = graph.add_node(
+            root.id,
+            "indirect-prompt-injection",
+            "run phase",
+            status=NodeStatus.RUNNING.value,
+            run_id="r1",
+        )
+        other_run = graph.add_node(
+            root.id,
+            "tool-extraction",
+            "run phase",
+            status=NodeStatus.RUNNING.value,
+            run_id="r2",
+        )
+
+        finalized = graph.finalize_running_nodes(run_id="r1")
+
+        assert finalized == [stale]
+        assert stale.status == NodeStatus.FAILED.value
+        assert "Run ended" in stale.reflection
+        assert other_run.status == NodeStatus.RUNNING.value
+
     def test_agent_trace_persists_on_execution_node(self):
         graph = AttackGraph()
         root = graph.ensure_root()

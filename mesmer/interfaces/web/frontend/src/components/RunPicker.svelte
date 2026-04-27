@@ -58,6 +58,15 @@
     if (r.verdict === 'not_met') return '✗'  // ✗
     return '○'  // ○
   }
+
+  async function copyRunId(event, runId) {
+    event.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(runId || '')
+    } catch {
+      // Clipboard can be unavailable in non-secure browser contexts.
+    }
+  }
 </script>
 
 {#if $runs.length > 0}
@@ -75,6 +84,14 @@
       >
         <span class="ico">{chipIcon(r)}</span>
         <span class="seq">#{r.seq}</span>
+      </button>
+      <button
+        class="copy-run"
+        aria-label="Copy run ID for run #{r.seq}"
+        title={`Copy run ID\n${r.runId}`}
+        on:click={(event) => copyRunId(event, r.runId)}
+      >
+        ID
       </button>
     {/each}
     {#if isLiveRun && $activeModuleTop}
@@ -170,6 +187,25 @@
     border: 1px solid var(--bg-secondary);
   }
   .chip.latest.active::after { display: none; }
+
+  .copy-run {
+    flex-shrink: 0;
+    height: 20px;
+    padding: 0 5px;
+    margin-left: -2px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.55rem;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+  }
+  .copy-run:hover {
+    color: var(--phosphor);
+    border-color: var(--phosphor);
+  }
 
   .active-mod {
     display: inline-flex;

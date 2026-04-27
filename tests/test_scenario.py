@@ -1,6 +1,10 @@
 """Tests for mesmer.core.scenario — YAML parsing and AgentConfig model fields."""
 
 
+from pathlib import Path
+
+import yaml
+
 from mesmer.core.constants import ScenarioMode
 from mesmer.core.scenario import AgentConfig, load_scenario
 
@@ -23,6 +27,8 @@ MINIMAL_SCENARIO = (
     "  model: openrouter/test\n"
     "  api_key: dummy\n"
 )
+
+SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 
 
 class TestScenarioJudgeConfig:
@@ -65,6 +71,30 @@ class TestScenarioJudgeConfig:
         )
         s = load_scenario(p)
         assert s.judge_rubric_additions == ""
+
+
+class TestShippedScenarioPromptContracts:
+    def test_orchestrated_scenarios_keep_procedure_out_of_shared_objective(self):
+        scenario_files = [
+            "extract-system-and-tools.yaml",
+            "full-redteam-report.yaml",
+            "full-redteam-with-execution.yaml",
+        ]
+        forbidden = [
+            "phase 1",
+            "phase 2",
+            "dispatch",
+            "run system-prompt-extraction",
+            "run tool-extraction",
+            "run indirect-prompt-injection",
+            "run email-exfiltration-proof",
+            "conclude(objective_met",
+        ]
+
+        for name in scenario_files:
+            data = yaml.safe_load((SCENARIOS_DIR / name).read_text())
+            goal = data["objective"]["goal"].lower()
+            assert not any(term in goal for term in forbidden), name
 
 
 # ---------------------------------------------------------------------------

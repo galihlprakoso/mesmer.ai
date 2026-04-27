@@ -424,6 +424,14 @@ async def execute_run(
     executive_node.run_id = run_id
     executive_node.source = NodeSource.LEADER.value
 
+    finalized_stale = graph.finalize_running_nodes(run_id=run_id)
+    if finalized_stale and actual_log is not None:
+        actual_log(
+            LogEvent.GRAPH_UPDATE.value,
+            "finalized stale running node(s): "
+            + ", ".join(n.module for n in finalized_stale),
+        )
+
     # Save graph + memory
     memory.save_graph(graph)
     # Persist the belief graph's current snapshot + append unsaved deltas

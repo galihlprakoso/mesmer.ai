@@ -66,17 +66,19 @@ by the executive at depth 1; their employees nest at depth ≥ 2.
   "reflection": "prefix commits the continuation into verbatim leak",
   "module_output": "<full conclude() text — authoritative record>",
   "agent_trace": [
-    {"event": "llm_call", "iteration": 1},
-    {"event": "tool_calls", "payload": {"name": "send_message"}},
-    {"event": "tool_result"}
+    {"event": "llm_call", "iteration": 1, "payload": {"request": "...", "response": "..."}},
+    {"event": "tool_call", "payload": {"name": "send_message", "args": "...", "result": "..."}}
   ],
   "turn_range": [5, 7]
 }
 ```
 
 `agent_trace` is the node-local ReAct trace. It records the actor's
-LLM calls, reasoning turns, tool calls, tool results, delegations, and
-final `conclude()`. It is intentionally separate from
+LLM calls and tool calls from the actor's point of view. Each `llm_call`
+contains the request messages, exposed tool schemas, assistant response,
+and token usage. Each `tool_call` contains the tool name, arguments, and
+tool result. Delegating to a sub-module is represented as a normal
+`tool_call` because that is what the parent LLM invoked. It is intentionally separate from
 `messages_sent` / `target_responses`, which only contain attacker-target
 exchanges.
 

@@ -628,12 +628,15 @@ class TestLogging:
 
         await run_react_loop(_make_module(), ctx, "test")
 
-        events = [item["event"] for item in graph.nodes[node.id].agent_trace]
-        assert "module_start" in events
-        assert "llm_call" in events
-        assert "reasoning" in events
-        assert "tool_calls" in events
-        assert "conclude" in events
+        trace = graph.nodes[node.id].agent_trace
+        events = [item["event"] for item in trace]
+        assert events == ["llm_call", "llm_call", "tool_call"]
+        first_call = trace[0]["payload"]
+        assert first_call["request"]["messages"][0]["role"] == "system"
+        assert first_call["request"]["messages"][1]["role"] == "user"
+        assert first_call["response"]["content"] == "thinking through the next move"
+        assert trace[-1]["payload"]["name"] == "conclude"
+        assert trace[-1]["payload"]["result"] == "done"
 
 
 # ---------------------------------------------------------------------------
