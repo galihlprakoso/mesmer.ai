@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Callable
 from mesmer.core.agent.prompt import (
     _build_belief_context,
     _build_graph_context,
+    _build_learned_experience_context,
     _budget_banner,
 )
 from mesmer.core.agent.prompts import CONTINUATION_PREAMBLE
@@ -269,17 +270,9 @@ async def run_react_loop(
                 "(oldest→newest, most recent at bottom)\n" + history_block
             )
 
-    # Learned experience — distilled behavioural signal from the graph.
-    # Complements the verbatim outputs above with aggregates (modules
-    # that worked / failed against this target, verbatim leaks the judge
-    # scored). Useful for pattern matching ("what technique family has
-    # paid off?") vs. the raw outputs ("what did the profiler say?").
-    if ctx.graph is not None:
-        experience = ctx.graph.render_learned_experience()
-        if experience:
-            user_content_parts.append(
-                "## Learned Experience (from prior attempts against this target)\n" + experience
-            )
+    learned_experience = _build_learned_experience_context(ctx, actor)
+    if learned_experience:
+        user_content_parts.append(learned_experience)
 
     # Belief Attack Graph brief — typed planner state (Session 2 wiring).
     # Renders the role-scoped decision brief for the running module:

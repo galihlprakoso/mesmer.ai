@@ -135,6 +135,7 @@ class AttackGraph:
             module="root",
             approach="initial state — no info yet",
             status=NodeStatus.COMPLETED.value,
+            source=NodeSource.ROOT.value,
             depth=0,
         )
         self.root_id = root.id
@@ -292,7 +293,7 @@ class AttackGraph:
         }
         return [
             n for n in self.nodes.values()
-            if n.status in {s.value for s in explored_statuses} and n.module != "root"
+            if n.status in {s.value for s in explored_statuses} and n.id != self.root_id
         ]
 
     def get_best_score(self) -> int:
@@ -469,7 +470,22 @@ class AttackGraph:
                 parts.append(header + "\n_(module produced no conclude text)_")
         return "\n\n".join(parts)
 
-    def winning_modules(self, min_score: int = 7) -> list[tuple[str, int]]:
+    def _is_judged_agent_attempt(self, node: AttackNode) -> bool:
+        """True for completed, scored module attempts worth learning from."""
+        if node.id == self.root_id or node.source == NodeSource.ROOT.value:
+            return False
+        if node.is_leader_verdict or node.source != NodeSource.AGENT.value:
+            return False
+        if not node.is_completed:
+            return False
+        return node.score > 0
+
+    def winning_modules(
+        self,
+        min_score: int = 7,
+        *,
+        modules: set[str] | None = None,
+    ) -> list[tuple[str, int]]:
         """Modules that have scored at least ``min_score`` somewhere in the
         graph, sorted by best score descending then module name.
 
@@ -480,7 +496,9 @@ class AttackGraph:
         """
         best: dict[str, int] = {}
         for n in self.iter_nodes():
-            if n.module == "root":
+            if not self._is_judged_agent_attempt(n):
+                continue
+            if modules is not None and n.module not in modules:
                 continue
             if n.score < min_score:
                 continue
@@ -488,16 +506,25 @@ class AttackGraph:
                 best[n.module] = n.score
         return sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))
 
-    def failed_modules(self, max_score: int = 2) -> list[str]:
-        """Modules where every observed attempt scored at or below
-        ``max_score`` AND at least one attempt ran.
+    def failed_modules(
+        self,
+        max_score: int = 2,
+        *,
+        modules: set[str] | None = None,
+    ) -> list[str]:
+        """Modules where every judged, completed attempt scored at or below
+        ``max_score``.
 
-        Signals "low-yield modules against THIS target" to the Planner.
         This is a score aggregate, not an AttackGraph lifecycle status.
+        Running/pending nodes are not evidence. Unjudged score-0 nodes are
+        not evidence either; they usually mean "not scored yet" rather than
+        "the technique failed".
         """
         by_mod: dict[str, list[int]] = {}
         for n in self.iter_nodes():
-            if n.module == "root":
+            if not self._is_judged_agent_attempt(n):
+                continue
+            if modules is not None and n.module not in modules:
                 continue
             by_mod.setdefault(n.module, []).append(n.score)
         return sorted(
@@ -517,7 +544,7 @@ class AttackGraph:
         seen: set[str] = set()
         out: list[str] = []
         for n in self.iter_nodes():
-            if n.module == "root":
+            if not self._is_judged_agent_attempt(n):
                 continue
             leaked = (n.leaked_info or "").strip()
             if not leaked or n.score < min_score:
@@ -540,7 +567,7 @@ class AttackGraph:
         seen: set[str] = set()
         out: list[str] = []
         for n in self.iter_nodes():
-            if n.module == "root":
+            if n.id == self.root_id or n.source == NodeSource.ROOT.value:
                 continue
             for resp in n.target_responses:
                 s = (resp or "").strip()
@@ -556,7 +583,13 @@ class AttackGraph:
                 out.append(s)
         return out
 
-    def render_learned_experience(self, *, max_entries: int = 8) -> str:
+    def render_learned_experience(
+        self,
+        *,
+        max_entries: int = 8,
+        modules: set[str] | None = None,
+        include_module_outcomes: bool = True,
+    ) -> str:
         """Compact markdown summary of everything the graph has taught us.
 
         Rendered into the leader's user message when non-empty, and
@@ -571,17 +604,18 @@ class AttackGraph:
         """
         parts: list[str] = []
 
-        wins = self.winning_modules()
-        if wins:
-            bits = ", ".join(f"`{mod}` (best {s})" for mod, s in wins[:max_entries])
-            more = f" (+{len(wins) - max_entries} more)" if len(wins) > max_entries else ""
-            parts.append(f"**Modules that worked here before:** {bits}{more}")
+        if include_module_outcomes:
+            wins = self.winning_modules(modules=modules)
+            if wins:
+                bits = ", ".join(f"`{mod}` (best {s})" for mod, s in wins[:max_entries])
+                more = f" (+{len(wins) - max_entries} more)" if len(wins) > max_entries else ""
+                parts.append(f"**Modules that worked here before:** {bits}{more}")
 
-        fails = self.failed_modules()
-        if fails:
-            bits = ", ".join(f"`{m}`" for m in fails[:max_entries])
-            more = f" (+{len(fails) - max_entries} more)" if len(fails) > max_entries else ""
-            parts.append(f"**Modules that failed here (skip):** {bits}{more}")
+            fails = self.failed_modules(modules=modules)
+            if fails:
+                bits = ", ".join(f"`{m}`" for m in fails[:max_entries])
+                more = f" (+{len(fails) - max_entries} more)" if len(fails) > max_entries else ""
+                parts.append(f"**Low-yield modules observed here:** {bits}{more}")
 
         leaks = self.verbatim_leaks()
         if leaks:

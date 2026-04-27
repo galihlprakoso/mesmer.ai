@@ -79,7 +79,11 @@ def _build_graph_context(ctx: "Context") -> str:
     # every module that's currently referenced in the graph.
     tiers: dict[str, int] = {}
     if ctx.registry and graph and len(graph) > 1:
-        mods = {n.module for n in graph.iter_nodes() if n.module and n.module != "root"}
+        mods = {
+            n.module
+            for n in graph.iter_nodes()
+            if n.module and n.id != graph.root_id
+        }
         tiers = ctx.registry.tiers_for(list(mods))
 
     if graph and len(graph) > 1:  # more than just root
@@ -103,6 +107,41 @@ def _build_graph_context(ctx: "Context") -> str:
             parts.append("→ Budget almost exhausted. Conclude NOW with everything gathered.")
 
     return "\n".join(parts) if parts else ""
+
+
+def _build_learned_experience_context(ctx: "Context", actor: "ReactActorSpec") -> str:
+    """Render role-scoped learned experience from the execution graph.
+
+    Learned experience is prompt advice distilled from prior judged attempts.
+    It is intentionally narrower than conversation history:
+
+    - actors with dispatch tools see outcomes only for modules they can call;
+    - leaf actors see reusable evidence only, never "module X worked/failed";
+    - unjudged/running/leader nodes are filtered by ``AttackGraph`` itself.
+
+    This keeps planning advice at the actor that can act on it. A leaf module
+    should not be told which sibling or parent module was low-yield; it cannot
+    dispatch those modules and may overfit away from its own assignment.
+    """
+    graph = ctx.graph
+    if graph is None:
+        return ""
+
+    dispatchable = set(actor.sub_module_names)
+    include_module_outcomes = bool(dispatchable)
+    experience = graph.render_learned_experience(
+        modules=dispatchable,
+        include_module_outcomes=include_module_outcomes,
+    ).strip()
+    if not experience:
+        return ""
+
+    scope = "dispatchable modules" if include_module_outcomes else "reusable evidence"
+    return (
+        "## Learned Experience "
+        f"(from prior attempts against this target; {scope})\n"
+        + experience
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +220,7 @@ __all__ = [
     "_budget_banner",
     "_budget_suffix",
     "_build_graph_context",
+    "_build_learned_experience_context",
     "_build_belief_context",
     "_belief_role_for",
 ]

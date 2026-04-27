@@ -19,6 +19,7 @@ class TestAttackGraphExecutionTrace:
         graph = AttackGraph()
         root = graph.ensure_root()
         assert root.module == "root"
+        assert root.source == NodeSource.ROOT.value
         assert root.status == NodeStatus.COMPLETED.value
         assert graph.get_explored_nodes() == []
 
@@ -99,6 +100,14 @@ class TestAttackGraphExecutionTrace:
         assert hint.source == NodeSource.HUMAN.value
         assert hint.status == NodeStatus.COMPLETED.value
 
+    def test_real_module_named_root_is_not_filtered_by_magic_string(self):
+        graph = AttackGraph()
+        storage_root = graph.ensure_root()
+        module = graph.add_node(storage_root.id, "root", "real module name", score=8)
+
+        assert module in graph.get_explored_nodes()
+        assert graph.winning_modules() == [("root", 8)]
+
     def test_conversation_history_excludes_root_and_leader_verdict(self):
         graph = AttackGraph()
         root = graph.ensure_root()
@@ -112,6 +121,86 @@ class TestAttackGraphExecutionTrace:
         )
 
         assert graph.conversation_history() == [child]
+
+    def test_learned_experience_ignores_running_unscored_and_leader_nodes(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(
+            root.id,
+            "system-prompt-extraction",
+            "currently running",
+            status=NodeStatus.RUNNING.value,
+            score=0,
+        )
+        graph.add_node(
+            root.id,
+            "full-redteam-with-execution:executive",
+            "executive run",
+            source=NodeSource.LEADER.value,
+            status=NodeStatus.COMPLETED.value,
+            score=0,
+        )
+        graph.add_node(
+            root.id,
+            "tool-extraction",
+            "completed but unjudged",
+            status=NodeStatus.COMPLETED.value,
+            score=0,
+        )
+
+        assert graph.failed_modules() == []
+        assert graph.render_learned_experience() == ""
+
+    def test_learned_experience_labels_low_yield_without_skip_instruction(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(
+            root.id,
+            "direct-ask",
+            "ask plainly",
+            status=NodeStatus.COMPLETED.value,
+            score=2,
+        )
+
+        rendered = graph.render_learned_experience()
+
+        assert "**Low-yield modules observed here:** `direct-ask`" in rendered
+        assert "skip" not in rendered.lower()
+
+    def test_learned_experience_can_scope_module_outcomes_to_dispatchable_modules(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(root.id, "system-prompt-extraction", "manager", score=8)
+        graph.add_node(root.id, "target-profiler", "child", score=2)
+
+        executive_view = graph.render_learned_experience(
+            modules={"system-prompt-extraction"},
+        )
+        manager_view = graph.render_learned_experience(
+            modules={"target-profiler"},
+        )
+
+        assert "`system-prompt-extraction` (best 8)" in executive_view
+        assert "target-profiler" not in executive_view
+        assert "`target-profiler`" in manager_view
+        assert "system-prompt-extraction" not in manager_view
+
+    def test_learned_experience_leaf_view_keeps_leaks_without_module_outcomes(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(
+            root.id,
+            "direct-ask",
+            "ask plainly",
+            score=9,
+            leaked_info="I follow the internal research policy.",
+        )
+
+        rendered = graph.render_learned_experience(include_module_outcomes=False)
+
+        assert "Modules that worked" not in rendered
+        assert "Low-yield modules" not in rendered
+        assert "I follow the internal research policy." in rendered
 
     def test_json_round_trip(self):
         graph = AttackGraph()

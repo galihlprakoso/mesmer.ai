@@ -195,9 +195,9 @@ flowchart TD
   Prompt --> User["User content"]
   User --> Objective["Current instruction + overall objective"]
   User --> Operator["Operator messages<br/>executive only"]
-  User --> Scratch["Scratchpad snapshot<br/>latest output per slot"]
-  User --> History["Module conversation history<br/>timeline"]
-  User --> Experience["Learned experience<br/>worked/failed patterns"]
+  User --> Scratch["Scratchpad<br/>shared whiteboard"]
+  User --> History["Module conversation history<br/>cross-run timeline"]
+  User --> Experience["Learned experience<br/>role-scoped graph signals"]
   User --> Belief["Belief brief<br/>role-scoped hypotheses + experiments"]
   User --> TargetFrame["Target transcript or prior intel"]
   User --> Budget["Budget banner"]
@@ -215,6 +215,25 @@ Channels have different meanings:
 | Tool result | Immediate child-to-parent return value. |
 | AttackGraph | Persistent attempt audit and UI source. |
 | BeliefGraph | Typed planning state and ranked experiments. |
+
+Context blocks are scoped by actor:
+
+| Block | Executive | Manager | Employee / leaf |
+|---|---:|---:|---:|
+| Overall objective | Yes | Yes | Yes |
+| Operator messages | Yes | No | No |
+| Scratchpad whiteboard | Yes | Yes | Yes |
+| Module conversation history | Yes | Yes | Yes |
+| Learned module outcomes | Dispatchable managers only | Dispatchable children only | No |
+| Learned reusable evidence | Yes | Yes | Yes |
+| BeliefGraph brief | Leader brief unless suppressed | Manager brief | Employee brief |
+| Target transcript | Current session, or prior intel after reset | Current session, or prior intel after reset | Current session, or prior intel after reset |
+
+Learned module outcomes are computed only from completed, judged,
+non-leader agent execution nodes. Running/pending nodes, unjudged score-0
+nodes, human notes, and executive/leader verdict nodes are not learning
+signals. This keeps advice actionable: an actor only receives module
+success/low-yield summaries for modules it can actually dispatch.
 
 When debugging, first ask: "Which channel was supposed to carry this
 information?"

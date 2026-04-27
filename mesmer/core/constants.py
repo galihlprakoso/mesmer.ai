@@ -44,6 +44,10 @@ class NodeStatus(str, Enum):
 class NodeSource(str, Enum):
     """Who proposed or produced the node.
 
+    ``ROOT`` marks the storage root. It is not a runnable module and should
+    be excluded from execution-attempt queries by source/id, not by checking
+    for a magic module name.
+
     ``LEADER`` marks the outer-loop module's own execution node — written
     once per run by :func:`execute_run` after the leader's ReAct loop
     concludes. It's the leader's analogue of the per-sub-module nodes
@@ -52,6 +56,7 @@ class NodeSource(str, Enum):
     attribution) can skip it without having to know the leader's name.
     """
 
+    ROOT = "root"
     AGENT = "agent"
     HUMAN = "human"
     JUDGE = "judge"

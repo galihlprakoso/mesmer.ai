@@ -837,9 +837,26 @@ model prompt sees one compact shared whiteboard.
 
 **Conversation history** is a *derived view* over the graph, not a third
 primitive: `AttackGraph.conversation_history()` returns the ordered list
-of `AttackNode`s for the current run's modules, and
-`render_conversation_history()` formats them for injection into the
-engine's user prompt (separate from the scratchpad whiteboard).
+of completed module `AttackNode`s across runs for this target, excluding
+the root and leader-verdict nodes. `render_conversation_history()` formats
+that timeline for injection into the engine's user prompt (separate from
+the scratchpad whiteboard).
+
+**Learned experience** is another derived prompt view over the graph, but it
+is role-scoped because it is planning advice:
+
+| Actor receiving prompt | Learned-experience scope |
+|---|---|
+| Executive | Outcome aggregates only for manager modules in its dispatch list. |
+| Manager | Outcome aggregates only for child modules in its `sub_modules:` list. |
+| Employee / leaf | Reusable evidence only, such as judged verbatim leaks. No "module worked" or "low-yield module" advice. |
+
+The graph filters learned outcomes to completed, judged, non-leader,
+agent-authored execution nodes. Running/pending nodes, unjudged `score=0`
+nodes, human notes, and executive/leader-verdict nodes are not learning
+signals. Keep this contract intact: child modules should not receive advice
+about parent/sibling module success because they cannot act on it and may
+overfit away from their assigned job.
 
 Design rule: **if you're tempted to add a typed `TargetProfile` /
 `AttackPlan` / `Experience` dataclass to core, stop.** That's a module's

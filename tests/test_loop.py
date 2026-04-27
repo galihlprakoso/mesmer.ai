@@ -14,6 +14,7 @@ from mesmer.core.agent import (
     _build_graph_context,
     _update_graph,
 )
+from mesmer.core.agent.prompt import _build_learned_experience_context
 from mesmer.core.scenario import AgentConfig
 
 
@@ -163,6 +164,88 @@ class TestBuildGraphContext:
         ctx.turns_used = 9  # 90% → conclude
         result = _build_graph_context(ctx)
         assert "CONCLUDE" in result.upper()
+
+
+class TestLearnedExperienceContext:
+    def test_executive_gets_only_dispatchable_manager_outcomes(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(root.id, "system-prompt-extraction", "manager", score=8)
+        graph.add_node(root.id, "target-profiler", "child", score=2)
+        ctx = _make_ctx(graph=graph)
+        executive = ReactActorSpec(
+            name="scenario:executive",
+            role=ActorRole.EXECUTIVE,
+            sub_modules=["system-prompt-extraction"],
+        )
+
+        rendered = _build_learned_experience_context(ctx, executive)
+
+        assert "dispatchable modules" in rendered
+        assert "`system-prompt-extraction` (best 8)" in rendered
+        assert "target-profiler" not in rendered
+
+    def test_manager_gets_only_dispatchable_child_outcomes(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(root.id, "system-prompt-extraction", "manager", score=8)
+        graph.add_node(root.id, "target-profiler", "child", score=2)
+        ctx = _make_ctx(graph=graph)
+        manager = _make_module(
+            name="system-prompt-extraction",
+            sub_modules=["target-profiler"],
+        )
+
+        rendered = _build_learned_experience_context(ctx, manager)
+
+        assert "dispatchable modules" in rendered
+        assert "`target-profiler`" in rendered
+        assert "system-prompt-extraction" not in rendered
+
+    def test_leaf_gets_reusable_evidence_without_module_outcome_advice(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(
+            root.id,
+            "direct-ask",
+            "ask plainly",
+            score=9,
+            leaked_info="I follow internal research policy.",
+        )
+        ctx = _make_ctx(graph=graph)
+        leaf = _make_module(name="direct-ask")
+
+        rendered = _build_learned_experience_context(ctx, leaf)
+
+        assert "reusable evidence" in rendered
+        assert "I follow internal research policy." in rendered
+        assert "Modules that worked" not in rendered
+        assert "Low-yield modules" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_leaf_prompt_does_not_receive_parent_or_sibling_outcome_advice(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(root.id, "system-prompt-extraction", "manager", score=2)
+        graph.add_node(root.id, "target-profiler", "sibling", score=2)
+        captured = []
+        ctx = _make_ctx(
+            graph=graph,
+            captured_messages=captured,
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+        )
+
+        await run_react_loop(_make_module(name="direct-ask"), ctx, "test", log=None)
+
+        combined = "\n".join(
+            m.get("content", "") for m in captured[0] if m.get("role") == "user"
+        )
+        assert "Low-yield modules" not in combined
+        assert "Modules that worked" not in combined
 
 
 # ---------------------------------------------------------------------------
