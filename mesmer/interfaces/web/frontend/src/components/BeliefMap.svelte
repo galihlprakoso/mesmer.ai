@@ -50,6 +50,9 @@
   let simulation = null
   let zoomBehavior = null
   let pollTimer = null
+  let positionById = new Map()
+  let zoomTransform = d3.zoomIdentity
+  let renderedTargetHash = null
 
   // ---- inspector rail state (collapse + active list tab) ----
   // Persist the rail open/closed preference; some operators run with
@@ -121,6 +124,11 @@
     .slice(0, 12)
 
   async function load() {
+    if (renderedTargetHash !== targetHash) {
+      positionById = new Map()
+      zoomTransform = d3.zoomIdentity
+      renderedTargetHash = targetHash
+    }
     if (!targetHash) {
       graph = null
       stats = null
@@ -196,6 +204,46 @@
     return 'var(--text-muted)'
   }
 
+  function rememberPositions(nodes) {
+    for (const n of nodes || []) {
+      if (!n?.id || !Number.isFinite(n.x) || !Number.isFinite(n.y)) continue
+      const prior = positionById.get(n.id) || {}
+      positionById.set(n.id, {
+        x: n.x,
+        y: n.y,
+        fx: n.fx ?? prior.fx,
+        fy: n.fy ?? prior.fy,
+      })
+    }
+  }
+
+  function seedNodePositions(nodes, links) {
+    const byId = new Map(nodes.map((n) => [n.id, n]))
+    const center = { x: width / 2, y: height / 2 }
+
+    for (const n of nodes) {
+      const cached = positionById.get(n.id)
+      if (cached) {
+        n.x = cached.x
+        n.y = cached.y
+        if (cached.fx != null && cached.fy != null) {
+          n.fx = cached.fx
+          n.fy = cached.fy
+        }
+        continue
+      }
+
+      const link = links.find((l) => l.src_id === n.id || l.dst_id === n.id)
+      const neighborId = link ? (link.src_id === n.id ? link.dst_id : link.src_id) : null
+      const neighbor = neighborId ? byId.get(neighborId) : null
+      const anchor = neighbor && Number.isFinite(neighbor.x) ? neighbor : center
+      const angle = Math.random() * Math.PI * 2
+      const radius = 36 + Math.random() * 28
+      n.x = anchor.x + Math.cos(angle) * radius
+      n.y = anchor.y + Math.sin(angle) * radius
+    }
+  }
+
   // ---- humanized labels (replaces ID-prefixed ones) ----
   // The shape + color already carry the kind. The label exists to tell
   // the operator WHICH thing this node is — semantically — at a glance.
@@ -232,6 +280,7 @@
 
   function render() {
     if (!graph || !svgEl) return
+    simulation?.stop()
     const rect = canvasEl?.getBoundingClientRect()
     if (rect) {
       width = rect.width
@@ -239,6 +288,7 @@
     }
 
     const svg = d3.select(svgEl)
+    zoomTransform = d3.zoomTransform(svgEl)
     svg.selectAll('*').remove()
     svg.attr('viewBox', [0, 0, width, height])
 
@@ -273,14 +323,19 @@
     zoomBehavior = d3
       .zoom()
       .scaleExtent([0.2, 4])
-      .on('zoom', (ev) => root.attr('transform', ev.transform))
+      .on('zoom', (ev) => {
+        zoomTransform = ev.transform
+        root.attr('transform', ev.transform)
+      })
     svg.call(zoomBehavior)
+    svg.call(zoomBehavior.transform, zoomTransform)
 
     const nodes = (graph.nodes || []).map((n) => ({ ...n }))
     const idIndex = new Map(nodes.map((n) => [n.id, n]))
     const links = (graph.edges || [])
       .filter((e) => idIndex.has(e.src_id) && idIndex.has(e.dst_id))
       .map((e) => ({ ...e, source: e.src_id, target: e.dst_id }))
+    seedNodePositions(nodes, links)
 
     if (nodes.length === 0) {
       root
@@ -296,6 +351,8 @@
 
     simulation = d3
       .forceSimulation(nodes)
+      .alpha(positionById.size ? 0.18 : 1)
+      .alphaDecay(positionById.size ? 0.08 : 0.0228)
       .force(
         'link',
         d3
@@ -362,8 +419,9 @@
           })
           .on('end', (ev, d) => {
             if (!ev.active) simulation.alphaTarget(0)
-            d.fx = null
-            d.fy = null
+            d.fx = ev.x
+            d.fy = ev.y
+            positionById.set(d.id, { x: d.x, y: d.y, fx: d.fx, fy: d.fy })
           }),
       )
 
@@ -406,6 +464,7 @@
         .attr('x2', (d) => d.target.x)
         .attr('y2', (d) => d.target.y)
       nodeSel.attr('transform', (d) => `translate(${d.x},${d.y})`)
+      rememberPositions(nodes)
     })
   }
 
