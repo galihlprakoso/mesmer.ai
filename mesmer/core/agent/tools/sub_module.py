@@ -99,7 +99,16 @@ def _open_frontier_ids_for_module(ctx: "Context", fn_name: str) -> list[str]:
 
 
 def _should_require_frontier(ctx: "Context", actor: "ReactActorSpec") -> bool:
-    return actor.role is ActorRole.EXECUTIVE and ctx.belief_graph is not None
+    if actor.role is not ActorRole.EXECUTIVE or ctx.belief_graph is None:
+        return False
+    from mesmer.core.belief_graph import FrontierExperiment
+    from mesmer.core.constants import ExperimentState
+
+    return any(
+        isinstance(n, FrontierExperiment)
+        and n.state in {ExperimentState.PROPOSED, ExperimentState.EXECUTING}
+        for n in ctx.belief_graph.iter_nodes()
+    )
 
 
 def _sibling_entries_for_child(actor: "ReactActorSpec", fn_name: str) -> list:

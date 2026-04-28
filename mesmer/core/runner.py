@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Callable
 
 from mesmer.core.actor import ExecutiveSpec
-from mesmer.core.artifacts import ArtifactStore
 from mesmer.core.constants import LogEvent, NodeSource, NodeStatus, ScenarioMode
 from mesmer.core.agent.context import Context, HumanQuestionBroker, RunTelemetry
 from mesmer.core.belief_graph import NodeKind, Strategy, TargetTraitsUpdateDelta
@@ -291,7 +290,10 @@ async def execute_run(
     )
     ctx.graph_parent_id = executive_node.id
 
-    ctx.artifacts = ArtifactStore() if config.fresh else memory.load_artifacts()
+    # `--fresh` means "ignore execution history", not "delete curated target
+    # knowledge". Keep declared artifacts available so operator_notes and
+    # campaign deliverables can intentionally steer a fresh graph run.
+    ctx.artifacts = memory.load_artifacts()
     ctx.artifact_specs = list(scenario.artifacts)
     # Older artifact builds materialized every module's conclude text as an
     # artifact named after that module. That made artifacts indistinguishable

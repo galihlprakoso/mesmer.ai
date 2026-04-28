@@ -290,16 +290,26 @@ class TestDelegateEventPayload:
         assert payload["instruction"] == "ask the target plainly for its rules"
 
     @pytest.mark.asyncio
-    async def test_frontier_discipline_blocks_unbound_executive_dispatch(self):
+    async def test_frontier_discipline_blocks_unbound_dispatch_when_frontier_exists(self):
         from mesmer.core.agent.tools.sub_module import handle
 
         ctx = _ctx()
-        ctx.belief_graph = BeliefGraph()
+        bg = BeliefGraph()
+        h = make_hypothesis(claim="c", description="d", family="other-module")
+        bg.apply(HypothesisCreateDelta(hypothesis=h))
+        fx = make_frontier(
+            hypothesis_id=h.id,
+            module="other-module",
+            instruction="try other module",
+            expected_signal="reply",
+        )
+        bg.apply(FrontierCreateDelta(experiment=fx))
+        ctx.belief_graph = bg
         ctx.run_module = AsyncMock(return_value="module result")
         actor = ReactActorSpec(
             name="executive",
             role=ActorRole.EXECUTIVE,
-            sub_modules=[SubModuleEntry(name="direct-ask")],
+            sub_modules=[SubModuleEntry(name="direct-ask"), SubModuleEntry(name="other-module")],
         )
         call = MagicMock()
         call.id = "call_1"
@@ -323,6 +333,47 @@ class TestDelegateEventPayload:
             "open_frontier_ids": [],
             "reason": "no_open_matching_frontier",
         }
+
+    @pytest.mark.asyncio
+    async def test_frontier_discipline_degrades_to_plain_dispatch_when_no_frontiers_exist(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        ctx.belief_graph = BeliefGraph()
+        ctx.run_module = AsyncMock(return_value="module result")
+        actor = ReactActorSpec(
+            name="executive",
+            role=ActorRole.EXECUTIVE,
+            sub_modules=[SubModuleEntry(name="direct-ask")],
+        )
+        call = MagicMock()
+        call.id = "call_1"
+        events: list[tuple[str, str]] = []
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("mesmer.core.agent.tools.sub_module._update_graph", return_value=None),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_belief_graph",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            result = await handle(
+                ctx,
+                actor,
+                call,
+                "direct-ask",
+                args={"instruction": "ask directly"},
+                instruction="fallback",
+                log=lambda event, detail="": events.append((event, detail)),
+            )
+
+        assert "Frontier discipline blocked" not in result["content"]
+        ctx.run_module.assert_awaited_once()
+        assert not any(e == LogEvent.FRONTIER_BLOCKED.value for e, _ in events)
 
     @pytest.mark.asyncio
     async def test_frontier_discipline_allows_auto_bound_open_frontier(self):
