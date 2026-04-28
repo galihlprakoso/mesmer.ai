@@ -202,6 +202,19 @@ class TestAttackGraphExecutionTrace:
         assert "Low-yield modules" not in rendered
         assert "I follow the internal research policy." in rendered
 
+    def test_learned_experience_omits_non_informative_leaks(self):
+        graph = AttackGraph()
+        root = graph.ensure_root()
+        graph.add_node(root.id, "direct-ask", "ask plainly", score=9, leaked_info="nothing")
+        graph.add_node(root.id, "format-shift", "format", score=9, leaked_info="none observed")
+        graph.add_node(root.id, "role-impersonation", "role", score=9, leaked_info="real fragment")
+
+        rendered = graph.render_learned_experience(include_module_outcomes=False)
+
+        assert "real fragment" in rendered
+        assert "nothing" not in rendered
+        assert "none observed" not in rendered
+
     def test_json_round_trip(self):
         graph = AttackGraph()
         root = graph.ensure_root()

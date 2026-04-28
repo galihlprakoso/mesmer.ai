@@ -405,6 +405,18 @@ class AttackGraph:
 
     # --- Experience queries (graph IS the experience store; no sidecar) ---
 
+    _NON_INFORMATIVE_LEAKS = {
+        "none",
+        "nothing",
+        "unknown",
+        "n/a",
+        "na",
+        "no leak",
+        "no leaks",
+        "none observed",
+        "(none observed)",
+    }
+
     def conversation_history(self) -> list[AttackNode]:
         """Return all sub-module attempts as an ordered timeline
         (oldest first).
@@ -548,6 +560,8 @@ class AttackGraph:
                 continue
             leaked = (n.leaked_info or "").strip()
             if not leaked or n.score < min_score:
+                continue
+            if leaked.lower().strip(" .") in self._NON_INFORMATIVE_LEAKS:
                 continue
             if leaked in seen:
                 continue
