@@ -76,4 +76,16 @@
   .row.send .body { color: var(--cyan); }
   .row.recv .body { color: var(--amber); }
   .row.judge .body { font-style: italic; color: var(--text-muted); }
+  .row.wait .body,
+  .row.llm .body,
+  .row.llm-done .body {
+    color: var(--text-muted);
+  }
+  .row.wait .title,
+  .row.llm .title {
+    font-style: italic;
+  }
+  .row.evidence .body {
+    color: var(--text-muted);
+  }
 </style>

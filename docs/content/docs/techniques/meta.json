@@ -11,6 +11,8 @@
     "role-impersonation",
     "fake-function-injection",
     "hallucinated-tool-probing",
+    "source-boundary-contrast",
+    "react-observation-spoofing",
     "foot-in-door",
     "authority-bias",
     "anchoring",

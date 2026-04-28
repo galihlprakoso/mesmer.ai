@@ -5,6 +5,7 @@
     "system-prompt-extraction",
     "tool-extraction",
     "indirect-prompt-injection",
+    "rag-document-injection-proof",
     "email-exfiltration-proof"
   ]
 }

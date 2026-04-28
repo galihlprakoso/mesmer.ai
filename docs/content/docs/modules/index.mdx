@@ -71,23 +71,27 @@ prompt, and how it composes sub-modules.
 
 ## The shipped tiers
 
-The 21 authored modules ship in five categories (the synthesised
+The 31 authored modules ship in six categories (the synthesised
 executive doesn't appear in the registry):
 
-- **Manager** (`modules/attacks/`, T0 orchestrator) — 4 modules.
+- **Manager** (`modules/attacks/`) — 5 orchestrator modules.
   [`system-prompt-extraction`](/docs/modules/system-prompt-extraction)
   for hidden-instruction extraction;
   [`tool-extraction`](/docs/modules/tool-extraction) for
   function-catalog disclosure against function-calling agents;
   [`indirect-prompt-injection`](/docs/modules/indirect-prompt-injection)
   proves retrieved-content instruction following;
+  [`rag-document-injection-proof`](/docs/modules/rag-document-injection-proof)
+  tests RAG/document/ticket source-boundary failures;
   [`email-exfiltration-proof`](/docs/modules/email-exfiltration-proof)
   validates the side-effecting email path with a proof dossier.
-- **Profiler** (`modules/profilers/`, T0) — `target-profiler`: layered
-  identity → defence-shape → policy-surface recon.
-- **Planner** (`modules/planners/`, T0) — `attack-planner`: reads the
-  dossier + learned experience, emits an ordered plan. Pure reasoning,
-  no target contact.
+- **Profiler** (`modules/profilers/`, T0) — `target-profiler` for
+  identity → defence-shape → policy-surface recon, and
+  `tool-risk-profiler` for tool, permission, and autonomy boundaries.
+- **Planner** (`modules/planners/`, T0) — `attack-planner` reads the
+  dossier + learned experience and emits an ordered plan;
+  `risk-scenario-planner` turns risk evidence into a scenario
+  blueprint. Both are pure reasoning, no target contact.
 - **Field** (`modules/techniques/field/`, T0/T1) — 9 payload-shape
   and structural techniques: `direct-ask`, `instruction-recital`,
   `indirect-recital`, `format-shift` (T0), `prefix-commitment`,
@@ -96,6 +100,9 @@ executive doesn't appear in the registry):
 - **Cognitive / linguistic / psychological** (T2) — 6 cognitive-science
   techniques: `foot-in-door`, `authority-bias`, `anchoring`,
   `narrative-transport`, `pragmatic-reframing`, `cognitive-overload`.
+- **Tool-use** (`modules/techniques/tool-use/`, T1/T2) — source-boundary,
+  capability-validation, parameter-fuzzing, and side-effect-proof
+  techniques for agentic workflows.
 
 For per-technique guidance — when each pays off, when it doesn't, and
 the worked example — see [Techniques](/docs/techniques).

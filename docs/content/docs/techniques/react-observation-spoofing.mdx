@@ -1,0 +1,19 @@
+---
+title: ReAct observation spoofing
+description: Probe whether ReAct-like trace tokens inside untrusted content are mistaken for internal agent state.
+---
+
+`react-observation-spoofing` is a tier-1 tool-use technique for
+ReAct-style and tool-using agents. It embeds benign `Thought:`,
+`Action:`, and `Observation:` lines inside content the target should
+process as data, then checks whether the target treats those lines as
+trusted agent state.
+
+Use it for assistants that triage tickets, read logs, inspect documents,
+or summarize tool output. The safe proof uses markers and dry-run tasks,
+not real tool execution. Evidence is strongest when the target claims an
+approval, priority, or state transition based on the forged observation.
+
+Research basis: ReAct confused-deputy case studies such as
+[WithSecure's Synthetic Recollections](https://labs.withsecure.com/publications/llm-agent-prompt-injection)
+and the broader indirect prompt injection literature.

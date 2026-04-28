@@ -164,6 +164,7 @@ class LogEvent(str, Enum):
 
     # Target interaction
     SEND = "send"
+    TARGET_WAIT = "target_wait"
     RECV = "recv"
     SEND_ERROR = "send_error"
     BUDGET = "budget"
@@ -213,6 +214,7 @@ class LogEvent(str, Enum):
     BELIEF_DELTA = "belief_delta"
     HYPOTHESIS_CREATED = "hypothesis_created"
     HYPOTHESIS_UPDATED = "hypothesis_updated"
+    EVIDENCE_EXTRACT = "evidence_extract"
     EVIDENCE_EXTRACTED = "evidence_extracted"
     EVIDENCE_EXTRACT_ERROR = "evidence_extract_error"
     FRONTIER_RANKED = "frontier_ranked"

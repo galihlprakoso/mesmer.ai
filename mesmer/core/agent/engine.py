@@ -422,6 +422,13 @@ async def run_react_loop(
                     f"Model not using tools ({consecutive_reasoning} turns) — nudging toward action",
                 )
                 available = ", ".join(f"`{name}`" for name in tool_names) or "your available tools"
+                target_note = ""
+                if ToolName.SEND_MESSAGE.value in tool_names:
+                    target_note = (
+                        " Assistant text is private reasoning; the target has "
+                        "not seen it. If you intend to contact the target, call "
+                        "`send_message` with the exact message now."
+                    )
                 messages.append(
                     {
                         "role": "user",
@@ -431,6 +438,7 @@ async def run_react_loop(
                             f"tools: {available}. If you genuinely can't "
                             "proceed (e.g. you decline the engagement), call conclude() with a "
                             "short explanation so the run can finish cleanly."
+                            f"{target_note}"
                         ),
                     }
                 )

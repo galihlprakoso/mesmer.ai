@@ -30,6 +30,49 @@ describe('eventToRow', () => {
     expect(row.body.startsWith('I am Anna')).toBe(true)
   })
 
+  it('renders target wait status between send and recv', () => {
+    const row = eventToRow({
+      type: 'event', event: 'target_wait',
+      detail: '[target-profiler] waiting for target response',
+    })
+    expect(row.kind).toBe('wait')
+    expect(row.title).toBe('Waiting for target (target-profiler)')
+  })
+
+  it('renders LLM call and completion status rows', () => {
+    const call = eventToRow({
+      type: 'event', event: 'llm_call',
+      detail: '[target-profiler @ depth=1] iteration 2/4 — calling anthropic/claude...',
+    })
+    expect(call.kind).toBe('llm')
+    expect(call.title).toContain('Calling')
+    expect(call.body).toContain('iteration 2/4')
+
+    const done = eventToRow({
+      type: 'event', event: 'llm_completion',
+      detail: JSON.stringify({
+        role: 'judge',
+        model: 'anthropic/claude',
+        elapsed_s: 3.42,
+        total_tokens: 1234,
+      }),
+    })
+    expect(done.kind).toBe('llm-done')
+    expect(done.title).toBe('Judge LLM returned')
+    expect(done.body).toContain('3.4s')
+    expect(done.body).toContain('1234 tokens')
+  })
+
+  it('renders throttle and retry waits', () => {
+    const throttle = eventToRow({ type: 'event', event: 'throttle_wait', detail: 'rpm cap reached; waiting 12.00s' })
+    expect(throttle.kind).toBe('wait')
+    expect(throttle.title).toBe('Throttled')
+
+    const retry = eventToRow({ type: 'event', event: 'llm_retry', detail: 'retrying in 4s' })
+    expect(retry.kind).toBe('warn')
+    expect(retry.title).toBe('Retrying LLM call')
+  })
+
   it('parses judge score format', () => {
     const row = eventToRow({
       type: 'event', event: 'judge_score',
@@ -38,6 +81,16 @@ describe('eventToRow', () => {
     expect(row.kind).toBe('judge')
     expect(row.title).toBe('Judge: 7/10')
     expect(row.body).toContain('design principles')
+  })
+
+  it('renders evidence extraction lifecycle rows', () => {
+    const start = eventToRow({ type: 'event', event: 'evidence_extract', detail: 'Extracting evidence from target turn 2...' })
+    expect(start.kind).toBe('wait')
+    expect(start.title).toBe('Extracting evidence')
+
+    const done = eventToRow({ type: 'event', event: 'evidence_extracted', detail: '1 evidence(s) from target turn 2' })
+    expect(done.kind).toBe('evidence')
+    expect(done.title).toBe('Evidence extracted')
   })
 
   it('renders status: running as start marker', () => {
@@ -81,8 +134,8 @@ describe('eventToRow', () => {
     expect(row.title).toBe('Started foot-in-door')
   })
 
-  it('skips truly noisy events: llm_call, reasoning, tool_calls, graph_update', () => {
-    for (const e of ['llm_call', 'reasoning', 'tool_calls', 'graph_update']) {
+  it('skips truly noisy events: reasoning, tool_calls, graph_update', () => {
+    for (const e of ['reasoning', 'tool_calls', 'graph_update']) {
       expect(eventToRow({ type: 'event', event: e, detail: 'x' })).toBeNull()
     }
   })
@@ -94,17 +147,18 @@ describe('eventToRow', () => {
 })
 
 describe('eventsToActivity', () => {
-  it('preserves order and filters only true noise (llm_call, reasoning)', () => {
+  it('preserves order and filters only true noise', () => {
     const events = [
-      { type: 'event', event: 'llm_call', timestamp: 1 },              // filtered
+      { type: 'event', event: 'llm_call', detail: '[x] iteration 1/1 — calling model...', timestamp: 1 },
       { type: 'event', event: 'module_start', detail: 'x', timestamp: 2 },
       { type: 'event', event: 'send', detail: '[x] → hi', timestamp: 3 },
+      { type: 'event', event: 'target_wait', detail: '[x] waiting for target response', timestamp: 3.5 },
       { type: 'event', event: 'recv', detail: '← hello', timestamp: 4 },
       { type: 'event', event: 'judge_score', detail: 'Score: 5/10 — ok', timestamp: 5 },
       { type: 'event', event: 'llm_error', detail: '401 unauthorized', timestamp: 6 },
     ]
     const rows = eventsToActivity(events)
-    expect(rows.map(r => r.kind)).toEqual(['module-start', 'send', 'recv', 'judge', 'error'])
+    expect(rows.map(r => r.kind)).toEqual(['llm', 'module-start', 'send', 'wait', 'recv', 'judge', 'error'])
   })
 
   it('handles empty input', () => {

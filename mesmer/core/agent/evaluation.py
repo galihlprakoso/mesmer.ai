@@ -578,6 +578,10 @@ async def _update_belief_graph_from_turn(
     )
 
     try:
+        log(
+            LogEvent.EVIDENCE_EXTRACT.value,
+            f"Extracting evidence from target turn {turn_index + 1}...",
+        )
         evidences = await extract_evidence(ctx, attempt=observation, active_hypotheses=active)
     except EvidenceExtractionError as e:
         log(LogEvent.EVIDENCE_EXTRACT_ERROR.value, f"turn {turn_index}: {e}")

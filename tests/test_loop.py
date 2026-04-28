@@ -860,8 +860,11 @@ class TestLogHygiene:
         await run_react_loop(module, ctx, "test", log=_log)
 
         send_events = [d for (e, d) in events if e == "send"]
+        wait_events = [d for (e, d) in events if e == "target_wait"]
         recv_events = [d for (e, d) in events if e == "recv"]
         assert send_events and long_message in send_events[0]
+        assert wait_events and "test-module" in wait_events[0]
+        assert "waiting for target response" in wait_events[0]
         assert recv_events and ("y" * 500) in recv_events[0]
 
     @pytest.mark.asyncio

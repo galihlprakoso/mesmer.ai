@@ -1,0 +1,37 @@
+---
+title: RAG document injection proof
+description: Manager for proving whether retrieved, pasted, or tool-returned content is treated as instructions.
+---
+
+`rag-document-injection-proof` is a manager module for source-boundary
+testing. It coordinates recon, then runs benign proof modules that check
+whether document, ticket, search-result, or tool-output content can
+override the user's trusted task.
+
+It is useful for:
+
+- RAG assistants that summarize retrieved documents;
+- support or sales bots that process pasted customer text;
+- tool-using agents that read emails, tickets, pages, or logs;
+- ReAct-style agents that may confuse pasted `Observation:` text with
+  trusted tool output.
+
+The manager prefers proof markers, summaries, dry-runs, and previews.
+It stops when there is clear boundary evidence and does not attempt real
+side effects.
+
+## Typical roster
+
+- `target-profiler` for general behavior and refusal shape.
+- `tool-risk-profiler` for tool, permission, and autonomy boundaries.
+- `source-boundary-contrast` for trusted-task versus untrusted-content
+  contrast.
+- `react-observation-spoofing` when the target appears agentic or
+  trace-driven.
+- `conversation-context-injection` when there is no external retrieval
+  path but the target accepts pasted briefs, tickets, or transcripts.
+- `indirect-prompt-injection` when a real search/read path exists.
+
+Research basis: [Greshake et al.](https://arxiv.org/abs/2302.12173),
+[OWASP LLM01/LLM06/LLM08](https://genai.owasp.org/resource/owasp-top-10-for-llm-applications-2025/),
+and [MITRE ATLAS SAFE-AI](https://atlas.mitre.org/pdf-files/SAFEAI_Full_Report.pdf).

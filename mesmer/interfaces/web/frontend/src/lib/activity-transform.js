@@ -15,6 +15,14 @@ function shorten(s, n) {
   return s.length > n ? s.slice(0, n).trim() + '…' : s
 }
 
+function parseJson(s) {
+  try {
+    return JSON.parse(s)
+  } catch {
+    return null
+  }
+}
+
 /**
  * Map a single event to an activity row (or null to skip).
  * Detail strings follow the log formats in loop.py.
@@ -73,12 +81,50 @@ export function eventToRow(evt) {
         body: shorten(m ? m[2] : d, 400),
       }
     }
+    case 'target_wait': {
+      const m = d.match(/^\[([^\]]+)\]\s*(.*)$/)
+      return {
+        kind: 'wait', time: evt.timestamp, icon: '…', color: 'var(--text-muted)',
+        title: m ? `Waiting for target (${m[1]})` : 'Waiting for target',
+        body: shorten(m ? m[2] : d, 180),
+      }
+    }
     case 'recv':
       return {
         kind: 'recv', time: evt.timestamp, icon: '←', color: 'var(--amber)',
         title: 'Received',
         body: shorten(d.replace(/^←\s*/, ''), 400),
       }
+    case 'llm_call': {
+      const m = d.match(/\[([^\]]+)\]\s*iteration\s+(\d+)\/(\d+)\s+—\s+calling\s+(.+?)\.\.\./)
+      const actor = m ? m[1].split('@')[0].trim() : ''
+      return {
+        kind: 'llm', time: evt.timestamp, icon: '◇', color: 'var(--text-muted)',
+        title: actor ? `Calling ${actor} LLM` : 'Calling LLM',
+        body: m ? `iteration ${m[2]}/${m[3]} · ${m[4]}` : shorten(d, 220),
+      }
+    }
+    case 'llm_completion': {
+      const payload = parseJson(d)
+      if (payload) {
+        const role = payload.role || 'llm'
+        const elapsed = typeof payload.elapsed_s === 'number' ? `${payload.elapsed_s.toFixed(1)}s` : ''
+        const tokens = payload.total_tokens ? `${payload.total_tokens} tokens` : ''
+        return {
+          kind: 'llm-done', time: evt.timestamp, icon: '◆', color: 'var(--text-muted)',
+          title: `${role[0].toUpperCase()}${role.slice(1)} LLM returned`,
+          body: [elapsed, payload.model, tokens].filter(Boolean).join(' · '),
+        }
+      }
+      return { kind: 'llm-done', time: evt.timestamp, icon: '◆', color: 'var(--text-muted)',
+               title: 'LLM returned', body: shorten(d, 220) }
+    }
+    case 'llm_retry':
+      return { kind: 'warn', time: evt.timestamp, icon: '↻', color: 'var(--amber)',
+               title: 'Retrying LLM call', body: shorten(d, 260) }
+    case 'throttle_wait':
+      return { kind: 'wait', time: evt.timestamp, icon: '⏱', color: 'var(--amber)',
+               title: 'Throttled', body: shorten(d, 220) }
     case 'judge_score': {
       // "Score: N/10 — leaked info"
       const m = d.match(/Score:\s*(\d+)\/10(?:\s*—\s*(.*))?/)
@@ -89,6 +135,21 @@ export function eventToRow(evt) {
       return { kind: 'judge', time: evt.timestamp, icon: '⚖', color: 'var(--blue)',
                title: 'Judge', body: shorten(d, 200) }
     }
+    case 'judge':
+      return { kind: 'judge', time: evt.timestamp, icon: '⚖', color: 'var(--blue)',
+               title: 'Judging attempt', body: shorten(d, 220) }
+    case 'judge_error':
+      return { kind: 'error', time: evt.timestamp, icon: '✗', color: 'var(--red)',
+               title: 'Judge error', body: shorten(d, 260) }
+    case 'evidence_extract':
+      return { kind: 'wait', time: evt.timestamp, icon: '⌕', color: 'var(--text-muted)',
+               title: 'Extracting evidence', body: shorten(d, 220) }
+    case 'evidence_extracted':
+      return { kind: 'evidence', time: evt.timestamp, icon: '⌕', color: 'var(--green)',
+               title: 'Evidence extracted', body: shorten(d, 260) }
+    case 'evidence_extract_error':
+      return { kind: 'error', time: evt.timestamp, icon: '✗', color: 'var(--red)',
+               title: 'Evidence extraction failed', body: shorten(d, 260) }
     case 'conclude':
       return { kind: 'conclude', time: evt.timestamp, icon: '✓', color: 'var(--green)',
                title: 'Concluded', body: shorten(d, 300) }
@@ -121,7 +182,7 @@ export function eventToRow(evt) {
       return { kind: 'module-start', time: evt.timestamp, icon: '▸', color: 'var(--text-muted)',
                title: m ? `Started ${m[1]}` : 'Module started' }
     }
-    // Silent: llm_call, reasoning, tool_calls, graph_update
+    // Silent: reasoning, tool_calls, graph_update
     default:
       return null
   }

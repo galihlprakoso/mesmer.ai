@@ -61,6 +61,7 @@ async def handle(
     message_text = args.get("message", "")
     log(LogEvent.SEND.value, f"[{module.name}] → {message_text}")
     try:
+        log(LogEvent.TARGET_WAIT.value, f"[{module.name}] waiting for target response")
         reply = await ctx.send(message_text, module_name=module.name)
         log(LogEvent.RECV.value, f"← {reply}")
         last_turn = ctx.turns[-1] if ctx.turns else None

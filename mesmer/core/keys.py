@@ -255,6 +255,11 @@ class KeyPool:
             t0 = time.monotonic()
             timeout = cfg.max_wait_seconds
             if timeout > 0:
+                if self._sem.locked():
+                    logger(
+                        LogEvent.THROTTLE_WAIT.value,
+                        "concurrency cap reached; waiting for an available slot",
+                    )
                 try:
                     await asyncio.wait_for(self._sem.acquire(), timeout=timeout)
                 except asyncio.TimeoutError:
