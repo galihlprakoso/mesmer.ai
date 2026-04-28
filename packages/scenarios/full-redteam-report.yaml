@@ -15,7 +15,7 @@
 #   2. ANTHROPIC_API_KEY set.
 #
 # Usage:
-#   uv run mesmer run scenarios/full-redteam-report.yaml --verbose
+#   uv run mesmer run packages/scenarios/full-redteam-report.yaml --verbose
 
 name: "Full red-team report — dvllm research-l1"
 description: >

@@ -1,14 +1,17 @@
 """Tests for mesmer.core.agent.memory — TargetMemory and GlobalMemory."""
 
 import json
+import os
 from unittest.mock import patch
 
 import pytest
 
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id
+from mesmer.core.belief_graph import BeliefGraph
 from mesmer.core.scenario import TargetConfig
 from mesmer.core.agent.context import Turn
+from mesmer.core.persistence import FileStorageProvider
 
 
 # ---------------------------------------------------------------------------
@@ -81,13 +84,11 @@ class TestTargetMemory:
         """Atomic write means readers never see a half-written file even
         if the writer crashes mid-flush. Simulate a forced failure and
         verify the prior profile.md content stays intact."""
-        from unittest.mock import patch
         # Seed with valid content.
         memory.save_profile("# First\n\nOriginal notes.")
         first_text = memory.profile_path.read_text()
 
-        with patch("mesmer.core.agent.memory.os.replace",
-                   side_effect=OSError("simulated crash")):
+        with patch.object(os, "replace", side_effect=OSError("simulated crash")):
             with pytest.raises(OSError):
                 memory.save_profile("# Second\n\nWould-be overwrite.")
 
@@ -105,6 +106,7 @@ class TestTargetMemory:
 
         loaded = memory.load_artifacts()
         assert loaded.get("operator_notes") == "# Working notes\n"
+        assert (memory.artifacts_dir / "operator_notes.md").exists()
 
     # --- Chat log -------------------------------------------------------
 
@@ -173,6 +175,50 @@ class TestTargetMemory:
         memory.save_graph(g)
         assert memory.exists()
 
+    def test_injected_file_storage_uses_existing_local_layout(self, target_config, tmp_path):
+        storage = FileStorageProvider(tmp_path / ".mesmer")
+        memory = TargetMemory(target_config, storage=storage)
+        g = AttackGraph()
+        g.ensure_root()
+
+        memory.save_graph(g)
+
+        assert memory.graph_path == tmp_path / ".mesmer" / "targets" / memory.target_hash / "graph.json"
+        assert memory.graph_path.exists()
+
+    def test_workspace_id_namespaces_target_memory(self, target_config, tmp_path):
+        storage = FileStorageProvider(tmp_path / ".mesmer")
+        local = TargetMemory(target_config, storage=storage)
+        team = TargetMemory(target_config, storage=storage, workspace_id="team-a")
+
+        local.save_profile("local profile")
+        team.save_profile("team profile")
+
+        assert local.load_profile() == "local profile"
+        assert team.load_profile() == "team profile"
+        assert local.profile_path != team.profile_path
+        assert "workspaces/team-a" in team.profile_path.as_posix()
+
+    def test_belief_graph_uses_injected_storage(self, target_config, tmp_path):
+        storage = FileStorageProvider(tmp_path / ".mesmer")
+        memory = TargetMemory(target_config, storage=storage, workspace_id="team-a")
+        graph = BeliefGraph(target_hash=memory.target_hash)
+
+        memory.save_belief_graph(graph)
+
+        assert memory.has_belief_graph()
+        loaded = memory.load_belief_graph()
+        assert loaded.target_hash == memory.target_hash
+        assert (
+            tmp_path
+            / ".mesmer"
+            / "workspaces"
+            / "team-a"
+            / "targets"
+            / memory.target_hash
+            / "belief_graph.json"
+        ).exists()
+
 
 # ---------------------------------------------------------------------------
 # GlobalMemory
@@ -182,7 +228,28 @@ class TestGlobalMemory:
     @pytest.fixture(autouse=True)
     def patch_global_dir(self, tmp_path):
         with patch.object(GlobalMemory, "base_dir", tmp_path / ".mesmer" / "global"):
-            yield
+            with patch.object(GlobalMemory, "storage_provider", None):
+                with patch.object(GlobalMemory, "workspace_id", "local"):
+                    yield
+
+    def test_workspace_id_namespaces_global_stats(self, tmp_path):
+        storage = FileStorageProvider(tmp_path / ".mesmer")
+        with patch.object(GlobalMemory, "base_dir", tmp_path / ".mesmer" / "global"):
+            with patch.object(GlobalMemory, "storage_provider", storage):
+                with patch.object(GlobalMemory, "workspace_id", "team-a"):
+                    GlobalMemory.save_stats({"a": {"attempts": 1}})
+                    assert GlobalMemory.load_stats() == {"a": {"attempts": 1}}
+                with patch.object(GlobalMemory, "workspace_id", "team-b"):
+                    assert GlobalMemory.load_stats() == {}
+                with patch.object(GlobalMemory, "workspace_id", "team-a"):
+                    assert (
+                        tmp_path
+                        / ".mesmer"
+                        / "workspaces"
+                        / "team-a"
+                        / "global"
+                        / "techniques.json"
+                    ).exists()
 
     def test_load_stats_empty(self):
         stats = GlobalMemory.load_stats()

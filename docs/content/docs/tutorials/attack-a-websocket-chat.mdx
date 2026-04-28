@@ -21,7 +21,7 @@ Pick `websocket` over `rest` when:
 
 ## A scenario template
 
-```yaml title="scenarios/private/streaming-chat.yaml"
+```yaml title="~/.mesmer/workspaces/local/scenarios/streaming-chat.yaml"
 name: "Streaming chat — staging"
 description: Probe the staging chatbot for system-prompt leaks.
 
@@ -86,7 +86,7 @@ agent:
 
 ```bash
 export STAGING_WS_KEY="…"
-uv run mesmer run scenarios/private/streaming-chat.yaml --verbose
+uv run mesmer run ~/.mesmer/workspaces/local/scenarios/streaming-chat.yaml --verbose
 ```
 
 The verbose log shows every frame received with its routing decision —
@@ -111,5 +111,5 @@ unfamiliar protocol.
 
 - [Recipes → Throttling](/docs/recipes/throttling) — WebSocket targets
   often have stricter per-IP caps than REST.
-- The shipped `scenarios/extract-system-prompt-ws.yaml` is a working
+- The shipped `packages/scenarios/extract-system-prompt-ws.yaml` is a working
   reference for the same shape.

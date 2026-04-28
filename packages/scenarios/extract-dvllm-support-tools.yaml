@@ -12,7 +12,7 @@
 #   2. Set ANTHROPIC_API_KEY.
 #
 # Usage:
-#   uv run mesmer run scenarios/extract-dvllm-support-tools.yaml --verbose
+#   uv run mesmer run packages/scenarios/extract-dvllm-support-tools.yaml --verbose
 
 name: "Extract dvllm support-l1 tool catalog (negative control)"
 description: >

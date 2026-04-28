@@ -1,6 +1,7 @@
 """Field-technique module sanity checks.
 
-These tests keep the six tier-0/1 modules under `modules/techniques/field/`
+These tests keep the six tier-0/1 modules under
+`packages/modules/techniques/field/`
 target-agnostic and correctly tiered. Anti-overfit guardrails live here
 because the easiest way to beat a single benchmark is to quietly hardcode
 its canary strings — which would tank generalisation on any other target.
@@ -15,7 +16,11 @@ import pytest
 import yaml
 
 FIELD_ROOT = (
-    Path(__file__).resolve().parent.parent / "modules" / "techniques" / "field"
+    Path(__file__).resolve().parent.parent
+    / "packages"
+    / "modules"
+    / "techniques"
+    / "field"
 )
 
 EXPECTED_MODULES: dict[str, int] = {
@@ -126,7 +131,7 @@ class TestFieldModulesAntiOverfit:
 
 PROFILER_YAML = (
     Path(__file__).resolve().parent.parent
-    / "modules" / "profilers" / "target-profiler" / "module.yaml"
+    / "packages" / "modules" / "profilers" / "target-profiler" / "module.yaml"
 )
 
 # Terms that would re-couple the profiler to the extraction-specific

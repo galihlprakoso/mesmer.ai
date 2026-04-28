@@ -8,6 +8,9 @@
   let loading = true
   let error = null
 
+  $: userScenarios = scenarios.filter((s) => s.source !== 'template')
+  $: templates = scenarios.filter((s) => s.source === 'template')
+
   async function load() {
     loading = true
     error = null
@@ -42,7 +45,7 @@
     <div class="title-row">
       <h2>Scenarios</h2>
       {#if !loading && !error}
-        <span class="count">{scenarios.length} total</span>
+        <span class="count">{userScenarios.length} saved</span>
       {/if}
     </div>
 
@@ -53,19 +56,38 @@
         <p>{error}</p>
         <button class="btn btn-ghost" type="button" on:click={load}>Retry</button>
       </div>
-    {:else if scenarios.length === 0}
-      <div class="empty">
-        <p>No scenarios yet.</p>
-        <button class="btn btn-primary" type="button" on:click={createNew}>
-          Create your first scenario
-        </button>
-      </div>
     {:else}
-      <div class="grid">
-        {#each scenarios as s (s.path)}
-          <ScenarioCard scenario={s} />
-        {/each}
+      {#if userScenarios.length === 0}
+        <div class="empty">
+          <p>No saved scenarios yet.</p>
+          <button class="btn btn-primary" type="button" on:click={createNew}>
+            Create your first scenario
+          </button>
+        </div>
+      {:else}
+        <div class="grid">
+          {#each userScenarios as s (s.path)}
+            <ScenarioCard scenario={s} />
+          {/each}
+        </div>
+      {/if}
+
+      <div class="title-row templates-title">
+        <h2>Templates</h2>
+        <span class="count">{templates.length} available</span>
       </div>
+
+      {#if templates.length === 0}
+        <div class="empty">
+          <p>No templates found.</p>
+        </div>
+      {:else}
+        <div class="grid">
+          {#each templates as s (s.path)}
+            <ScenarioCard scenario={s} />
+          {/each}
+        </div>
+      {/if}
     {/if}
   </main>
 </div>
@@ -157,6 +179,9 @@
     align-items: baseline;
     gap: 12px;
     margin-bottom: 16px;
+  }
+  .templates-title {
+    margin-top: 28px;
   }
   .title-row h2 {
     font-family: var(--font-pixel);

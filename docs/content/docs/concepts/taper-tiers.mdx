@@ -41,7 +41,7 @@ you can inspect which cost levels the executive actually used.
 
 ## Anti-overfit guardrail
 
-Field-technique yamls (`modules/techniques/field/*/module.yaml`) are the
+Field-technique yamls (`packages/modules/techniques/field/*/module.yaml`) are the
 most likely to drift into dataset-specific vocabulary. CI protects
 against that: `tests/test_field_modules_load.py` regex-scans every file
 for banned tokens (`password`, `access code`, `tensor trust`, `canary`,

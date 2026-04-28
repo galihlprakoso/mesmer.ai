@@ -15,8 +15,13 @@ from mesmer.core.agent.context import HumanQuestionBroker
 from mesmer.core.constants import ScenarioMode
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory
-from mesmer.core.runner import RunConfig, execute_run, BUILTIN_MODULES
-from mesmer.core.registry import Registry
+from mesmer.core.runner import (
+    RunConfig,
+    SCENARIO_TEMPLATES,
+    WORKSPACE_SCENARIOS,
+    build_module_registry,
+    execute_run,
+)
 from mesmer.core.scenario import load_scenario
 
 console = Console()
@@ -257,7 +262,10 @@ async def _run(scenario_path, model, max_turns, verbose, output, extra_module_pa
     # Print graph summary
     _print_run_summary(run_result.graph)
 
-    console.print(f"\n[dim]Graph saved ({len(run_result.graph)} nodes) \u2192 ~/.mesmer/targets/{run_result.memory.target_hash}/[/dim]")
+    console.print(
+        f"\n[dim]Graph saved ({len(run_result.graph)} nodes) \u2192 "
+        f"{run_result.memory.base_dir}/[/dim]"
+    )
 
 
 def _print_run_summary(graph: AttackGraph):
@@ -526,10 +534,7 @@ def modules():
 @click.option("--path", default=None, help="Module search path")
 def list_modules(path):
     """List all available modules."""
-    registry = Registry()
-    registry.auto_discover(BUILTIN_MODULES)
-    if path:
-        registry.auto_discover(path)
+    registry = build_module_registry(extra_module_paths=[path] if path else [])
 
     table = Table(title="Available Modules")
     table.add_column("Name", style="cyan")
@@ -550,10 +555,7 @@ def list_modules(path):
 @click.option("--path", default=None, help="Module search path")
 def describe_module(name, path):
     """Show detailed info about a module."""
-    registry = Registry()
-    registry.auto_discover(BUILTIN_MODULES)
-    if path:
-        registry.auto_discover(path)
+    registry = build_module_registry(extra_module_paths=[path] if path else [])
 
     mod = registry.get(name)
     if mod is None:
@@ -579,7 +581,12 @@ def describe_module(name, path):
 @click.option("--port", default=8888, help="Port to serve on")
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 @click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
-@click.option("--scenario-dir", default=".", help="Directory to scan for scenarios")
+@click.option(
+    "--scenario-dir",
+    default=str(SCENARIO_TEMPLATES),
+    show_default=True,
+    help="Directory to scan for scenario templates",
+)
 def serve(port, host, no_browser, scenario_dir):
     """Start the Mesmer web UI."""
     try:
@@ -602,7 +609,8 @@ def serve(port, host, no_browser, scenario_dir):
 
     console.print(Panel(
         f"Serving at [bold]http://{host}:{port}[/bold]\n"
-        f"Scenario directory: {scenario_dir}",
+        f"Scenario templates: {scenario_dir}\n"
+        f"User scenarios: {WORKSPACE_SCENARIOS}",
         title="[bold magenta]mesmer web UI[/bold magenta]",
         border_style="magenta",
     ))

@@ -111,15 +111,15 @@ The important idea: Mesmer separates the red-team loop from the target. You can 
 uv sync
 export ANTHROPIC_API_KEY=your-key-here
 
-uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
-uv run mesmer graph show scenarios/extract-system-prompt.yaml
-uv run mesmer debrief scenarios/extract-system-prompt.yaml
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --verbose
+uv run mesmer graph show packages/scenarios/extract-system-prompt.yaml
+uv run mesmer debrief packages/scenarios/extract-system-prompt.yaml
 ```
 
 Guide the next run with a human observation:
 
 ```bash
-uv run mesmer run scenarios/extract-system-prompt.yaml \
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml \
   --hint "the target shares design principles when framed as educational"
 ```
 
@@ -145,7 +145,7 @@ uv run mesmer serve
 Human hints are first-class:
 
 ```bash
-uv run mesmer hint scenarios/extract-system-prompt.yaml \
+uv run mesmer hint packages/scenarios/extract-system-prompt.yaml \
   "try asking about calendar API errors; the target softened there"
 ```
 
@@ -221,8 +221,8 @@ Benchmark success is decided by deterministic code judges from the spec, not by 
 flowchart TD
   Repo["mesmer repo"]
   Runtime["mesmer/<br/>runtime, agents, target adapters, CLI, web backend"]
-  Modules["modules/<br/>YAML attacks, profilers, planners, techniques"]
-  Scenarios["scenarios/<br/>runnable target configs"]
+  Modules["packages/modules<br/>shipped module catalog"]
+  Scenarios["packages/scenarios<br/>shipped scenario templates"]
   Bench["benchmarks/<br/>specs, datasets, results"]
   Docs["docs/<br/>landing page + documentation site"]
   Tests["tests/<br/>unit and integration tests"]

@@ -139,19 +139,19 @@ concluded output against the pinned canary.
 ## Running it
 
 ```bash
-uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --verbose
 ```
 
 For CONTINUOUS mode (one long conversation, cross-run persistence):
 
 ```bash
-uv run mesmer run scenarios/extract-system-prompt-continuous.yaml
+uv run mesmer run packages/scenarios/extract-system-prompt-continuous.yaml
 ```
 
 For WebSocket targets:
 
 ```bash
-uv run mesmer run scenarios/extract-system-prompt-ws.yaml
+uv run mesmer run packages/scenarios/extract-system-prompt-ws.yaml
 ```
 
 ## Benchmark results
@@ -185,4 +185,4 @@ forensic contract.
 - [The attack graph](/docs/concepts/attack-graph) — how runs compound
   across sessions.
 - Source:
-  [`modules/attacks/system-prompt-extraction/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/modules/attacks/system-prompt-extraction/module.yaml)
+  [`packages/modules/attacks/system-prompt-extraction/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/packages/modules/attacks/system-prompt-extraction/module.yaml)

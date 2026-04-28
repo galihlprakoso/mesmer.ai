@@ -22,7 +22,7 @@ no separate Ollama adapter needed.
 
 ## Scenario
 
-```yaml title="scenarios/private/local-llama.yaml"
+```yaml title="~/.mesmer/workspaces/local/scenarios/local-llama.yaml"
 name: "Local Llama 3.1 — system prompt extraction"
 description: Probe a local Llama 3.1 8B with a system-prompt to extract.
 
@@ -69,7 +69,7 @@ A few subtleties:
 ## Run
 
 ```bash
-uv run mesmer run scenarios/private/local-llama.yaml --verbose
+uv run mesmer run ~/.mesmer/workspaces/local/scenarios/local-llama.yaml --verbose
 ```
 
 Two things to watch:

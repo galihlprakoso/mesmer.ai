@@ -19,11 +19,11 @@
 # Usage:
 #   export ANTHROPIC_API_KEY=your-claude-key
 #   export OPENROUTER_API_KEY=your-target-provider-key
-#   mesmer run scenarios/extract-system-prompt-continuous.yaml --verbose
+#   mesmer run packages/scenarios/extract-system-prompt-continuous.yaml --verbose
 #   # second run picks up where the first left off:
-#   mesmer run scenarios/extract-system-prompt-continuous.yaml --verbose
+#   mesmer run packages/scenarios/extract-system-prompt-continuous.yaml --verbose
 #   # start a clean conversation:
-#   mesmer run scenarios/extract-system-prompt-continuous.yaml --fresh
+#   mesmer run packages/scenarios/extract-system-prompt-continuous.yaml --fresh
 
 name: "Extract System Prompt (continuous)"
 description: >

@@ -21,8 +21,8 @@ through manager `sub_modules:` lists.
 | Role | Authored? | Runs at | Tools |
 |---|---|---|---|
 | **Executive** | No — synthesised by the runner from `scenario.modules` | depth 0 | `talk_to_operator`, artifact tools, `ask_human`, manager-dispatch tools, `conclude` |
-| **Manager** | Yes — `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | depth 1 | Policy-defined; usually sub-module dispatch, artifact tools, `conclude` |
-| **Employee** | Yes — anywhere under `modules/`, referenced via a manager's `sub_modules:` | depth ≥ 2 | same as manager (recursive) |
+| **Manager** | Yes — `packages/modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | depth 1 | Policy-defined; usually sub-module dispatch, artifact tools, `conclude` |
+| **Employee** | Yes — anywhere under `packages/modules/`, referenced via a manager's `sub_modules:` | depth ≥ 2 | same as manager (recursive) |
 
 The executive never talks to the target — it dispatches managers.
 Managers and employees never talk to the operator — only the executive
@@ -31,7 +31,7 @@ below.
 
 ## Annotated example
 
-```yaml title="scenarios/extract-system-prompt.yaml"
+```yaml title="packages/scenarios/extract-system-prompt.yaml"
 name: "Extract System Prompt"
 description: >
   Probe an OpenAI-compatible target to reveal its hidden instructions.
@@ -289,7 +289,7 @@ modules:
   - email-exfiltration-proof   # then validate the email side effect
 ```
 
-`scenarios/full-redteam-report.yaml` is the canonical example —
+`packages/scenarios/full-redteam-report.yaml` is the canonical example —
 recon → tool catalog → injection proof, single scenario.
 
 ## Artifacts and operator notes
@@ -348,7 +348,7 @@ Audit your manager prompts for residual operator-tool mentions.
 
 ## Where scenarios live
 
-- `scenarios/*.yaml` — shipped examples, checked into git.
+- `packages/scenarios/*.yaml` — shipped scenario templates, checked into git.
   - `extract-system-prompt.yaml` — OpenAI-compatible target, TRIALS mode.
   - `extract-system-prompt-ws.yaml` — WebSocket target.
   - `extract-system-prompt-continuous.yaml` — CONTINUOUS mode variant.
@@ -356,14 +356,15 @@ Audit your manager prompts for residual operator-tool mentions.
   - `extract-dvllm-support-tools.yaml` — negative control: support-l1 has no tools.
   - `extract-system-and-tools.yaml` — chained: system-prompt then tool-extraction.
   - `full-redteam-report.yaml` — recon → analysis → catalog (three managers).
-- `scenarios/private/*.yaml` — **gitignored**. Put scenarios that
-  reference real production targets here.
+- `~/.mesmer/workspaces/local/scenarios/*.yaml` — local user scenarios.
+  The web editor writes here, and a future cloud version can map this
+  workspace catalog to database rows.
 
 ## Editing in the browser
 
 `mesmer serve` ships a scenario editor with a two-tab Form / YAML view,
 debounced validation against `core.scenario.load_scenario`, a 20-deep
 undo stack, and a vibe-code chat panel that proposes YAML edits inline.
-Saving writes to `scenarios/private/{slug}.yaml`. See
+Saving writes to `~/.mesmer/workspaces/local/scenarios/{slug}.yaml`. See
 [Recipes → The web editor](/docs/recipes/the-web-editor) for the full
 walkthrough.

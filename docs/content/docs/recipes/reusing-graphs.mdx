@@ -57,14 +57,14 @@ neighbours.
 ## Reading the graph between runs
 
 ```bash
-uv run mesmer graph show scenarios/extract-system-prompt.yaml
+uv run mesmer graph show packages/scenarios/extract-system-prompt.yaml
 ```
 
 …prints node summaries: module, score, status, source, and the
 `approach` text. Filter dead-ends:
 
 ```bash
-uv run mesmer graph show scenarios/extract-system-prompt.yaml --status PROMISING
+uv run mesmer graph show packages/scenarios/extract-system-prompt.yaml --status PROMISING
 ```
 
 …and check which techniques the planner currently considers viable.

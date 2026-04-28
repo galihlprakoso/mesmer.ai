@@ -1455,8 +1455,16 @@ class BeliefGraph:
         complete — every delta that was applied in-order rebuilds the
         same state.
         """
+        return cls.replay_jsonl(
+            delta_log_path.read_text(encoding="utf-8"),
+            target_hash=target_hash,
+        )
+
+    @classmethod
+    def replay_jsonl(cls, data: str, *, target_hash: str = "") -> BeliefGraph:
+        """Reconstruct a graph by replaying JSONL delta content."""
         graph = cls(target_hash=target_hash)
-        for line in delta_log_path.read_text(encoding="utf-8").splitlines():
+        for line in data.splitlines():
             line = line.strip()
             if not line:
                 continue

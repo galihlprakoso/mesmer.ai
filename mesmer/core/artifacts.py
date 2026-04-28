@@ -436,6 +436,44 @@ class ArtifactStore:
                 docs[artifact_id] = path.read_text(encoding="utf-8")
         return cls(docs)
 
+    def to_storage(self, storage, prefix: str) -> None:
+        """Persist artifacts via a storage provider.
+
+        ``prefix`` is the directory-like storage key that contains
+        ``{artifact_id}.md`` files. The on-disk shape remains identical to
+        :meth:`to_files`; only the IO backend changes.
+        """
+        from mesmer.core.persistence import join_storage_key
+
+        existing: set[str] = set()
+        for key in storage.list_files(prefix, suffix=ARTIFACT_FILE_SUFFIX):
+            stem = Path(key).stem
+            try:
+                existing.add(validate_artifact_id(stem))
+            except ArtifactError:
+                continue
+        current = set(self._docs)
+        for stale in existing - current:
+            storage.delete(join_storage_key(prefix, f"{stale}{ARTIFACT_FILE_SUFFIX}"))
+        for artifact_id, content in self._docs.items():
+            key = join_storage_key(prefix, f"{artifact_id}{ARTIFACT_FILE_SUFFIX}")
+            if content.strip():
+                storage.write_text(key, content)
+            else:
+                storage.delete(key, missing_ok=True)
+
+    @classmethod
+    def from_storage(cls, storage, prefix: str) -> "ArtifactStore":
+        """Load artifacts via a storage provider."""
+        docs: dict[str, str] = {}
+        for key in storage.list_files(prefix, suffix=ARTIFACT_FILE_SUFFIX):
+            try:
+                artifact_id = validate_artifact_id(Path(key).stem)
+            except ArtifactError:
+                continue
+            docs[artifact_id] = storage.read_text(key)
+        return cls(docs)
+
     @staticmethod
     def _section_chunks(markdown: str) -> list[tuple[str, str]]:
         lines = (markdown or "").splitlines()

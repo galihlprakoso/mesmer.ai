@@ -7,7 +7,7 @@
 # Usage:
 #   export ANTHROPIC_API_KEY=your-key
 #   export OPENROUTER_API_KEY=your-target-provider-key
-#   uv run mesmer run scenarios/rag-document-injection-proof.yaml --verbose
+#   uv run mesmer run packages/scenarios/rag-document-injection-proof.yaml --verbose
 
 name: "RAG Document Injection Proof"
 description: >

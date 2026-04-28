@@ -32,7 +32,7 @@ export OPENROUTER_API_KEY="sk-or-…"
 ## 3. Run the shipped scenario
 
 ```bash
-uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --verbose
 ```
 
 You'll see five things scroll past in this order:
@@ -54,7 +54,7 @@ target is rate-limiting — see [Recipes → Throttling](/docs/recipes/throttlin
 ## 4. Read what just happened
 
 ```bash
-uv run mesmer graph show scenarios/extract-system-prompt.yaml
+uv run mesmer graph show packages/scenarios/extract-system-prompt.yaml
 ```
 
 Each row is one `AttackNode`: the module, its judge score, lifecycle
@@ -85,7 +85,7 @@ is one source of truth.
 ## 6. Re-run, observe the warm start
 
 ```bash
-uv run mesmer run scenarios/extract-system-prompt.yaml
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml
 ```
 
 Note `[ hydrate graph ]` now reports nodes from the previous run, and
@@ -94,7 +94,7 @@ Module Conversation History pre-loads prior `target-profiler` and
 `attack-planner` outputs (latest wins for ordered gates), and modules
 also see the artifact contract and artifact brief.
 
-To wipe state: `mesmer graph reset scenarios/extract-system-prompt.yaml`,
+To wipe state: `mesmer graph reset packages/scenarios/extract-system-prompt.yaml`,
 or pass `--fresh` to bypass loading without deleting.
 
 ## What's next

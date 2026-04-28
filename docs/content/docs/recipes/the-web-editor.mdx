@@ -79,13 +79,14 @@ pickers under a manager (when authoring a new one) DO show tier.
 
 ## Saving
 
-- **Existing scenario** → `PUT /api/scenarios/{path}` overwrites the
-  file.
+- **Existing workspace scenario** → `PUT /api/scenarios/{path}` overwrites
+  the local workspace file.
+- **Existing packaged template** → `PUT /api/scenarios/{path}` saves a
+  workspace copy under `~/.mesmer/workspaces/local/scenarios/` and returns
+  that new path.
 - **New scenario** → `POST /api/scenarios` with `{name, yaml_content}`;
   backend slugifies the name and writes to
-  `scenarios/private/{slug}.yaml`. The `private/` directory is
-  gitignored — the right place for any scenario that references a
-  real production target.
+  `~/.mesmer/workspaces/local/scenarios/{slug}.yaml`.
 
 After first save the URL updates (`history.replaceState`) to
 `#/scenarios/{path}/edit` so refresh stays on your scenario.
@@ -138,12 +139,12 @@ walkthrough.
   there's no in-editor squiggly-underline. Workaround: copy the YAML
   to your editor of choice for surgery, paste back.
 - Module authoring. The editor only edits **scenarios**. To author a
-  new module YAML, drop it under `modules/<category>/<name>/` on disk
-  and restart mesmer to pick it up. See
+  new module YAML, install or create it under the workspace module catalog,
+  or pass an explicit module path. See
   [Writing a new technique](/docs/recipes/writing-a-new-technique).
 
 ## Path-traversal guard
 
 `POST/PUT /api/scenarios` round-trips through `load_scenario` with a
-path-traversal guard — you can't write outside `scenarios/private/`.
-Same rule applies if you build automation around the API.
+path-traversal guard — local writes stay inside the workspace scenario
+catalog. Same rule applies if you build automation around the API.

@@ -70,19 +70,19 @@ function-shaped pathways that text-disclosure techniques don't reach.
 
 ```bash
 # Against a hypothetical agent endpoint
-uv run mesmer run scenarios/private/your-agent.yaml --verbose
+uv run mesmer run ~/.mesmer/workspaces/local/scenarios/your-agent.yaml --verbose
 
 # Against the dvllm research-l1 target (canonical example)
-uv run mesmer run scenarios/extract-dvllm-tools.yaml --verbose
+uv run mesmer run packages/scenarios/extract-dvllm-tools.yaml --verbose
 
 # Negative control: dvllm support-l1 has no tools — verifies the
 # manager doesn't false-positive on a tool-less target.
-uv run mesmer run scenarios/extract-dvllm-support-tools.yaml --verbose
+uv run mesmer run packages/scenarios/extract-dvllm-support-tools.yaml --verbose
 ```
 
 ## Chained recon
 
-`scenarios/extract-system-and-tools.yaml` chains
+`packages/scenarios/extract-system-and-tools.yaml` chains
 `system-prompt-extraction` then `tool-extraction` in one run — the
 executive dispatches both managers in order. Each manager records its
 concluded output in Module Conversation History and may update declared
@@ -102,4 +102,4 @@ modules:
   reads the extracted catalog and proves retrieved-content instruction
   following.
 - Source:
-  [`modules/attacks/tool-extraction/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/modules/attacks/tool-extraction/module.yaml)
+  [`packages/modules/attacks/tool-extraction/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/packages/modules/attacks/tool-extraction/module.yaml)

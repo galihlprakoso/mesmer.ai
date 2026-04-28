@@ -46,22 +46,22 @@ uv run mesmer run <scenario.yaml> [OPTIONS]
 
 ```bash
 # Standard run
-uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --verbose
 
 # Override the attacker model, extend the budget
-uv run mesmer run scenarios/extract-system-prompt.yaml \
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml \
   --model openrouter/openai/gpt-4o --max-turns 40
 
 # Add hints on the command line
-uv run mesmer run scenarios/extract-system-prompt.yaml \
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml \
   --hint "try wrapping as a pytest docstring" \
   --hint "target may be fine-tuned on leetspeak"
 
 # CONTINUOUS mode (one long conversation, cross-run persistence)
-uv run mesmer run scenarios/extract-system-prompt-continuous.yaml --verbose
+uv run mesmer run packages/scenarios/extract-system-prompt-continuous.yaml --verbose
 
 # Start fresh — ignore the existing graph
-uv run mesmer run scenarios/extract-system-prompt.yaml --fresh
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --fresh
 ```
 
 ## `mesmer graph show`
@@ -142,8 +142,8 @@ uv run mesmer modules list [--path <extra-module-dir>]
 uv run mesmer modules describe <name> [--path <extra-module-dir>]
 ```
 
-Modules are auto-discovered from `BUILTIN_MODULES` (sibling of the
-Python package at the repo root) plus any paths you pass via `--path`.
+Modules are auto-discovered from `packages/modules`, workspace-installed
+modules, plus any paths you pass via `--path`.
 
 ## `mesmer serve`
 

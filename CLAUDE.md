@@ -16,10 +16,10 @@ uv sync
 uv sync --extra web          # Pulls FastAPI + uvicorn for the web interface
 
 # CLI — primary entry point (`mesmer` console script → interfaces.cli:cli)
-uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
-uv run mesmer graph show scenarios/extract-system-prompt.yaml   # also: graph reset
-uv run mesmer hint scenarios/extract-system-prompt.yaml "try X"
-uv run mesmer debrief scenarios/extract-system-prompt.yaml
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --verbose
+uv run mesmer graph show packages/scenarios/extract-system-prompt.yaml   # also: graph reset
+uv run mesmer hint packages/scenarios/extract-system-prompt.yaml "try X"
+uv run mesmer debrief packages/scenarios/extract-system-prompt.yaml
 uv run mesmer stats
 uv run mesmer modules list                 # also: modules describe <name>
 uv run mesmer serve                        # launch web UI (requires --extra web)
@@ -249,7 +249,7 @@ mesmer/                          # repo root
 │       └── web/
 │           ├── backend/         # FastAPI + SSE (server.py) + events schema
 │           │                    #   Scenario CRUD lives here too — POST/PUT
-│           │                    #   /api/scenarios writes to scenarios/private/
+│           │                    #   /api/scenarios writes to ~/.mesmer/workspaces/local/scenarios/
 │           │                    #   and round-trips through load_scenario for
 │           │                    #   path-traversal-guarded validation.
 │           └── frontend/        # Svelte 5 SPA, hash router, three views
@@ -272,7 +272,7 @@ mesmer/                          # repo root
 │               #       the synthesised executive does not appear here
 │               # Dependency: js-yaml for form↔YAML conversion (no Monaco)
 │
-├── modules/                     # built-in attack modules (sibling of the package)
+├── packages/modules/            # built-in attack modules
 │   ├── attacks/                 # MANAGER modules: thin orchestrators that
 │   │   │                        #   delegate to profilers/planners/techniques.
 │   │   │                        #   Listed in scenario.modules; the executive
@@ -317,7 +317,7 @@ mesmer/                          # repo root
 │           ├── handoff-side-effect-proof/module.yaml # tier 2 — dry-run handoff side-effect proof
 │           └── cart-link-side-effect-proof/module.yaml # tier 2 — dry-run cart/link artifact proof
 │
-├── scenarios/                   # YAML scenario files (target + attacker + modules)
+├── packages/scenarios/          # shipped scenario templates
 │   ├── extract-system-prompt.yaml          # baseline: openai-compat target
 │   ├── extract-system-prompt-ws.yaml       # WebSocket target adapter
 │   ├── extract-system-prompt-continuous.yaml  # mode: continuous
@@ -887,7 +887,7 @@ TAP (arXiv 2312.02119), PAIR (arXiv 2310.08419), GPTFuzzer
 
 ### Everything is a module; every module is a ReAct agent
 
-A module is a `module.yaml` (declarative: system prompt + sub-module list). `Registry.auto_discover()` walks a module root, recursing into subdirectories, and any directory containing `module.yaml` becomes a registered module. Built-in modules live in the top-level `modules/` directory — **sibling of the `mesmer/` package, not inside it**. `BUILTIN_MODULES` in `core/runner.py` resolves this path.
+A module is a `module.yaml` (declarative: system prompt + sub-module list). The module registry composes packaged builtins, workspace modules, and explicit local paths. Built-in modules live in `packages/modules`; workspace modules live under `~/.mesmer/workspaces/{workspace}/modules`.
 
 Sub-modules are exposed to the parent agent as OpenAI-style function-calling tools. The parent delegates; each sub-module runs its own nested ReAct loop and returns a string result.
 
@@ -899,8 +899,8 @@ Sub-modules are exposed to the parent agent as OpenAI-style function-calling too
 | Role | Authored? | Depth | Tools |
 |---|---|---|---|
 | **Executive** | No — synthesized by `runner.execute_run` | 0 | Policy-defined: operator tools, manager dispatch, `update_artifact`, `conclude` |
-| **Manager** | YES — in `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, `update_artifact`, `conclude` |
-| **Employee** | YES — anywhere under `modules/`, referenced via a manager's `sub_modules:` | ≥ 2 | Policy-defined: usually `send_message`, `conclude` |
+| **Manager** | YES — in `packages/modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, `update_artifact`, `conclude` |
+| **Employee** | YES — anywhere under `packages/modules/`, referenced via a manager's `sub_modules:` | ≥ 2 | Policy-defined: usually `send_message`, `conclude` |
 
 The executive is the only role that talks to the operator. Managers and employees talk to the target only when their `ToolPolicySpec` grants `send_message`. Tool gating is declarative: `build_tool_list()` materializes `actor.tool_policy`.
 
@@ -1191,7 +1191,7 @@ Out-of-range tiers raise `InvalidModuleConfig` at load time — typoed YAML fail
 
 `Registry.tier_of(name)` / `tiers_for(names)` are the canonical tier lookups.
 
-Anti-overfit guardrail: `tests/test_field_modules_load.py` regex-scans every `modules/techniques/field/*/module.yaml` for banned dataset-specific tokens (`password`, `access code`, `tensor trust`, `canary`, `pre_prompt`, `post_prompt`). The same file's `TestTargetProfilerDecoupling` class ALSO scans `modules/profilers/target-profiler/module.yaml` for both those dataset tokens AND scenario/manager-coupling tokens like `"extract the system prompt"`, `"attack modules handle"`, or hardcoded sibling-module names (`direct-ask`, `foot-in-door`, …). A dataset-specific term OR a manager-specific coupling in the profiler fails CI — keeps the profiler a generic reconnaissance module instead of a system-prompt-extraction specialist.
+Anti-overfit guardrail: `tests/test_field_modules_load.py` regex-scans every `packages/modules/techniques/field/*/module.yaml` for banned dataset-specific tokens (`password`, `access code`, `tensor trust`, `canary`, `pre_prompt`, `post_prompt`). The same file's `TestTargetProfilerDecoupling` class ALSO scans `packages/modules/profilers/target-profiler/module.yaml` for both those dataset tokens AND scenario/manager-coupling tokens like `"extract the system prompt"`, `"attack modules handle"`, or hardcoded sibling-module names (`direct-ask`, `foot-in-door`, …). A dataset-specific term OR a manager-specific coupling in the profiler fails CI — keeps the profiler a generic reconnaissance module instead of a system-prompt-extraction specialist.
 
 ### Per-trial tracing (`bench/trace.py`)
 
@@ -1382,9 +1382,9 @@ The bench `--verbose` CLI flag does two things: (1) writes every event to `event
   | Method | Path | Purpose |
   |---|---|---|
   | GET | `/` | landing redirect |
-  | GET | `/api/scenarios` | list scenarios (recurses `scenarios/`) |
+  | GET | `/api/scenarios` | list packaged templates plus workspace scenarios |
   | GET | `/api/scenarios/{name:path}` | fetch one scenario YAML |
-  | POST | `/api/scenarios` | create — slugifies, writes to `scenarios/private/{slug}.yaml` |
+  | POST | `/api/scenarios` | create — slugifies, writes to `~/.mesmer/workspaces/local/scenarios/{slug}.yaml` |
   | PUT | `/api/scenarios/{name:path}` | update existing scenario |
   | POST | `/api/scenarios/validate` | dry-run `load_scenario` against temp file |
   | POST | `/api/scenario-editor-chat` | vibe-code chat — returns `{reply, updated_yaml}` |
@@ -1402,7 +1402,7 @@ The bench `--verbose` CLI flag does two things: (1) writes every event to `event
   | POST | `/api/debrief` | generate a per-target run debrief |
   | WS  | `/ws` | unified event stream — log + graph_update + key_status + chat |
 
-  Scenario CRUD writes to `scenarios/private/` (gitignored) and round-trips through `load_scenario` for path-traversal-guarded validation. The vibe-code chat is decoupled from the scenario's `agent.model` — it reads `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) directly from env so blank scenarios still work.
+  Scenario CRUD writes user scenarios to `~/.mesmer/workspaces/local/scenarios/` and round-trips through `load_scenario` for path-traversal-guarded validation. Packaged templates in `packages/scenarios/` are copied into the workspace on edit. The vibe-code chat is decoupled from the scenario's `agent.model` — it reads `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) directly from env so blank scenarios still work.
 
 Both interfaces go through `core/runner.execute_run(RunConfig, ...)`. When adding run-level behavior, change `runner.py` so CLI and web stay in sync; the logging protocol is `LogFn = Callable[[str, str], None]` (event name from `LogEvent`, detail string).
 
@@ -1424,9 +1424,9 @@ Both interfaces go through `core/runner.execute_run(RunConfig, ...)`. When addin
 - Form tab two-way binds to YAML via `js-yaml` in `components/ScenarioForm.svelte::yamlToForm` / `formToYaml`. Form mutations regenerate the YAML; YAML edits parse back into the form (latest write wins).
 - Validation badge calls `POST /api/scenarios/validate` debounced 500ms; the endpoint runs `core.scenario.load_scenario` against a temp file and surfaces the loader's exception text verbatim. **Don't add a parallel YAML validator on the frontend** — the loader is the source of truth.
 - AI chat (`components/EditorChat.svelte`) calls `POST /api/scenario-editor-chat` with current YAML + message + history. Backend returns `{reply, updated_yaml}` parsed via `parse_llm_json`. When `updated_yaml` is non-null the editor pushes the prior YAML onto a 20-deep undo stack and replaces the current value. Undo button pops the stack. The chat is decoupled from the scenario's `agent.model` — it reads `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) directly from env so blank scenarios still work.
-- Save: existing scenario → `PUT /api/scenarios/{path}`. New scenario → `POST /api/scenarios` with `{name, yaml_content}`; backend slugifies and writes to `scenarios/private/{slug}.yaml`. After first save the editor calls `history.replaceState` to update the URL to `#/scenarios/{path}/edit`.
+- Save: existing workspace scenario → `PUT /api/scenarios/{path}`. New scenario → `POST /api/scenarios` with `{name, yaml_content}`; backend slugifies and writes to `~/.mesmer/workspaces/local/scenarios/{slug}.yaml`. Editing a packaged template saves a workspace copy and returns the new path.
 
-**Module picker grouping** (`components/ScenarioForm.svelte`): the manager picker (the form field that drives `modules:` in the YAML) groups by `Registry.categories` (top-level subdir under `modules/`: `attacks`, `planners`, `profilers`, `techniques`) using `<optgroup>`. Tier is intentionally NOT shown for the manager picker — managers run at depth 1 and the executive's tier-0 framing already covers the ladder. Categories live on the Registry, not on `ModuleConfig`; populated during `auto_discover` and exposed via `Registry.category_of(name)` + the `category` field in `Registry.list_modules()`. The form supports adding multiple managers (the YAML round-trips as a list).
+**Module picker grouping** (`components/ScenarioForm.svelte`): the manager picker (the form field that drives `modules:` in the YAML) groups by `Registry.categories` (top-level subdir under `packages/modules/`: `attacks`, `planners`, `profilers`, `techniques`) using `<optgroup>`. Tier is intentionally NOT shown for the manager picker — managers run at depth 1 and the executive's tier-0 framing already covers the ladder. Categories live on the Registry, not on `ModuleConfig`; populated during catalog loading and exposed via `Registry.category_of(name)` + the `category` field in `Registry.list_modules()`. The form supports adding multiple managers (the YAML round-trips as a list).
 
 **Module browser** (`components/ModuleBrowser.svelte`) is manager-rooted: each manager (any module with non-empty `sub_modules`) renders as a parent row with its sub-modules nested beneath; modules referenced by no manager fall into a "Standalone" group. A sub-module referenced by multiple managers appears under each — that's intentional so the tree truthfully reflects the registry. Don't dedupe. The synthesised executive is **not** rendered in the browser (it doesn't exist on disk).
 
@@ -1518,7 +1518,7 @@ These are consumed by `bench/trace.py` to build per-trial telemetry + the `event
 
 Authored modules become **managers** (depth 1, listed in `scenario.modules`) or **employees** (depth >= 2, referenced via a manager's `sub_modules:`). They never become executives — the executive is synthesised by the runner at run start as an `ExecutiveSpec` and adapted to `ReactActorSpec`.
 
-1. Create `modules/<category>/<name>/module.yaml`:
+1. Create `packages/modules/<category>/<name>/module.yaml` for shipped modules, or use the workspace module catalog for user modules:
    ```yaml
    name: my-technique
    tier: 2                  # 0=naive · 1=structural · 2=cognitive (default) · 3=composed
@@ -1593,8 +1593,8 @@ rejected. If you reach for one of these, stop — it's a hallucination trap.
 | `module: <name>` (singular) in scenario YAML | Removed (replaced by `modules: [<name>, ...]`) | `load_scenario` raises `ValueError` if it sees the legacy field. Migrate by wrapping the single name in a list. The synthesised executive owns the depth-0 spot. |
 | `Scenario.module` (singular attribute) | Replaced by `Scenario.modules: list[str]` | Read `scenario.modules` for the list of manager names. There is no canonical "leader name" attribute — the executive is named at runtime as `f"{stem}:executive"`. |
 | Authored-module executive flags | Removed/pointless | The runtime executive is an `ExecutiveSpec` / `ReactActorSpec(role=EXECUTIVE)`, not a `ModuleConfig`. Authored YAML cannot make an executive. |
-| `modules/attacks/persona-break` · `safety-bypass` | Never created | Five managers ship today: `system-prompt-extraction`, `tool-extraction`, `indirect-prompt-injection`, `rag-document-injection-proof`, `email-exfiltration-proof`. If you need another, author it from scratch; don't pretend a placeholder exists. |
-| `modules/techniques/ericksonian` · `architecture` | Never created | Same — no placeholder directories exist. Add a real module.yaml or don't. |
+| `packages/modules/attacks/persona-break` · `safety-bypass` | Never created | Five managers ship today: `system-prompt-extraction`, `tool-extraction`, `indirect-prompt-injection`, `rag-document-injection-proof`, `email-exfiltration-proof`. If you need another, author it from scratch; don't pretend a placeholder exists. |
+| `packages/modules/techniques/ericksonian` · `architecture` | Never created | Same — no placeholder directories exist. Add a real module.yaml or don't. |
 | `OBJECTIVE MET — <fragment>` string marker in module / spec / scenario prompts | Removed in favour of typed `conclude(objective_met=true)` arg | Use the bool param. The string was an LLM pattern-match magnet — sub-modules copied it verbatim and called `OBJECTIVE MET — <wrong fragment>`. Never write that string into a module's `system_prompt` or a scenario `objective:` block. |
 | `JudgeResult.objective_met` propagation to `ctx.objective_met` in `evaluation.py` | Removed (judge is advisory only) | The executive's own `conclude(objective_met=true)` call sets ctx. Judge's verdict surfaces as a tool_result advisory; the termination decision lives at the executive. |
 
@@ -1609,7 +1609,7 @@ wins. Fix CLAUDE.md in the same change.
 - **`Turn.kind` JSON round-trip** — `Turn.to_dict` emits the string (via `TurnKind.SUMMARY.value`); `Turn.__post_init__` accepts a string and coerces back to the enum, so old JSON files load cleanly.
 - **CONTINUOUS mode forces `reset_target=False`.** If a module declares `reset_target: true` and the scenario is CONTINUOUS, the reset is skipped and `LogEvent.MODE_OVERRIDE` is logged.
 - **The in-loop LLM judge is NOT authoritative for benchmarks.** Its score guides the next move and frontier generation; benchmark success is decided by `bench/canary.py::judge_trial_success` in a separate post-run pass that scans the executive's concluded output (`RunResult.result`). An accidental canary leak in a manager / employee turn that the executive never packaged into its verdict text does NOT count — that's the whole point of leader-grounded scoring (the term "leader-grounded" persists from the source-enum name; mechanically it's the executive's `conclude` text that's scanned).
-- **Tier defaults matter for legacy YAMLs.** A `module.yaml` without a `tier:` field defaults to 2 (cognitive). Field-technique modules in `modules/techniques/field/` declare tier 0/1 explicitly. Out-of-range (<0 or >3) raises `InvalidModuleConfig` — silent collapse to default would mask typos.
+- **Tier defaults matter for legacy YAMLs.** A `module.yaml` without a `tier:` field defaults to 2 (cognitive). Field-technique modules in `packages/modules/techniques/field/` declare tier 0/1 explicitly. Out-of-range (<0 or >3) raises `InvalidModuleConfig` — silent collapse to default would mask typos.
 - **Graph snapshot is trial-scoped, persistence is cross-run.** `benchmarks/results/{date}/events/{trial_id}.graph.json` contains only this run's nodes + root (diffable, scoped). `~/.mesmer/targets/{hash}/graph.json` is the cross-run accumulator (full history per target). They don't serve the same purpose — don't compare them.
 - **`bench --verbose` ≠ trace capture.** The events file is written every run. `--verbose` only controls whether events are also teed to the terminal. If you're looking for the trace post-hoc, always check `benchmarks/results/{date}/events/` first.
 - **`module: <name>` in scenario YAML hard-fails.** The legacy single-field schema was replaced by `modules: [<name>, ...]` and the runner now synthesises an executive at depth 0. `load_scenario` raises `ValueError` with a one-line migration hint when it sees the legacy field — fix the YAML, don't shim the loader. A YAML carrying both `module:` and `modules:` also fails (ambiguous).

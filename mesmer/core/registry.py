@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mesmer.core.module import DEFAULT_TIER, ModuleConfig, load_module_config
+from mesmer.core.module import DEFAULT_TIER, ModuleConfig
+from mesmer.core.modules import FileModuleCatalog, ModuleCatalog, ModuleRecord, ModuleSource
 
 
 class Registry:
     """
-    Module registry with filesystem auto-discovery.
-    Scans directories for module.yaml and builds a lookup table.
+    Runtime module registry.
+    Loads module records from catalogs and builds a lookup table.
     Converts modules to OpenAI function-calling tool format.
     """
 
@@ -22,12 +23,41 @@ class Registry:
         # discover root. Surfaced through :meth:`list_modules` for UI
         # grouping; not consulted at attack runtime.
         self.categories: dict[str, str] = {}
+        self.sources: dict[str, str] = {}
+        self.source_ids: dict[str, str] = {}
+        self.module_paths: dict[str, str] = {}
+        self.editable: dict[str, bool] = {}
 
     def register(self, config: ModuleConfig, category: str = ""):
         """Register a single module, optionally tagged with a category."""
         self.modules[config.name] = config
         if category:
             self.categories[config.name] = category
+        self.sources.setdefault(config.name, "")
+        self.source_ids.setdefault(config.name, "")
+        self.module_paths.setdefault(config.name, "")
+        self.editable.setdefault(config.name, False)
+
+    def register_record(self, record: ModuleRecord) -> None:
+        """Register one catalog record, overriding any earlier record by name."""
+        name = record.config.name
+        self.modules[name] = record.config
+        if record.category:
+            self.categories[name] = record.category
+        self.sources[name] = record.source.value
+        self.source_ids[name] = record.source_id
+        self.module_paths[name] = record.path
+        self.editable[name] = record.editable
+
+    def load_catalog(self, catalog: ModuleCatalog) -> None:
+        """Register every record from a catalog."""
+        for record in catalog.list_records():
+            self.register_record(record)
+
+    def load_catalogs(self, *catalogs: ModuleCatalog) -> None:
+        """Register records from multiple catalogs in order."""
+        for catalog in catalogs:
+            self.load_catalog(catalog)
 
     def get(self, name: str) -> ModuleConfig | None:
         """Get a module by name."""
@@ -56,33 +86,7 @@ class Registry:
         walk) take that path's directory name as the category.
         """
         for base_path in paths:
-            base = Path(base_path)
-            if not base.exists():
-                continue
-
-            # Path itself is a module — use its dir name as the category.
-            config = load_module_config(base)
-            if config:
-                self.modules[config.name] = config
-                self.categories[config.name] = base.name
-                continue
-
-            # Recurse into subdirectories — each top-level child names a
-            # category that propagates to every module discovered below it.
-            for child in sorted(base.iterdir()):
-                if child.is_dir() and not child.name.startswith("_"):
-                    self._discover_in_category(child, child.name)
-
-    def _discover_in_category(self, path: Path, category: str):
-        """Recurse under ``path``, tagging every module found with ``category``."""
-        config = load_module_config(path)
-        if config:
-            self.modules[config.name] = config
-            self.categories[config.name] = category
-            return
-        for child in sorted(path.iterdir()):
-            if child.is_dir() and not child.name.startswith("_"):
-                self._discover_in_category(child, category)
+            self.load_catalog(FileModuleCatalog(base_path, source=ModuleSource.LOCAL_PATH))
 
     def tier_of(self, name: str) -> int:
         """Return the attack-cost tier for a module, or the default.
@@ -162,6 +166,10 @@ class Registry:
                 "tier": mod.tier,
                 "category": self.categories.get(mod.name, ""),
                 "sub_modules": mod.sub_module_names,
+                "source": self.sources.get(mod.name, ""),
+                "source_id": self.source_ids.get(mod.name, ""),
+                "path": self.module_paths.get(mod.name, ""),
+                "editable": self.editable.get(mod.name, False),
             }
             for mod in self.modules.values()
         ]

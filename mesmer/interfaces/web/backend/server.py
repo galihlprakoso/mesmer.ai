@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-import tempfile
 import time
 from pathlib import Path
 
@@ -22,18 +20,26 @@ from mesmer.core.agent.context import Context, HumanQuestionBroker
 from mesmer.core.agent.parsing import parse_llm_json
 from mesmer.core.artifacts import ArtifactError, ArtifactStore, artifact_title, validate_artifact_id
 from mesmer.core.constants import LogEvent, ScenarioMode
-from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory
-from mesmer.core.registry import Registry
 from mesmer.core.runner import (
-    BUILTIN_MODULES,
     RunConfig,
+    SCENARIO_TEMPLATES,
+    WORKSPACE_SCENARIOS,
+    build_module_registry,
     execute_run,
-    list_scenarios as _list_scenarios,
     list_modules as _list_modules,
     list_targets as _list_targets,
 )
 from mesmer.core.scenario import load_scenario
+from mesmer.core.persistence import (
+    FileScenarioRepository,
+    ScenarioConflict,
+    ScenarioNotFound,
+    ScenarioPathError,
+    ScenarioRepository,
+    ScenarioRepositoryError,
+    ScenarioValidationError,
+)
 from mesmer.interfaces.web.backend.events import EventBus
 from mesmer.interfaces.web.backend.leader_chat import run_leader_chat
 
@@ -48,6 +54,7 @@ FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
 class RunRequest(BaseModel):
     scenario_path: str
+    workspace_id: str = "local"
     model: str | None = None
     max_turns: int | None = None
     hints: list[str] = []
@@ -59,15 +66,18 @@ class RunRequest(BaseModel):
 
 class DebriefRequest(BaseModel):
     scenario_path: str
+    workspace_id: str = "local"
 
 
 class LeaderChatRequest(BaseModel):
     scenario_path: str
+    workspace_id: str = "local"
     message: str
 
 
 class TargetTestRequest(BaseModel):
     scenario_path: str
+    workspace_id: str = "local"
     message: str | None = None
     timeout_s: float = 20.0
 
@@ -94,55 +104,6 @@ class EditorChatRequest(BaseModel):
     yaml_content: str
     message: str
     history: list[EditorChatMessage] = []
-
-
-# ---------------------------------------------------------------------------
-# Helpers — scenario CRUD
-# ---------------------------------------------------------------------------
-
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _slugify(name: str) -> str:
-    slug = _SLUG_RE.sub("-", name.lower()).strip("-")
-    return slug[:80] or "scenario"
-
-
-def _resolve_under(base: Path, rel: str) -> Path | None:
-    """Resolve ``rel`` under ``base``, refusing parent escapes.
-
-    Returns the absolute path if it is a descendant of ``base``,
-    otherwise ``None``. ``rel`` is a forward-slash path coming
-    from the frontend (the ``{name:path}`` segment).
-    """
-    base_abs = base.resolve()
-    candidate = (base / rel).resolve()
-    try:
-        candidate.relative_to(base_abs)
-    except ValueError:
-        return None
-    return candidate
-
-
-def _validate_yaml_via_loader(yaml_content: str) -> tuple[bool, str | None]:
-    """Write ``yaml_content`` to a temp file and run ``load_scenario``.
-
-    Returns ``(True, None)`` on success or ``(False, error_message)``.
-    Any failure surfaces the loader's exception text verbatim — that's
-    what users get in the editor's lint badge.
-    """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-    ) as fh:
-        fh.write(yaml_content)
-        tmp_path = Path(fh.name)
-    try:
-        load_scenario(str(tmp_path))
-        return True, None
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def _editor_chat_system_prompt(modules: list[dict]) -> str:
@@ -218,10 +179,17 @@ outside it, no backticks. Schema:
 # ---------------------------------------------------------------------------
 
 
-def create_app(scenario_dir: str = ".") -> FastAPI:
+def create_app(
+    scenario_dir: str | Path = SCENARIO_TEMPLATES,
+    scenario_repository: ScenarioRepository | None = None,
+) -> FastAPI:
     """Create the FastAPI app with all routes."""
 
     app = FastAPI(title="Mesmer", version="0.2.0")
+    scenarios_repo = scenario_repository or FileScenarioRepository(
+        scenario_dir,
+        write_root=WORKSPACE_SCENARIOS,
+    )
 
     # State
     bus = EventBus()
@@ -232,6 +200,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     # ctx.operator_messages when a run is active for the same scenario.
     current_ctx: Context | None = None
     current_scenario_path: str | None = None
+    current_workspace_id: str | None = None
     run_state: dict = {"status": "idle"}
 
     def _set_run_task(task: asyncio.Task | None):
@@ -242,7 +211,11 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         """Called by the broker when the agent asks the human something."""
         bus.emit_status("human_question", **question)
 
-    def _load_artifacts_for_target(target_hash: str) -> ArtifactStore:
+    def _load_artifacts_for_target(
+        target_hash: str,
+        *,
+        workspace_id: str = "local",
+    ) -> ArtifactStore:
         live_hash = (
             current_ctx.target_memory.target_hash
             if current_ctx is not None and current_ctx.target_memory is not None
@@ -250,13 +223,11 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         )
         if current_ctx is not None and live_hash == target_hash:
             return current_ctx.artifacts
-        artifacts_dir = Path.home() / ".mesmer" / "targets" / target_hash / "artifacts"
-        return ArtifactStore.from_files(artifacts_dir)
+        memory = TargetMemory.from_target_hash(target_hash, workspace_id=workspace_id)
+        return memory.load_artifacts()
 
     def _legacy_module_artifact_ids() -> set[str]:
-        registry = Registry()
-        registry.auto_discover(BUILTIN_MODULES)
-        return set(registry.modules)
+        return {module["name"] for module in _list_modules()}
 
     # ----- Static files (Svelte SPA) -----
 
@@ -281,12 +252,12 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     async def get_scenarios():
         # Enrich each scenario with target_hash + module_tier so the
         # list page can show "has prior runs" badges and tier colours.
-        registry = Registry()
-        registry.auto_discover(BUILTIN_MODULES)
-        items = _list_scenarios(scenario_dir)
-        for item in items:
+        registry = build_module_registry()
+        items = []
+        for doc in scenarios_repo.list():
+            item = doc.summary()
             try:
-                s = load_scenario(item["path"])
+                s = doc.scenario
                 memory = TargetMemory(s.target)
                 item["target_hash"] = memory.target_hash
                 item["has_graph"] = memory.exists()
@@ -296,24 +267,20 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 first_mod = s.modules[0] if s.modules else None
                 item["module_tier"] = registry.tier_of(first_mod) if first_mod else None
             except Exception:
-                # _list_scenarios already filters obviously broken files,
+                # The repository already filters obviously broken files,
                 # but if env-var resolution fails (missing API key) we
                 # don't want the whole list to 500. Leave the enrichment
                 # fields off and let the frontend fall back to defaults.
                 pass
+            items.append(item)
         return items
 
     @app.get("/api/scenarios/{name:path}")
     async def get_scenario(name: str):
-        path = Path(scenario_dir) / name
-        if not path.exists():
-            return JSONResponse({"error": f"Scenario not found: {name}"}, status_code=404)
         try:
-            s = load_scenario(str(path))
+            doc = scenarios_repo.get(name)
+            s = doc.scenario
             memory = TargetMemory(s.target)
-            # Read raw YAML so the editor can populate without re-serialising
-            # (preserves comments, ordering, env-var placeholders).
-            raw_yaml = path.read_text(encoding="utf-8")
             result = {
                 "name": s.name,
                 "description": s.description,
@@ -335,7 +302,9 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 "agent": {
                     "model": s.agent.model,
                 },
-                "yaml_content": raw_yaml,
+                "yaml_content": doc.yaml_content,
+                "source": doc.source,
+                "editable": doc.editable,
             }
             # Include saved graph data if it exists
             if memory.exists():
@@ -344,72 +313,64 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 result["graph_stats"] = g.stats()
                 bus.set_graph(g)
             return result
+        except ScenarioNotFound as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except ScenarioPathError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.post("/api/scenarios")
     async def create_scenario(req: CreateScenarioRequest):
-        """Create a new scenario in ``scenarios/private/{slug}.yaml``.
-
-        Validates the YAML by running it through ``load_scenario`` after
-        write — on parse error the file is deleted and 400 returned.
-        """
-        slug = _slugify(req.name)
-        target_dir = Path(scenario_dir) / "scenarios" / "private"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / f"{slug}.yaml"
-        if target_path.exists():
+        """Create a new private scenario."""
+        try:
+            doc = scenarios_repo.create_private(req.name, req.yaml_content)
+        except ScenarioConflict as e:
             return JSONResponse(
-                {"error": f"Scenario already exists at {target_path}. Pick a different name."},
+                {"error": str(e)},
                 status_code=409,
             )
-        target_path.write_text(req.yaml_content, encoding="utf-8")
-        try:
-            load_scenario(str(target_path))
-        except Exception as e:
-            target_path.unlink(missing_ok=True)
+        except ScenarioValidationError as e:
             return JSONResponse(
-                {"error": f"YAML is invalid: {type(e).__name__}: {e}"},
+                {"error": str(e)},
                 status_code=400,
             )
-        # Return path relative to scenario_dir so the frontend can navigate
-        # to /api/scenarios/{path}. Always use resolved abs paths for the
-        # diff so it works whether scenario_dir is absolute or "." (cwd).
-        rel = target_path.resolve().relative_to(Path(scenario_dir).resolve())
-        return {"path": str(rel), "name": req.name}
+        return {
+            "path": doc.path,
+            "name": doc.scenario.name,
+            "source": doc.source,
+            "editable": doc.editable,
+        }
 
     @app.put("/api/scenarios/{name:path}")
     async def update_scenario(name: str, req: UpdateScenarioRequest):
-        """Overwrite an existing scenario file.
-
-        Path-traversal-guarded: refuses paths that resolve outside the
-        configured ``scenario_dir``. Validates after write; on parse
-        failure the prior content is restored.
-        """
-        target_path = _resolve_under(Path(scenario_dir), name)
-        if target_path is None:
-            return JSONResponse(
-                {"error": "Refusing to write outside the scenario directory."},
-                status_code=400,
-            )
-        if not target_path.exists():
-            return JSONResponse({"error": f"Scenario not found: {name}"}, status_code=404)
-        prior = target_path.read_text(encoding="utf-8")
-        target_path.write_text(req.yaml_content, encoding="utf-8")
+        """Overwrite an existing scenario."""
         try:
-            load_scenario(str(target_path))
-        except Exception as e:
-            target_path.write_text(prior, encoding="utf-8")
+            doc = scenarios_repo.update(name, req.yaml_content)
+        except ScenarioPathError as e:
             return JSONResponse(
-                {"error": f"YAML is invalid: {type(e).__name__}: {e}"},
+                {"error": str(e)},
                 status_code=400,
             )
-        return {"path": name, "status": "saved"}
+        except ScenarioNotFound as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except ScenarioValidationError as e:
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=400,
+            )
+        return {
+            "path": doc.path,
+            "name": doc.scenario.name,
+            "source": doc.source,
+            "editable": doc.editable,
+            "status": "saved",
+        }
 
     @app.post("/api/scenarios/validate")
     async def validate_scenario(req: ValidateScenarioRequest):
         """Validate a YAML payload without writing anything to disk."""
-        ok, err = _validate_yaml_via_loader(req.yaml_content)
+        ok, err = scenarios_repo.validate(req.yaml_content)
         if ok:
             return {"ok": True, "error": None}
         return {"ok": False, "error": err}
@@ -428,9 +389,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
 
         litellm.suppress_debug_info = True
 
-        registry = Registry()
-        registry.auto_discover(BUILTIN_MODULES)
-        modules = registry.list_modules()
+        modules = _list_modules()
 
         system_prompt = _editor_chat_system_prompt(modules)
         user_payload = (
@@ -489,11 +448,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
 
     @app.get("/api/modules/{name}")
     async def get_module(name: str):
-        from mesmer.core.registry import Registry
-        from mesmer.core.runner import BUILTIN_MODULES
-
-        registry = Registry()
-        registry.auto_discover(BUILTIN_MODULES)
+        registry = build_module_registry()
         mod = registry.get(name)
         if mod is None:
             return JSONResponse({"error": f"Module not found: {name}"}, status_code=404)
@@ -509,8 +464,8 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     # ----- API: Targets -----
 
     @app.get("/api/targets")
-    async def get_targets():
-        return _list_targets()
+    async def get_targets(workspace_id: str = "local"):
+        return _list_targets(workspace_id=workspace_id)
 
     @app.post("/api/target/test")
     async def test_target_connection(req: TargetTestRequest):
@@ -518,7 +473,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         from mesmer.targets import create_target
 
         try:
-            scenario = load_scenario(req.scenario_path)
+            scenario = load_scenario(scenarios_repo.resolve_path(req.scenario_path))
             target = create_target(scenario.target)
         except Exception as e:
             return JSONResponse(
@@ -565,12 +520,12 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         }
 
     @app.get("/api/targets/{target_hash}/graph")
-    async def get_target_graph(target_hash: str):
-        graph_path = Path.home() / ".mesmer" / "targets" / target_hash / "graph.json"
-        if not graph_path.exists():
+    async def get_target_graph(target_hash: str, workspace_id: str = "local"):
+        memory = TargetMemory.from_target_hash(target_hash, workspace_id=workspace_id)
+        if not memory.exists():
             return JSONResponse({"error": "Graph not found"}, status_code=404)
         try:
-            g = AttackGraph.from_json(graph_path.read_text())
+            g = memory.load_graph()
             return {
                 "graph": json.loads(g.to_json()),
                 "stats": g.stats(),
@@ -579,7 +534,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.get("/api/targets/{target_hash}/belief-graph")
-    async def get_target_belief_graph(target_hash: str):
+    async def get_target_belief_graph(target_hash: str, workspace_id: str = "local"):
         """Return the typed Belief Attack Graph snapshot for a target.
 
         Same shape contract as ``get_target_graph`` (a wrapping object
@@ -615,24 +570,19 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             except Exception as e:  # noqa: BLE001 — surface load errors to UI
                 return JSONResponse({"error": str(e)}, status_code=400)
 
-        target_dir = Path.home() / ".mesmer" / "targets" / target_hash
-        snapshot_path = target_dir / "belief_graph.json"
-        deltas_path = target_dir / "belief_deltas.jsonl"
-        if not snapshot_path.exists() and not deltas_path.exists():
+        memory = TargetMemory.from_target_hash(target_hash, workspace_id=workspace_id)
+        if not memory.has_belief_graph():
             return JSONResponse({"error": "Belief graph not found"}, status_code=404)
         try:
-            if snapshot_path.exists():
-                bg = BeliefGraph.from_json(snapshot_path.read_text())
-            else:
-                bg = BeliefGraph.replay(deltas_path, target_hash=target_hash)
+            bg = memory.load_belief_graph()
             return _payload(bg)
         except Exception as e:  # noqa: BLE001 — surface load errors to UI
             return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.get("/api/targets/{target_hash}/artifacts")
-    async def get_target_artifacts(target_hash: str):
+    async def get_target_artifacts(target_hash: str, workspace_id: str = "local"):
         """List durable Markdown artifacts for a target."""
-        artifacts = _load_artifacts_for_target(target_hash)
+        artifacts = _load_artifacts_for_target(target_hash, workspace_id=workspace_id)
         legacy_module_ids = _legacy_module_artifact_ids()
         return {
             "items": [
@@ -643,9 +593,14 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         }
 
     @app.get("/api/targets/{target_hash}/artifacts/search")
-    async def search_target_artifacts(target_hash: str, query: str = "", limit: int = 20):
+    async def search_target_artifacts(
+        target_hash: str,
+        query: str = "",
+        limit: int = 20,
+        workspace_id: str = "local",
+    ):
         """Search durable Markdown artifacts for a target."""
-        artifacts = _load_artifacts_for_target(target_hash)
+        artifacts = _load_artifacts_for_target(target_hash, workspace_id=workspace_id)
         legacy_module_ids = _legacy_module_artifact_ids()
         return {
             "items": [
@@ -656,13 +611,17 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         }
 
     @app.get("/api/targets/{target_hash}/artifacts/{artifact_id}")
-    async def get_target_artifact(target_hash: str, artifact_id: str):
+    async def get_target_artifact(
+        target_hash: str,
+        artifact_id: str,
+        workspace_id: str = "local",
+    ):
         """Read one durable Markdown artifact for a target."""
         try:
             artifact_id = validate_artifact_id(artifact_id)
         except ArtifactError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
-        artifacts = _load_artifacts_for_target(target_hash)
+        artifacts = _load_artifacts_for_target(target_hash, workspace_id=workspace_id)
         content = artifacts.get(artifact_id)
         if not content.strip():
             return JSONResponse({"error": f"Artifact not found: {artifact_id}"}, status_code=404)
@@ -693,6 +652,11 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 status_code=409,
             )
 
+        try:
+            resolved_scenario_path = scenarios_repo.resolve_path(req.scenario_path)
+        except ScenarioRepositoryError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
         bus.clear_history()
         run_state.update({"status": "running", "scenario": req.scenario_path})
 
@@ -708,17 +672,18 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 scenario_mode_override = None
 
         config = RunConfig(
-            scenario_path=req.scenario_path,
+            scenario_path=resolved_scenario_path,
             model_override=req.model,
             max_turns_override=req.max_turns,
             hints=req.hints,
             fresh=req.fresh,
+            workspace_id=req.workspace_id,
             human_broker=current_broker,
             scenario_mode_override=scenario_mode_override,
         )
 
         async def _run():
-            nonlocal current_ctx, current_scenario_path
+            nonlocal current_ctx, current_scenario_path, current_workspace_id
             try:
                 bus.emit_status("running", scenario=req.scenario_path)
 
@@ -732,9 +697,10 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                     bus.emit_key_status()
 
                 def _on_ctx_ready(ctx: Context):
-                    nonlocal current_ctx, current_scenario_path
+                    nonlocal current_ctx, current_scenario_path, current_workspace_id
                     current_ctx = ctx
                     current_scenario_path = req.scenario_path
+                    current_workspace_id = req.workspace_id
 
                 result = await execute_run(
                     config,
@@ -767,6 +733,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             finally:
                 current_ctx = None
                 current_scenario_path = None
+                current_workspace_id = None
 
         current_run_task = asyncio.create_task(_run())
         _set_run_task(current_run_task)
@@ -783,11 +750,11 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     # ----- API: Chat -----
 
     @app.get("/api/chat")
-    async def get_chat(scenario_path: str, limit: int = 20):
+    async def get_chat(scenario_path: str, limit: int = 20, workspace_id: str = "local"):
         """Return persisted operator <> leader chat for warm-load on
         page refresh. Last ``limit`` rows, oldest-first."""
-        scenario = load_scenario(scenario_path)
-        memory = TargetMemory(scenario.target)
+        scenario = load_scenario(scenarios_repo.resolve_path(scenario_path))
+        memory = TargetMemory(scenario.target, workspace_id=workspace_id)
         return {"items": memory.load_chat(limit=max(1, min(limit, 100)))}
 
     @app.post("/api/leader-chat")
@@ -806,14 +773,15 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         message = (req.message or "").strip()
         if not message:
             return JSONResponse({"error": "message must be non-empty"}, status_code=400)
-        scenario = load_scenario(req.scenario_path)
-        memory = TargetMemory(scenario.target)
+        scenario = load_scenario(scenarios_repo.resolve_path(req.scenario_path))
+        memory = TargetMemory(scenario.target, workspace_id=req.workspace_id)
 
         if (
             current_run_task is not None
             and not current_run_task.done()
             and current_ctx is not None
             and current_scenario_path == req.scenario_path
+            and current_workspace_id == req.workspace_id
         ):
             ts = time.time()
             memory.append_chat("user", message, ts)
@@ -856,8 +824,8 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
 
     @app.post("/api/debrief")
     async def generate_debrief(req: DebriefRequest):
-        scenario = load_scenario(req.scenario_path)
-        memory = TargetMemory(scenario.target)
+        scenario = load_scenario(scenarios_repo.resolve_path(req.scenario_path))
+        memory = TargetMemory(scenario.target, workspace_id=req.workspace_id)
 
         if not memory.exists():
             return JSONResponse({"error": "No graph found. Run an attack first."}, status_code=404)

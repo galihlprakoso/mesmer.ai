@@ -22,7 +22,7 @@
 #   3. GEMINI_API_KEY set (mesmer attacker brain).
 #
 # Usage:
-#   uv run mesmer run scenarios/full-redteam-with-execution.yaml --verbose
+#   uv run mesmer run packages/scenarios/full-redteam-with-execution.yaml --verbose
 
 name: "Research assistant tool-injection proof — dvllm research-l1"
 description: >

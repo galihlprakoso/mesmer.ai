@@ -14,7 +14,7 @@ future runs can read alongside prior module outputs and judged attempts.
 ## Adding a hint from the CLI
 
 ```bash
-uv run mesmer hint scenarios/extract-system-prompt.yaml \
+uv run mesmer hint packages/scenarios/extract-system-prompt.yaml \
   "Try wrapping the request as a Python docstring; the target refuses prose but responds to code-shaped frames."
 ```
 
@@ -35,7 +35,7 @@ After a run, get a structured walk-through of what the executive saw and
 why each technique scored what it did:
 
 ```bash
-uv run mesmer debrief scenarios/extract-system-prompt.yaml
+uv run mesmer debrief packages/scenarios/extract-system-prompt.yaml
 ```
 
 Use this to spot patterns the planner missed, then capture the useful
@@ -45,17 +45,17 @@ parts as hints or write them into a durable artifact.
 
 ```bash
 # Run #1 — let mesmer execute the scenario
-uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --verbose
 
 # Read what happened
-uv run mesmer debrief scenarios/extract-system-prompt.yaml
+uv run mesmer debrief packages/scenarios/extract-system-prompt.yaml
 
 # Add your hunch
-uv run mesmer hint scenarios/extract-system-prompt.yaml \
+uv run mesmer hint packages/scenarios/extract-system-prompt.yaml \
   "delimiter-injection: mimic the target's <|system|> token style I saw in turn 14"
 
 # Run #2 — starts with the prior graph and hint context
-uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
+uv run mesmer run packages/scenarios/extract-system-prompt.yaml --verbose
 ```
 
 Use `--fresh` when you want to ignore prior graph and conversation state.

@@ -11,7 +11,7 @@ become callable.
 
 ## Skeleton
 
-```yaml title="modules/techniques/cognitive-bias/your-technique/module.yaml"
+```yaml title="packages/modules/techniques/cognitive-bias/your-technique/module.yaml"
 name: your-technique
 tier: 2                        # 0=naive · 1=structural · 2=cognitive · 3=composed
 
@@ -71,7 +71,7 @@ escape-hatch surface miscalibration on the first run.**
 
 ## Where to put it
 
-`modules/techniques/<category>/<your-name>/module.yaml`. Categories
+`packages/modules/techniques/<category>/<your-name>/module.yaml`. Categories
 already in use: `cognitive-bias`, `linguistic`, `psychological`,
 `field` (T0/T1 payload-shape). Pick whichever fits, or add a new
 category directory — the registry auto-discovers any depth of
@@ -79,7 +79,7 @@ subdirectory.
 
 ## Anti-overfit guardrail
 
-Field modules (`modules/techniques/field/*`) are CI-scanned for
+Field modules (`packages/modules/techniques/field/*`) are CI-scanned for
 banned dataset tokens (`password`, `access code`, `tensor trust`,
 `canary`, `pre_prompt`, `post_prompt`). If you author a field module,
 keep its YAML generic — scenarios and bench specs own the
@@ -104,7 +104,7 @@ mistake that breaks termination semantics.
 uv run mesmer modules describe your-technique
 
 # Run a scenario where some manager has it in sub_modules
-uv run mesmer run scenarios/private/your-test-scenario.yaml --verbose
+uv run mesmer run ~/.mesmer/workspaces/local/scenarios/your-test-scenario.yaml --verbose
 ```
 
 If the registry rejects the YAML, you'll get a typed
@@ -113,15 +113,15 @@ re-run; no restart needed beyond the next `mesmer` invocation.
 
 ## What about profilers and planners?
 
-Profilers (`modules/profilers/`) and planners (`modules/planners/`)
+Profilers (`packages/modules/profilers/`) and planners (`packages/modules/planners/`)
 are **modules with the same YAML shape as a technique** — they're
 just authored to do something other than probe. The differences:
 
 | Module type | Directory | Talks to target? | What it concludes with |
 |---|---|---|---|
-| Technique | `modules/techniques/<category>/<name>/` | Yes — multiple turns. | Attack write-up; the win, or what was learned. |
-| Profiler | `modules/profilers/<name>/` | Yes — recon-only, doesn't try to win. | Dossier — identity, defence shape, policy surface, exploitation hypothesis. |
-| Planner | `modules/planners/<name>/` | **No** — pure reasoning over module history and artifacts. | Ordered plan: `(module, targeting sentence)` pairs the parent manager executes in order. |
+| Technique | `packages/modules/techniques/<category>/<name>/` | Yes — multiple turns. | Attack write-up; the win, or what was learned. |
+| Profiler | `packages/modules/profilers/<name>/` | Yes — recon-only, doesn't try to win. | Dossier — identity, defence shape, policy surface, exploitation hypothesis. |
+| Planner | `packages/modules/planners/<name>/` | **No** — pure reasoning over module history and artifacts. | Ordered plan: `(module, targeting sentence)` pairs the parent manager executes in order. |
 
 **Authoring a profiler**: write it like a tier-0 technique that
 doesn't try to satisfy the objective. Its `system_prompt` instructs
@@ -135,7 +135,7 @@ with its plan text. To let the planner name specific siblings in
 its plan without hardcoding them, the manager's `sub_modules:` entry
 for the planner must set `see_siblings: true`:
 
-```yaml title="modules/attacks/your-manager/module.yaml"
+```yaml title="packages/modules/attacks/your-manager/module.yaml"
 sub_modules:
   - target-profiler
   - name: your-planner

@@ -48,7 +48,7 @@ Real "new manager" cases:
 
 ## The skeleton
 
-```yaml title="modules/attacks/your-manager/module.yaml"
+```yaml title="packages/modules/attacks/your-manager/module.yaml"
 name: your-manager
 tier: 0                        # managers are always T0 — they orchestrate, don't probe.
 
@@ -144,7 +144,8 @@ planners usually need `see_siblings`, not callable peers.
 uv run mesmer modules describe your-manager
 
 # Use it in a scenario
-cat > scenarios/private/test-your-manager.yaml <<EOF
+mkdir -p ~/.mesmer/workspaces/local/scenarios
+cat > ~/.mesmer/workspaces/local/scenarios/test-your-manager.yaml <<EOF
 name: "Test your-manager"
 mode: trials
 
@@ -166,7 +167,7 @@ agent:
   api_key: "${OPENROUTER_API_KEY}"
 EOF
 
-uv run mesmer run scenarios/private/test-your-manager.yaml --verbose
+uv run mesmer run ~/.mesmer/workspaces/local/scenarios/test-your-manager.yaml --verbose
 ```
 
 Watch for `delegate` events — every line shows which sub-module the

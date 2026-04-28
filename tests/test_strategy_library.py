@@ -27,6 +27,7 @@ from mesmer.core.strategy_library import (
     retrieve_strategies_for_bootstrap,
     save_library,
 )
+from mesmer.core.persistence import FileStorageProvider
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +194,28 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
     assert e.global_success_count == 4
     assert e.global_attempt_count == 7
     assert e.works_against_traits == ["assistant"]
+
+
+def test_save_and_load_round_trip_via_storage_provider(tmp_path: Path) -> None:
+    storage = FileStorageProvider(tmp_path / ".mesmer")
+    lib = StrategyLibrary(
+        [
+            GlobalStrategyEntry(
+                family="format-shift",
+                template_summary="ask-yaml",
+                global_success_count=1,
+                global_attempt_count=2,
+            )
+        ]
+    )
+
+    save_library(lib, storage=storage, workspace_id="team-a")
+
+    loaded = load_library(storage=storage, workspace_id="team-a")
+    assert len(loaded.entries) == 1
+    assert loaded.entries[0].family == "format-shift"
+    assert load_library(storage=storage, workspace_id="team-b").entries == []
+    assert (tmp_path / ".mesmer" / "workspaces" / "team-a" / "global" / "strategies.json").exists()
 
 
 def test_load_missing_file_returns_empty_library(tmp_path: Path) -> None:

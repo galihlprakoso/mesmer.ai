@@ -52,6 +52,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from mesmer.core.persistence import (
+    FileStorageProvider,
+    StorageProvider,
+    join_storage_key,
+    workspace_prefix,
+)
+
 # Same path that ``GlobalMemory`` uses — we keep all global state under
 # one roof so backups / wipes are one operation.
 _GLOBAL_DIR = Path.home() / ".mesmer" / "global"
@@ -278,7 +285,16 @@ def _atomic_write(path: Path, data: str) -> None:
         raise
 
 
-def load_library(path: Path | None = None) -> StrategyLibrary:
+def _library_key(workspace_id: str = "local") -> str:
+    return join_storage_key(workspace_prefix(workspace_id), "global", "strategies.json")
+
+
+def load_library(
+    path: Path | None = None,
+    *,
+    storage: StorageProvider | None = None,
+    workspace_id: str = "local",
+) -> StrategyLibrary:
     """Read the cross-target strategy library from disk.
 
     Returns an empty :class:`StrategyLibrary` when the file is missing
@@ -287,13 +303,22 @@ def load_library(path: Path | None = None) -> StrategyLibrary:
     is logged but produces an empty library so a future-version file
     isn't misinterpreted.
     """
-    p = path or _LIBRARY_PATH
-    if not p.exists():
-        return StrategyLibrary()
-    try:
-        raw = json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError):
-        return StrategyLibrary()
+    if path is not None:
+        if not path.exists():
+            return StrategyLibrary()
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return StrategyLibrary()
+    else:
+        backend = storage or FileStorageProvider(_GLOBAL_DIR.parent)
+        key = _library_key(workspace_id)
+        if not backend.exists(key):
+            return StrategyLibrary()
+        try:
+            raw = json.loads(backend.read_text(key))
+        except (OSError, json.JSONDecodeError):
+            return StrategyLibrary()
     if not isinstance(raw, dict):
         return StrategyLibrary()
     version = raw.get("schema_version", 1)
@@ -315,10 +340,19 @@ def load_library(path: Path | None = None) -> StrategyLibrary:
     return StrategyLibrary(entries=entries)
 
 
-def save_library(library: StrategyLibrary, path: Path | None = None) -> None:
+def save_library(
+    library: StrategyLibrary,
+    path: Path | None = None,
+    *,
+    storage: StorageProvider | None = None,
+    workspace_id: str = "local",
+) -> None:
     """Atomically persist the library to disk."""
-    p = path or _LIBRARY_PATH
-    _atomic_write(p, library.to_json())
+    if path is not None:
+        _atomic_write(path, library.to_json())
+        return
+    backend = storage or FileStorageProvider(_GLOBAL_DIR.parent)
+    backend.write_text(_library_key(workspace_id), library.to_json(), atomic=True)
 
 
 # ---------------------------------------------------------------------------

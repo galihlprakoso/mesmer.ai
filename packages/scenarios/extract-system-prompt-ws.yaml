@@ -1,7 +1,7 @@
 # Scenario: Extract system prompt from a WebSocket-based target
 #
 # Usage:
-#   mesmer run scenarios/extract-system-prompt-ws.yaml --verbose
+#   mesmer run packages/scenarios/extract-system-prompt-ws.yaml --verbose
 #
 # Prerequisites:
 #   export ANTHROPIC_API_KEY=your-claude-key

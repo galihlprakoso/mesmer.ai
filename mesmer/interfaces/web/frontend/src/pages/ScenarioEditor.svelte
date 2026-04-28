@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { loadScenario, createScenario, updateScenario } from '../lib/api.js'
   import { navigate } from '../lib/router.js'
-  import ScenarioForm from '../components/ScenarioForm.svelte'
+  import ScenarioYamlEditor from '../components/ScenarioYamlEditor.svelte'
   import EditorChat from '../components/EditorChat.svelte'
 
   /** Either an existing scenario path (edit mode) or null (new mode). */
@@ -80,7 +80,11 @@ agent:
     saveError = null
     try {
       if (savedPath) {
-        await updateScenario(savedPath, yamlContent)
+        const result = await updateScenario(savedPath, yamlContent)
+        if (result.path && result.path !== savedPath) {
+          savedPath = result.path
+          history.replaceState(null, '', `#/scenarios/${encodeURIComponent(savedPath)}/edit`)
+        }
       } else {
         // Pull the name out of the YAML for the create call.
         const nameMatch = yamlContent.match(/^\s*name:\s*['"]?([^'"\n]+?)['"]?\s*$/m)
@@ -143,7 +147,12 @@ agent:
     <div class="loading">Loading scenario…</div>
   {:else}
     <main class="page-body">
-      <ScenarioForm bind:yamlContent on:change={onYamlChange} disabled={saving} />
+      <ScenarioYamlEditor
+        bind:yamlContent
+        on:change={onYamlChange}
+        on:save={save}
+        disabled={saving}
+      />
       <EditorChat {yamlContent} on:apply={onChatApply} />
     </main>
   {/if}

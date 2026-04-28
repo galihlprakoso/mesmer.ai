@@ -17,8 +17,8 @@ tree and by their `ReactActorSpec.role`:
 | Role | Authored? | Depth | Tools |
 |---|---|---|---|
 | **Executive** | No — synthesised by `runner.execute_run` | 0 | `talk_to_operator`, artifact tools, `ask_human`, manager dispatch, `conclude` |
-| **Manager** | YES — `modules/attacks/<name>/`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, artifact tools, `conclude` |
-| **Employee** | YES — anywhere under `modules/`, referenced in a manager's `sub_modules:` | ≥ 2 | Policy-defined: usually `send_message`, `conclude` |
+| **Manager** | YES — `packages/modules/attacks/<name>/`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, artifact tools, `conclude` |
+| **Employee** | YES — anywhere under `packages/modules/`, referenced in a manager's `sub_modules:` | ≥ 2 | Policy-defined: usually `send_message`, `conclude` |
 
 The executive owns the **operator channel** (chat, ask-human,
 operator notes). Managers and employees own the **target channel** when their
@@ -31,7 +31,7 @@ The executive is **synthesised in memory at run start** from
 [Writing scenarios](/docs/scenarios/walkthrough#executive-vs-manager-the-role-split)
 for the full split.
 
-```yaml title="modules/techniques/cognitive-bias/foot-in-door/module.yaml"
+```yaml title="packages/modules/techniques/cognitive-bias/foot-in-door/module.yaml"
 name: foot-in-door
 tier: 2                       # cognitive / social manipulation
 description: |
@@ -54,12 +54,12 @@ reset_target: false
 
 ## The registry
 
-`core/registry.py::Registry.auto_discover()` walks the root at startup.
-Any directory containing a `module.yaml` becomes a registered module,
-reachable by `name`. Built-in modules live **outside the Python package**
-at the repo root — sibling of `mesmer/` — resolved as `BUILTIN_MODULES`
-in `core/runner.py`. Additional paths can be layered via
-`--module-path` on `mesmer run` / `--path` on `mesmer modules list`.
+The runtime registry composes catalogs at startup. Any directory containing
+a `module.yaml` becomes a registered module, reachable by `name`. Built-in
+modules live in `packages/modules`, workspace modules live under
+`~/.mesmer/workspaces/{workspace}/modules`, and additional paths can be
+layered via `--module-path` on `mesmer run` / `--path` on
+`mesmer modules list`.
 
 ## Categories
 
@@ -74,7 +74,7 @@ prompt, and how it composes sub-modules.
 The 31 authored modules ship in six categories (the synthesised
 executive doesn't appear in the registry):
 
-- **Manager** (`modules/attacks/`) — 5 orchestrator modules.
+- **Manager** (`packages/modules/attacks/`) — 5 orchestrator modules.
   [`system-prompt-extraction`](/docs/modules/system-prompt-extraction)
   for hidden-instruction extraction;
   [`tool-extraction`](/docs/modules/tool-extraction) for
@@ -85,14 +85,14 @@ executive doesn't appear in the registry):
   tests RAG/document/ticket source-boundary failures;
   [`email-exfiltration-proof`](/docs/modules/email-exfiltration-proof)
   validates the side-effecting email path with a proof dossier.
-- **Profiler** (`modules/profilers/`, T0) — `target-profiler` for
+- **Profiler** (`packages/modules/profilers/`, T0) — `target-profiler` for
   identity → defence-shape → policy-surface recon, and
   `tool-risk-profiler` for tool, permission, and autonomy boundaries.
-- **Planner** (`modules/planners/`, T0) — `attack-planner` reads the
+- **Planner** (`packages/modules/planners/`, T0) — `attack-planner` reads the
   dossier + learned experience and emits an ordered plan;
   `risk-scenario-planner` turns risk evidence into a scenario
   blueprint. Both are pure reasoning, no target contact.
-- **Field** (`modules/techniques/field/`, T0/T1) — 9 payload-shape
+- **Field** (`packages/modules/techniques/field/`, T0/T1) — 9 payload-shape
   and structural techniques: `direct-ask`, `instruction-recital`,
   `indirect-recital`, `format-shift` (T0), `prefix-commitment`,
   `delimiter-injection`, `role-impersonation`, `fake-function-injection`,
@@ -100,7 +100,7 @@ executive doesn't appear in the registry):
 - **Cognitive / linguistic / psychological** (T2) — 6 cognitive-science
   techniques: `foot-in-door`, `authority-bias`, `anchoring`,
   `narrative-transport`, `pragmatic-reframing`, `cognitive-overload`.
-- **Tool-use** (`modules/techniques/tool-use/`, T1/T2) — source-boundary,
+- **Tool-use** (`packages/modules/techniques/tool-use/`, T1/T2) — source-boundary,
   capability-validation, parameter-fuzzing, and side-effect-proof
   techniques for agentic workflows.
 
@@ -112,7 +112,7 @@ mean and how the frontier gate uses them.
 
 ## Managers vs sub-modules
 
-- **Manager modules** (`modules/attacks/*`) — orchestrate. They read
+- **Manager modules** (`packages/modules/attacks/*`) — orchestrate. They read
   the attack graph, inspect the artifact contract and artifact brief
   injected into prompts, and pick which
   sub-module to delegate to next. The manager's `conclude()` text
@@ -162,7 +162,8 @@ execute sibling techniques.
 
 ## Writing your own
 
-1. Create `modules/<category>/<name>/module.yaml`:
+1. Create `packages/modules/<category>/<name>/module.yaml` for a shipped
+   module, or create it in the workspace module catalog for a user module:
 
    ```yaml
    name: my-technique
@@ -185,8 +186,7 @@ execute sibling techniques.
    state. Omitting `tier:` defaults to 2; out-of-range values (`<0`,
    `>3`) raise `InvalidModuleConfig` at load.
 
-3. `Registry.auto_discover(BUILTIN_MODULES)` picks it up automatically
-   on next startup.
+3. The composed module registry picks it up automatically on next startup.
 
 4. Reference it by `name` either as a manager (in a scenario's
    `modules:` list) or as an employee (in some manager's
@@ -198,7 +198,7 @@ the ReAct loop per-module.
 
 ## Field-module anti-overfit scan
 
-Field modules (`modules/techniques/field/*`) are the most likely to
+Field modules (`packages/modules/techniques/field/*`) are the most likely to
 drift into dataset-specific vocabulary. CI protects against this:
 `tests/test_field_modules_load.py` regex-scans every file for banned
 tokens (`password`, `access code`, `tensor trust`, `canary`,

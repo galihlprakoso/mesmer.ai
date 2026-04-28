@@ -180,14 +180,16 @@ def _coerce_tier(raw: object, module_name: str) -> int:
     return tier
 
 
-def load_module_config(path: Path) -> ModuleConfig | None:
-    """Load a module from a directory. Returns None if ``module.yaml`` is missing."""
-    yaml_path = path / "module.yaml"
-    if not yaml_path.exists():
-        return None
-    with open(yaml_path) as f:
-        data = yaml.safe_load(f)
-
+def load_module_config_from_text(yaml_content: str) -> ModuleConfig:
+    """Load a module from raw ``module.yaml`` content."""
+    data = yaml.safe_load(yaml_content)
+    if not isinstance(data, dict):
+        raise InvalidModuleConfig(
+            "<unknown>",
+            "module.yaml",
+            data,
+            reason=f"must be a mapping, got {type(data).__name__}",
+        )
     name = data["name"]
     return ModuleConfig(
         name=name,
@@ -201,6 +203,14 @@ def load_module_config(path: Path) -> ModuleConfig | None:
         reset_target=bool(data.get("reset_target", False)),
         tier=_coerce_tier(data.get("tier"), name),
     )
+
+
+def load_module_config(path: Path) -> ModuleConfig | None:
+    """Load a module from a directory. Returns None if ``module.yaml`` is missing."""
+    yaml_path = path / "module.yaml"
+    if not yaml_path.exists():
+        return None
+    return load_module_config_from_text(yaml_path.read_text(encoding="utf-8"))
 
 
 def _parse_sub_modules(raw: list) -> list[SubModuleEntry]:

@@ -1,15 +1,18 @@
 <script>
   import { navigate } from '../lib/router.js'
 
-  /** @type {{path: string, name: string, description?: string, target_adapter: string, module: string, module_tier?: number, has_graph?: boolean, max_turns?: number}} */
+  /** @type {{path: string, name: string, description?: string, target_adapter: string, module: string, module_tier?: number, has_graph?: boolean, max_turns?: number, source?: string, editable?: boolean}} */
   export let scenario
 
   const TIER_COLORS = ['var(--t0)', 'var(--t1)', 'var(--t2)', 'var(--t3)']
 
   $: tierColor = TIER_COLORS[scenario.module_tier ?? 2] || 'var(--t-unknown)'
+  $: isTemplate = scenario.source === 'template'
+  $: actionLabel = isTemplate ? 'Use template' : 'Edit scenario'
+  $: displayPath = isTemplate ? `template/${scenario.path.split('/').pop()}` : scenario.path
 
-  function openGraph() {
-    navigate('graph', scenario.path)
+  function openPrimary() {
+    navigate(isTemplate ? 'editor' : 'graph', scenario.path)
   }
 
   function openEditor(event) {
@@ -20,22 +23,25 @@
   function onKey(event) {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
-      openGraph()
+      openPrimary()
     }
   }
 </script>
 
 <div
+  class:template-card={isTemplate}
   class="card"
-  on:click={openGraph}
+  on:click={openPrimary}
   on:keydown={onKey}
   role="button"
   tabindex="0"
-  aria-label={`Open ${scenario.name}`}
+  aria-label={`${isTemplate ? 'Use template' : 'Open'} ${scenario.name}`}
 >
   <div class="card-header">
     <h3 class="card-title">{scenario.name}</h3>
-    {#if scenario.has_graph}
+    {#if isTemplate}
+      <span class="source-pill">Template</span>
+    {:else if scenario.has_graph}
       <span class="dot" title="Has prior runs"></span>
     {/if}
   </div>
@@ -55,13 +61,13 @@
     {/if}
   </div>
   <div class="card-footer">
-    <span class="path">{scenario.path}</span>
+    <span class="path" title={scenario.path}>{displayPath}</span>
     <button
       type="button"
       class="edit-btn"
       on:click={openEditor}
-      title="Edit scenario"
-      aria-label="Edit scenario"
+      title={actionLabel}
+      aria-label={actionLabel}
     >
       <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
         <path
@@ -96,6 +102,9 @@
     background: var(--bg-tertiary);
     box-shadow: var(--phosphor-glow-tight);
   }
+  .template-card {
+    background: color-mix(in srgb, var(--bg-secondary) 86%, var(--bg-tertiary));
+  }
   .card:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
@@ -122,6 +131,18 @@
     background: var(--phosphor);
     box-shadow: var(--phosphor-glow-tight);
     flex-shrink: 0;
+  }
+  .source-pill {
+    flex-shrink: 0;
+    border: 1px solid hsla(155 100% 42% / 0.35);
+    color: var(--accent);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-family: var(--font-pixel);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: var(--accent-dim);
   }
 
   .card-desc {

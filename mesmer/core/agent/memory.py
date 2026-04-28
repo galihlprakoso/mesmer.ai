@@ -20,8 +20,6 @@ Storage layout:
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +29,12 @@ from mesmer.core.artifacts import ArtifactStore
 from mesmer.core.belief_graph import BeliefGraph
 from mesmer.core.constants import TurnKind
 from mesmer.core.graph import AttackGraph, hash_target
+from mesmer.core.persistence import (
+    FileStorageProvider,
+    StorageProvider,
+    join_storage_key,
+    workspace_prefix,
+)
 
 if TYPE_CHECKING:
     from mesmer.core.scenario import TargetConfig
@@ -39,64 +43,87 @@ if TYPE_CHECKING:
 MESMER_HOME = Path.home() / ".mesmer"
 
 
-def _atomic_write(path: Path, data: str) -> None:
-    """Atomic text write: tmpfile in the target's directory, then rename.
-
-    Guarantees readers never see a half-written file even if the writer
-    crashes mid-flush (a run that dies during profile synthesis must not
-    corrupt the previous profile). Used by :meth:`TargetMemory.save_profile`
-    + :meth:`save_target_profile` — anywhere the cost of a torn write is
-    the next run mistaking garbage for valid state.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    tmp = Path(tmp_path)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except Exception:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        raise
-
-
 class TargetMemory:
-    """File-based persistence for a specific target."""
+    """Persistence for a specific target.
 
-    def __init__(self, target_config: TargetConfig) -> None:
+    The default backend is local files. Callers may inject another
+    :class:`StorageProvider` and a non-``local`` workspace id when Mesmer grows
+    into hosted/team deployments.
+    """
+
+    def __init__(
+        self,
+        target_config: TargetConfig,
+        *,
+        storage: StorageProvider | None = None,
+        workspace_id: str = "local",
+    ) -> None:
         self.target_hash = hash_target(
             adapter=target_config.adapter,
             url=target_config.url or target_config.base_url,
             model=target_config.model,
         )
-        self.base_dir = MESMER_HOME / "targets" / self.target_hash
+        self.storage = storage or FileStorageProvider(MESMER_HOME)
+        self.workspace_id = workspace_id or "local"
+        self._prefix = join_storage_key(
+            workspace_prefix(self.workspace_id), "targets", self.target_hash
+        )
+        self.base_dir = self._path_for_prefix()
+
+    @classmethod
+    def from_target_hash(
+        cls,
+        target_hash: str,
+        *,
+        storage: StorageProvider | None = None,
+        workspace_id: str = "local",
+    ) -> "TargetMemory":
+        """Build memory around an already-known target hash.
+
+        Useful for web routes that address persisted target state directly and
+        do not have a full ``TargetConfig`` in hand.
+        """
+        obj = cls.__new__(cls)
+        obj.target_hash = str(target_hash)
+        obj.storage = storage or FileStorageProvider(MESMER_HOME)
+        obj.workspace_id = workspace_id or "local"
+        obj._prefix = join_storage_key(
+            workspace_prefix(obj.workspace_id), "targets", obj.target_hash
+        )
+        obj.base_dir = obj._path_for_prefix()
+        return obj
+
+    def _key(self, name: str) -> str:
+        return join_storage_key(self._prefix, name)
+
+    def _path_for_prefix(self) -> Path:
+        if isinstance(self.storage, FileStorageProvider):
+            return self.storage.resolve(self._prefix)
+        return Path(self._prefix)
+
+    def _path_for(self, name: str) -> Path:
+        if isinstance(self.storage, FileStorageProvider):
+            return self.storage.resolve(self._key(name))
+        return Path(self._key(name))
 
     @property
     def graph_path(self) -> Path:
-        return self.base_dir / "graph.json"
+        return self._path_for("graph.json")
 
     @property
     def profile_path(self) -> Path:
-        return self.base_dir / "profile.md"
+        return self._path_for("profile.md")
 
     @property
     def artifacts_dir(self) -> Path:
         """Directory of durable Markdown artifact documents."""
-        return self.base_dir / "artifacts"
+        return self._path_for("artifacts")
 
     @property
     def chat_path(self) -> Path:
         """Append-only operator <> leader chat log (JSONL, one row per
         message, ``{role, content, timestamp}``)."""
-        return self.base_dir / "chat.jsonl"
+        return self._path_for("chat.jsonl")
 
     @property
     def conversation_path(self) -> Path:
@@ -107,20 +134,20 @@ class TargetMemory:
         attacker can pick up where it left off. In TRIALS mode this file is
         never written.
         """
-        return self.base_dir / "conversation.json"
+        return self._path_for("conversation.json")
 
     def load_graph(self) -> AttackGraph:
         """Load existing graph or return a fresh one."""
-        if self.graph_path.exists():
+        key = self._key("graph.json")
+        if self.storage.exists(key):
             try:
-                return AttackGraph.from_json(self.graph_path.read_text())
+                return AttackGraph.from_json(self.storage.read_text(key))
             except (json.JSONDecodeError, KeyError):
                 pass
         return AttackGraph()
 
     def save_graph(self, graph: AttackGraph) -> None:
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.graph_path.write_text(graph.to_json())
+        self.storage.write_text(self._key("graph.json"), graph.to_json())
 
     # --- Belief Attack Graph (Session 2 wiring) ---
 
@@ -133,7 +160,7 @@ class TargetMemory:
         deleted (or rebuilt from the delta log) without touching the
         execution history.
         """
-        return self.base_dir / "belief_graph.json"
+        return self._path_for("belief_graph.json")
 
     @property
     def belief_deltas_path(self) -> Path:
@@ -142,7 +169,7 @@ class TargetMemory:
         Each line is one ``GraphDelta`` serialised to JSON. Replayed
         via :meth:`BeliefGraph.replay` if the snapshot ever corrupts.
         """
-        return self.base_dir / "belief_deltas.jsonl"
+        return self._path_for("belief_deltas.jsonl")
 
     def load_belief_graph(self) -> BeliefGraph:
         """Load the persisted belief graph or return a fresh one.
@@ -152,14 +179,19 @@ class TargetMemory:
         :class:`BeliefGraph` (just the singleton TargetNode) when
         neither file exists — fresh runs against a new target.
         """
-        if self.belief_graph_path.exists():
+        snapshot_key = self._key("belief_graph.json")
+        deltas_key = self._key("belief_deltas.jsonl")
+        if self.storage.exists(snapshot_key):
             try:
-                return BeliefGraph.from_json(self.belief_graph_path.read_text())
+                return BeliefGraph.from_json(self.storage.read_text(snapshot_key))
             except (json.JSONDecodeError, KeyError, ValueError):
                 pass
-        if self.belief_deltas_path.exists():
+        if self.storage.exists(deltas_key):
             try:
-                return BeliefGraph.replay(self.belief_deltas_path, target_hash=self.target_hash)
+                return BeliefGraph.replay_jsonl(
+                    self.storage.read_text(deltas_key),
+                    target_hash=self.target_hash,
+                )
             except (json.JSONDecodeError, KeyError, ValueError):
                 pass
         return BeliefGraph(target_hash=self.target_hash)
@@ -167,13 +199,18 @@ class TargetMemory:
     def save_belief_graph(self, graph: BeliefGraph) -> None:
         """Write snapshot + append unsaved deltas to the JSONL log.
 
-        Delegates to ``BeliefGraph.save`` which clears the in-memory
-        delta queue after writing — calling this twice in a row is a
-        no-op for the JSONL file (snapshot is rewritten, log is
-        unchanged).
+        The storage provider owns the physical write. After appending deltas,
+        the in-memory delta queue is cleared so calling this twice in a row is
+        a no-op for the JSONL file.
         """
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        graph.save(self.belief_graph_path, delta_log_path=self.belief_deltas_path)
+        self.storage.write_text(self._key("belief_graph.json"), graph.to_json())
+        if graph.deltas:
+            rows = "".join(
+                json.dumps(delta.to_dict(), sort_keys=True, default=str) + "\n"
+                for delta in graph.deltas
+            )
+            self.storage.append_text(self._key("belief_deltas.jsonl"), rows)
+            graph.deltas = []
 
     def delete_belief_graph(self) -> None:
         """Wipe both the snapshot and the delta log.
@@ -183,9 +220,13 @@ class TargetMemory:
         bypasses the AttackGraph load; this gives the belief graph
         the same affordance.
         """
-        for p in (self.belief_graph_path, self.belief_deltas_path):
-            if p.exists():
-                p.unlink()
+        for key in (self._key("belief_graph.json"), self._key("belief_deltas.jsonl")):
+            self.storage.delete(key, missing_ok=True)
+
+    def has_belief_graph(self) -> bool:
+        return self.storage.exists(self._key("belief_graph.json")) or self.storage.exists(
+            self._key("belief_deltas.jsonl")
+        )
 
     def load_profile(self) -> str | None:
         """Return the human-readable profile.md, if present.
@@ -195,21 +236,20 @@ class TargetMemory:
         conclude text). profile.md is an optional free-form note the
         web UI and ``mesmer graph show`` display.
         """
-        if self.profile_path.exists():
-            return self.profile_path.read_text()
+        key = self._key("profile.md")
+        if self.storage.exists(key):
+            return self.storage.read_text(key)
         return None
 
     def save_profile(self, profile: str) -> None:
         """Atomically write profile.md."""
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(self.profile_path, profile)
+        self.storage.write_text(self._key("profile.md"), profile, atomic=True)
 
     def load_artifacts(self) -> ArtifactStore:
-        return ArtifactStore.from_files(self.artifacts_dir)
+        return ArtifactStore.from_storage(self.storage, self._key("artifacts"))
 
     def save_artifacts(self, artifacts: ArtifactStore) -> None:
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        artifacts.to_files(self.artifacts_dir)
+        artifacts.to_storage(self.storage, self._key("artifacts"))
 
     # --- Chat log (operator <> leader) -----------------------------------
 
@@ -220,10 +260,8 @@ class TargetMemory:
         roles). The file is JSONL — one JSON object per line — so reads
         are bounded-cost via tail.
         """
-        self.base_dir.mkdir(parents=True, exist_ok=True)
         row = {"role": role, "content": content, "timestamp": timestamp}
-        with open(self.chat_path, "a") as f:
-            f.write(json.dumps(row) + "\n")
+        self.storage.append_text(self._key("chat.jsonl"), json.dumps(row) + "\n")
 
     def load_chat(self, limit: int = 20) -> list[dict]:
         """Return the last ``limit`` chat rows, oldest-first.
@@ -231,30 +269,26 @@ class TargetMemory:
         Silently skips malformed rows — a single corrupt line shouldn't
         sink the whole history.
         """
-        if not self.chat_path.exists():
+        key = self._key("chat.jsonl")
+        if not self.storage.exists(key):
             return []
         rows: list[dict] = []
-        with open(self.chat_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+        for line in self.storage.read_text(key).splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
         return rows[-limit:] if limit and len(rows) > limit else rows
 
     def clear_chat(self) -> None:
-        if self.chat_path.exists():
-            self.chat_path.unlink()
+        self.storage.delete(self._key("chat.jsonl"), missing_ok=True)
 
     def save_run_log(self, run_id: str, turns: list[Turn]) -> None:
-        runs_dir = self.base_dir / "runs"
-        runs_dir.mkdir(parents=True, exist_ok=True)
-        with open(runs_dir / f"{run_id}.jsonl", "w") as f:
-            for turn in turns:
-                f.write(json.dumps(turn.to_dict()) + "\n")
+        body = "".join(json.dumps(turn.to_dict()) + "\n" for turn in turns)
+        self.storage.write_text(self._key(f"runs/{run_id}.jsonl"), body)
 
     def save_conversation(self, turns: list[Turn]) -> None:
         """Persist the CONTINUOUS-mode rolling transcript.
@@ -266,12 +300,14 @@ class TargetMemory:
         """
         import time as _time
 
-        self.base_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "saved_at": _time.time(),
             "turns": [t.to_dict() for t in turns],
         }
-        self.conversation_path.write_text(json.dumps(payload, indent=2, default=str))
+        self.storage.write_text(
+            self._key("conversation.json"),
+            json.dumps(payload, indent=2, default=str),
+        )
 
     def load_conversation(self) -> list[Turn]:
         """Return the persisted rolling transcript, or ``[]`` when absent.
@@ -280,11 +316,11 @@ class TargetMemory:
         conversation file shouldn't kill the run; the attacker just starts
         fresh and the next save overwrites the bad blob.
         """
-        p = self.conversation_path
-        if not p.exists():
+        key = self._key("conversation.json")
+        if not self.storage.exists(key):
             return []
         try:
-            raw = json.loads(p.read_text())
+            raw = json.loads(self.storage.read_text(key))
             items = raw.get("turns", []) if isinstance(raw, dict) else []
         except (json.JSONDecodeError, KeyError, OSError):
             return []
@@ -311,44 +347,55 @@ class TargetMemory:
         return turns
 
     def delete_conversation(self) -> None:
-        if self.conversation_path.exists():
-            self.conversation_path.unlink()
+        self.storage.delete(self._key("conversation.json"), missing_ok=True)
 
     def list_runs(self) -> list[str]:
         """List run IDs, newest first."""
-        runs_dir = self.base_dir / "runs"
-        if not runs_dir.exists():
-            return []
-        files = sorted(runs_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        return [f.stem for f in files]
+        keys = self.storage.list_files(self._key("runs"), suffix=".jsonl")
+        keys = sorted(keys, key=self.storage.modified_at, reverse=True)
+        return [Path(key).stem for key in keys]
 
     def exists(self) -> bool:
-        return self.graph_path.exists()
+        return self.storage.exists(self._key("graph.json"))
 
 
 class GlobalMemory:
     """Cross-target technique effectiveness tracking."""
 
     base_dir = MESMER_HOME / "global"
+    storage_provider: StorageProvider | None = None
+    workspace_id = "local"
 
     @classmethod
     def stats_path(cls) -> Path:
         return cls.base_dir / "techniques.json"
 
     @classmethod
+    def _storage(cls) -> StorageProvider:
+        return cls.storage_provider or FileStorageProvider(cls.base_dir.parent)
+
+    @classmethod
+    def _prefix(cls) -> str:
+        return join_storage_key(workspace_prefix(cls.workspace_id), cls.base_dir.name)
+
+    @classmethod
+    def _stats_key(cls) -> str:
+        return join_storage_key(cls._prefix(), "techniques.json")
+
+    @classmethod
     def load_stats(cls) -> dict:
-        p = cls.stats_path()
-        if p.exists():
+        storage = cls._storage()
+        key = cls._stats_key()
+        if storage.exists(key):
             try:
-                return json.loads(p.read_text())
+                return json.loads(storage.read_text(key))
             except (json.JSONDecodeError, KeyError):
                 pass
         return {}
 
     @classmethod
     def save_stats(cls, stats: dict) -> None:
-        cls.base_dir.mkdir(parents=True, exist_ok=True)
-        cls.stats_path().write_text(json.dumps(stats, indent=2))
+        cls._storage().write_text(cls._stats_key(), json.dumps(stats, indent=2))
 
     @classmethod
     def update_from_graph(cls, graph: AttackGraph) -> None:

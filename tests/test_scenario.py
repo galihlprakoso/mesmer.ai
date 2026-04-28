@@ -28,7 +28,7 @@ MINIMAL_SCENARIO = (
     "  api_key: dummy\n"
 )
 
-SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
+SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "packages" / "scenarios"
 
 
 class TestScenarioJudgeConfig:

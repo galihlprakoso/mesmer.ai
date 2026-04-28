@@ -385,11 +385,7 @@ def _parse_artifacts(raw: object) -> list[ArtifactSpec]:
     return specs
 
 
-def load_scenario(path: str | Path) -> Scenario:
-    """Load a scenario from a YAML file."""
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
+def _scenario_from_data(data: dict) -> Scenario:
     # Resolve ${ENV_VAR} placeholders across entire target and agent blocks
     target_data = _resolve_env_vars(data.get("target", {}))
     agent_data = _resolve_env_vars(data.get("agent", {}))
@@ -520,3 +516,18 @@ def load_scenario(path: str | Path) -> Scenario:
         judge_rubric_additions=judge_rubric_additions,
         mode=mode,
     )
+
+
+def load_scenario_from_text(yaml_content: str) -> Scenario:
+    """Load a scenario from raw YAML text."""
+    data = yaml.safe_load(yaml_content)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Scenario YAML must be a mapping, got {type(data).__name__}."
+        )
+    return _scenario_from_data(data)
+
+
+def load_scenario(path: str | Path) -> Scenario:
+    """Load a scenario from a YAML file."""
+    return load_scenario_from_text(Path(path).read_text(encoding="utf-8"))

@@ -26,9 +26,6 @@ Thumbs.db
 # mesmer local data
 .mesmer/
 
-# Private/custom scenarios (real targets, credentials, etc.)
-scenarios/private/
-
 # Test artifacts
 .pytest_cache/
 .coverage

@@ -83,7 +83,7 @@ export function Hero() {
               className="text-[var(--color-primary)]"
               duration={1400}
             >
-              {`$ mesmer run scenarios/extract-system-prompt.yaml`}
+              {`$ mesmer run packages/scenarios/extract-system-prompt.yaml`}
             </TypingAnimation>
 
             <AnimatedSpan

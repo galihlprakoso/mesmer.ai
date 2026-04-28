@@ -8,7 +8,7 @@
 # Usage:
 #   export ANTHROPIC_API_KEY=your-claude-key
 #   export OPENROUTER_API_KEY=your-target-provider-key
-#   mesmer run scenarios/extract-system-and-tools.yaml --verbose
+#   mesmer run packages/scenarios/extract-system-and-tools.yaml --verbose
 
 name: "Extract System Prompt + Tool Catalog"
 description: >

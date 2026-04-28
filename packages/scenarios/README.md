@@ -21,13 +21,16 @@ Public scenarios declare their durable artifacts explicitly. Keep
 human/operator discussion takeaways with `update_artifact` instead of
 treating transient chat as the long-term plan.
 
-## Private scenarios
+## User scenarios
 
-Put your real target scenarios in `scenarios/private/`. This directory is **gitignored** — nothing inside it will ever be committed or pushed.
+Packaged scenarios are templates. Put real target scenarios in your local
+Mesmer workspace under `~/.mesmer/workspaces/local/scenarios/`, or create them
+from the web editor. That local workspace is outside the repo and maps cleanly
+to a future database-backed workspace.
 
 ```bash
-mkdir -p scenarios/private
-cp scenarios/extract-system-prompt.yaml scenarios/private/my-target.yaml
+mkdir -p ~/.mesmer/workspaces/local/scenarios
+cp packages/scenarios/extract-system-prompt.yaml ~/.mesmer/workspaces/local/scenarios/my-target.yaml
 # edit with your real target URL, API keys, etc.
-mesmer run scenarios/private/my-target.yaml --verbose
+mesmer run ~/.mesmer/workspaces/local/scenarios/my-target.yaml --verbose
 ```

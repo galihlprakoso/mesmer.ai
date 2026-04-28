@@ -24,8 +24,26 @@ from mesmer.core.agent.beliefs import (
     generate_hypotheses,
     rank_frontier,
 )
-from mesmer.core.agent.memory import TargetMemory, GlobalMemory, generate_run_id
+from mesmer.core.agent.memory import (
+    MESMER_HOME,
+    GlobalMemory,
+    TargetMemory,
+    generate_run_id,
+)
 from mesmer.core.agent.prompts import EXECUTIVE_SYSTEM as _DEFAULT_EXECUTIVE_PROMPT
+from mesmer.core.modules import (
+    CompositeModuleCatalog,
+    FileModuleCatalog,
+    ModuleSource,
+    StorageModuleCatalog,
+    workspace_modules_prefix,
+)
+from mesmer.core.persistence import (
+    FileScenarioRepository,
+    FileStorageProvider,
+    join_storage_key,
+    workspace_prefix,
+)
 from mesmer.core.registry import Registry
 from mesmer.core.scenario import load_scenario, AgentConfig, Scenario
 from mesmer.core.strategy_library import (
@@ -34,8 +52,63 @@ from mesmer.core.strategy_library import (
     save_library,
 )
 
-# Default module paths — relative to project root
-BUILTIN_MODULES = Path(__file__).parent.parent.parent / "modules"
+# Packaged catalogs shipped with the repository. Workspace-owned modules and
+# scenarios live under MESMER_HOME so local/user data does not dirty the repo.
+PACKAGE_ROOT = Path(__file__).parent.parent.parent / "packages"
+BUILTIN_MODULES = PACKAGE_ROOT / "modules"
+SCENARIO_TEMPLATES = PACKAGE_ROOT / "scenarios"
+WORKSPACE_SCENARIOS = MESMER_HOME / "workspaces" / "local" / "scenarios"
+
+
+def build_module_registry(
+    *,
+    workspace_id: str = "local",
+    scenario_module_paths: list[str] | None = None,
+    extra_module_paths: list[str] | None = None,
+) -> Registry:
+    """Build the active runtime module registry.
+
+    Resolution order is intentional: packaged builtins, workspace modules,
+    scenario-declared local modules, then explicit extra module paths. Later
+    catalogs override earlier catalogs by module name.
+    """
+    catalogs = [
+        FileModuleCatalog(
+            BUILTIN_MODULES,
+            source=ModuleSource.BUILTIN,
+            source_id="mesmer",
+            editable=False,
+        ),
+        StorageModuleCatalog(
+            FileStorageProvider(MESMER_HOME),
+            workspace_modules_prefix(workspace_id),
+            source=ModuleSource.WORKSPACE,
+            source_id=workspace_id,
+            editable=True,
+        ),
+    ]
+    for path in scenario_module_paths or []:
+        catalogs.append(
+            FileModuleCatalog(
+                path,
+                source=ModuleSource.LOCAL_PATH,
+                source_id="scenario",
+                editable=True,
+            )
+        )
+    for path in extra_module_paths or []:
+        catalogs.append(
+            FileModuleCatalog(
+                path,
+                source=ModuleSource.LOCAL_PATH,
+                source_id="extra",
+                editable=True,
+            )
+        )
+
+    registry = Registry()
+    registry.load_catalog(CompositeModuleCatalog(*catalogs))
+    return registry
 
 
 @dataclass
@@ -49,6 +122,7 @@ class RunConfig:
     hint_file: str | None = None
     fresh: bool = False
     extra_module_paths: list[str] = field(default_factory=list)
+    workspace_id: str = "local"
     output_path: str | None = None
     human_broker: "HumanQuestionBroker | None" = None
     # Per-invocation ScenarioMode override (--mode on the CLI). When None,
@@ -133,12 +207,11 @@ async def execute_run(
     run_started_at = time.monotonic()
 
     # Build registry
-    registry = Registry()
-    registry.auto_discover(BUILTIN_MODULES)
-    for p in scenario.module_paths:
-        registry.auto_discover(p)
-    for p in config.extra_module_paths:
-        registry.auto_discover(p)
+    registry = build_module_registry(
+        workspace_id=config.workspace_id,
+        scenario_module_paths=scenario.module_paths,
+        extra_module_paths=config.extra_module_paths,
+    )
 
     # Agent config — apply overrides
     agent_config = scenario.agent
@@ -200,7 +273,7 @@ async def execute_run(
     target = create_target(scenario.target)
 
     # Load or create attack graph
-    memory = TargetMemory(scenario.target)
+    memory = TargetMemory(scenario.target, workspace_id=config.workspace_id)
     if config.fresh or not memory.exists():
         graph = AttackGraph()
     else:
@@ -480,92 +553,55 @@ def list_scenarios(directory: str | Path) -> list[dict]:
     """List scenario YAML files in a directory.
 
     Only includes files that look like actual scenarios (must have
-    'target', 'objective', and 'module' keys). Skips module YAMLs,
+    'target', 'objective', and 'modules' keys). Skips module YAMLs,
     hidden directories, .venv, and node_modules.
     """
-    import yaml
-
-    directory = Path(directory)
-    scenarios = []
-
-    skip_dirs = {".venv", "node_modules", ".git", "__pycache__", "dist"}
-
-    for ext in ("*.yaml", "*.yml"):
-        for f in sorted(directory.rglob(ext)):
-            # Skip hidden dirs and known non-scenario directories
-            if any(part.startswith(".") or part in skip_dirs for part in f.parts):
-                continue
-
-            try:
-                with open(f) as fh:
-                    data = yaml.safe_load(fh)
-
-                # A valid scenario must use the current ``modules:`` list.
-                # ``load_scenario`` rejects the removed singular ``module:``
-                # schema, so the listing UI should not surface it either.
-                if not isinstance(data, dict):
-                    continue
-                if not all(k in data for k in ("target", "objective")):
-                    continue
-                if "modules" not in data:
-                    continue
-
-                s = load_scenario(str(f))
-                scenarios.append(
-                    {
-                        "path": str(f),
-                        "name": s.name,
-                        "description": s.description,
-                        "target_adapter": s.target.adapter,
-                        "target_url": s.target.url or s.target.base_url or s.target.model or "",
-                        "modules": list(s.modules),
-                        "max_turns": s.objective.max_turns,
-                    }
-                )
-            except Exception:
-                pass  # silently skip unparseable files
-    return scenarios
+    return [
+        doc.summary()
+        for doc in FileScenarioRepository(
+            directory,
+            write_root=WORKSPACE_SCENARIOS,
+        ).list()
+    ]
 
 
-def list_modules(extra_paths: list[str] | None = None) -> list[dict]:
+def list_modules(extra_paths: list[str] | None = None, *, workspace_id: str = "local") -> list[dict]:
     """List all available modules."""
-    registry = Registry()
-    registry.auto_discover(BUILTIN_MODULES)
-    for p in extra_paths or []:
-        registry.auto_discover(p)
+    registry = build_module_registry(
+        workspace_id=workspace_id,
+        extra_module_paths=extra_paths or [],
+    )
     return registry.list_modules()
 
 
-def list_targets() -> list[dict]:
-    """List known targets from ~/.mesmer/targets/."""
-    targets_dir = Path.home() / ".mesmer" / "targets"
-    if not targets_dir.exists():
-        return []
-
+def list_targets(workspace_id: str = "local") -> list[dict]:
+    """List known targets from the configured local storage namespace."""
+    storage = FileStorageProvider(MESMER_HOME)
+    targets_prefix = join_storage_key(workspace_prefix(workspace_id), "targets")
     targets = []
-    for d in sorted(targets_dir.iterdir()):
-        if not d.is_dir():
-            continue
-        graph_path = d / "graph.json"
-        belief_graph_path = d / "belief_graph.json"
-        belief_deltas_path = d / "belief_deltas.jsonl"
+    for target_key in storage.list_dirs(targets_prefix):
+        target_hash = Path(target_key).name
+        graph_key = join_storage_key(target_key, "graph.json")
+        belief_graph_key = join_storage_key(target_key, "belief_graph.json")
+        belief_deltas_key = join_storage_key(target_key, "belief_deltas.jsonl")
         info = {
-            "hash": d.name,
-            "has_graph": graph_path.exists(),
-            "has_belief_graph": belief_graph_path.exists() or belief_deltas_path.exists(),
+            "hash": target_hash,
+            "has_graph": storage.exists(graph_key),
+            "has_belief_graph": storage.exists(belief_graph_key)
+            or storage.exists(belief_deltas_key),
         }
-        if graph_path.exists():
+        if storage.exists(graph_key):
             try:
-                g = AttackGraph.from_json(graph_path.read_text())
+                g = AttackGraph.from_json(storage.read_text(graph_key))
                 info["stats"] = g.stats()
                 info["runs"] = g.run_counter
             except Exception:
                 pass
-        if belief_graph_path.exists():
+        if storage.exists(belief_graph_key):
             try:
                 from mesmer.core.belief_graph import BeliefGraph
 
-                bg = BeliefGraph.from_json(belief_graph_path.read_text())
+                bg = BeliefGraph.from_json(storage.read_text(belief_graph_key))
                 info["belief_stats"] = bg.stats()
             except Exception:
                 pass

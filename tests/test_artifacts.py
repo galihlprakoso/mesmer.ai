@@ -12,6 +12,7 @@ from mesmer.core.artifacts import (
     render_artifact_contract,
 )
 from mesmer.core.patching import MarkdownPatchOperation
+from mesmer.core.persistence import FileStorageProvider
 
 
 def test_artifact_store_sets_reads_and_lists():
@@ -99,3 +100,40 @@ def test_artifact_list_items_merges_declared_and_existing():
     assert by_id["operator_notes"].exists is True
     assert by_id["operator_notes"].headings == ["Leads"]
     assert "format-shift" not in by_id
+
+
+def test_artifact_store_round_trips_through_storage_provider(tmp_path):
+    storage = FileStorageProvider(tmp_path / ".mesmer")
+    store = ArtifactStore(
+        {
+            "operator_notes": "## Leads\n- try role recap\n",
+            "empty": "",
+        }
+    )
+
+    store.to_storage(storage, "workspaces/team-a/targets/t1/artifacts")
+    loaded = ArtifactStore.from_storage(storage, "workspaces/team-a/targets/t1/artifacts")
+
+    assert loaded.get("operator_notes") == "## Leads\n- try role recap\n"
+    assert loaded.get("empty") == ""
+    assert (
+        tmp_path
+        / ".mesmer"
+        / "workspaces"
+        / "team-a"
+        / "targets"
+        / "t1"
+        / "artifacts"
+        / "operator_notes.md"
+    ).exists()
+
+
+def test_artifact_store_storage_export_removes_stale_files(tmp_path):
+    storage = FileStorageProvider(tmp_path / ".mesmer")
+    prefix = "targets/t1/artifacts"
+    ArtifactStore({"old": "stale", "current": "keep"}).to_storage(storage, prefix)
+
+    ArtifactStore({"current": "keep"}).to_storage(storage, prefix)
+
+    assert not storage.exists("targets/t1/artifacts/old.md")
+    assert storage.exists("targets/t1/artifacts/current.md")
