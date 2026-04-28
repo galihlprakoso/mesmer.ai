@@ -71,6 +71,11 @@
     try {
       const res = await sendLeaderChat($selectedScenario, text)
       if (res.queued) {
+        chatHistory.update(h => [...h, {
+          role: 'system',
+          content: 'Queued for the live leader. The next leader turn will receive it, and any talk_to_operator reply will appear here.',
+          timestamp: Date.now() / 1000,
+        }])
         showFeedback('ok', 'Queued for the live leader')
       } else if (res.reply) {
         chatHistory.update(h => [...h, {
@@ -80,8 +85,19 @@
         if (res.updated_artifact) {
           showFeedback('ok', `Artifact updated: ${res.updated_artifact.artifact_id}`)
         }
+      } else {
+        chatHistory.update(h => [...h, {
+          role: 'system',
+          content: 'Leader chat returned no visible reply.',
+          timestamp: Date.now() / 1000,
+        }])
       }
     } catch (e) {
+      chatHistory.update(h => [...h, {
+        role: 'system',
+        content: `Leader chat failed: ${e.message}`,
+        timestamp: Date.now() / 1000,
+      }])
       showFeedback('err', e.message)
     } finally {
       sending = false
@@ -120,6 +136,22 @@
       {/each}
     {/if}
 
+    {#if sending}
+      <div class="thinking-msg" role="status" aria-live="polite">
+        <div class="thinking-header">
+          <span class="thinking-dot"></span>
+          <span class="thinking-label">LEADER</span>
+          <span class="thinking-state">{$isRunning ? 'queueing operator steer' : 'reading context'}</span>
+        </div>
+        <div class="thinking-body">
+          <span>{$isRunning ? 'Sending to the live leader' : 'Inspecting graph, belief map, and artifacts'}</span>
+          <span class="typing-dots" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
+        </div>
+      </div>
+    {/if}
+
     {#if toolTrace.length > 0}
       <div class="tool-trace">
         {#each toolTrace as call}
@@ -154,7 +186,12 @@
         rows="2"
       ></textarea>
       <button class="send-btn" on:click={submit} disabled={!inputEnabled || !messageText.trim() || sending}>
-        {#if sending}...{:else}Send{/if}
+        {#if sending}
+          <span class="btn-spinner" aria-hidden="true"></span>
+          <span>Working</span>
+        {:else}
+          <span>Send</span>
+        {/if}
       </button>
     </div>
     {#if feedback}
@@ -234,6 +271,86 @@
     border-radius: 3px;
   }
 
+  .thinking-msg {
+    align-self: flex-start;
+    max-width: 90%;
+    min-width: 260px;
+    padding: 9px 12px;
+    border-radius: 4px;
+    background:
+      linear-gradient(90deg, hsla(155 100% 42% / 0.10), transparent 72%),
+      var(--bg-tertiary);
+    border-left: 3px solid var(--accent);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    box-shadow: inset 0 0 0 1px hsla(155 100% 42% / 0.08);
+  }
+
+  .thinking-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    color: var(--text-muted);
+  }
+
+  .thinking-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--phosphor);
+    box-shadow: var(--phosphor-glow-tight);
+    animation: thinkingPulse 1.25s ease-in-out infinite;
+  }
+
+  .thinking-label {
+    font-family: var(--font-pixel);
+    font-size: 0.6875rem;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+  }
+
+  .thinking-state {
+    font-size: 0.65rem;
+    opacity: 0.75;
+  }
+
+  .thinking-body {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    color: var(--text);
+  }
+
+  .typing-dots {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+  }
+
+  .typing-dots span {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--phosphor);
+    opacity: 0.35;
+    animation: typingDot 1s ease-in-out infinite;
+  }
+
+  .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+  @keyframes thinkingPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.55; transform: scale(0.82); }
+  }
+
+  @keyframes typingDot {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+    30% { transform: translateY(-3px); opacity: 1; }
+  }
+
   .input-area {
     border-top: 1px solid var(--border);
     padding: 8px 12px;
@@ -300,10 +417,28 @@
     cursor: pointer;
     align-self: flex-end;
     min-width: 70px;
+    height: 37px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
   }
 
   .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
   .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .btn-spinner {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid hsla(144 17% 5% / 0.35);
+    border-top-color: #000;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
 
   .feedback {
     margin-top: 4px;

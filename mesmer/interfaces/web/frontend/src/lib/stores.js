@@ -168,12 +168,15 @@ export const chatMessages = derived(
   [graphData, events, chatHistory],
   ([$g, $evts, $hist]) => {
     const conv = buildChatMessages($g, $evts)
-    const persisted = ($hist || []).map(row => ({
-      kind: row.role === 'user' ? 'human' : 'agent-status',
-      sender: row.role === 'user' ? 'human' : 'agent',
-      timestamp: row.timestamp || 0,
-      text: row.content || '',
-    }))
+    const persisted = ($hist || []).map(row => {
+      const role = row.role || 'assistant'
+      return {
+        kind: role === 'user' ? 'human' : role === 'system' ? 'system' : 'agent-status',
+        sender: role === 'user' ? 'human' : role === 'system' ? 'system' : 'agent',
+        timestamp: row.timestamp || 0,
+        text: row.content || '',
+      }
+    })
     const merged = [...persisted, ...conv]
     merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
     return merged

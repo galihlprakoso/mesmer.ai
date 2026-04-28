@@ -117,6 +117,29 @@ def _usage_payload(response) -> dict:
     }
 
 
+def _drain_operator_message_block(ctx: "Context") -> str:
+    """Render and clear queued operator messages for the top-level leader."""
+    if ctx.depth != 0 or not ctx.operator_messages:
+        return ""
+    rendered = []
+    for m in ctx.operator_messages:
+        content = (m.get("content") or "").strip()
+        if content:
+            rendered.append(f"- {content}")
+    ctx.operator_messages.clear()
+    if not rendered:
+        return ""
+    return (
+        "## Operator Messages (mid-run, unconsumed)\n"
+        "The human operator sent you these messages while you were running. "
+        "Read them, weigh them against the plan, and decide whether to adjust. "
+        "If you have not acknowledged these messages yet, call "
+        "`talk_to_operator` before dispatching another manager or concluding, "
+        "unless the operator explicitly said no reply is needed.\n\n"
+        + "\n".join(rendered)
+    )
+
+
 async def run_react_loop(
     actor: ReactActorSpec,
     ctx: "Context",
@@ -232,21 +255,9 @@ async def run_react_loop(
     # empties so they don't replay. Sub-modules don't drain (they inherit
     # the same list reference but the leader is the operator's counterpart,
     # not the sub-modules).
-    if ctx.depth == 0 and ctx.operator_messages:
-        rendered = []
-        for m in ctx.operator_messages:
-            content = (m.get("content") or "").strip()
-            if content:
-                rendered.append(f"- {content}")
-        ctx.operator_messages.clear()
-        if rendered:
-            user_content_parts.append(
-                "## Operator Messages (mid-run, unconsumed)\n"
-                "The human operator sent you these messages while you were "
-                "running. Read them, weigh them against the plan, and decide "
-                "whether to adjust. You may reply via the talk_to_operator "
-                "tool if useful.\n\n" + "\n".join(rendered)
-            )
+    operator_block = _drain_operator_message_block(ctx)
+    if operator_block:
+        user_content_parts.append(operator_block)
 
     # Artifact contract — scenario-declared durable output documents.
     # This is injected even when documents are empty so the agent knows what
@@ -341,6 +352,10 @@ async def run_react_loop(
 
     for iteration in range(max_iterations):
         current_iteration = iteration + 1
+        operator_block = _drain_operator_message_block(ctx)
+        if operator_block:
+            messages.append({"role": "user", "content": operator_block})
+
         # Depth-prefixed iteration label so nested modules don't confuse the
         # reader when their iteration counters interleave with the leader's.
         indent = "  " * ctx.depth

@@ -39,7 +39,18 @@ from mesmer.core.artifacts import (
     declared_artifact_ids,
     render_artifact_contract,
 )
+from mesmer.core.agent.graph_compiler import GraphContextCompiler
+from mesmer.core.belief_graph import (
+    Attempt,
+    Evidence,
+    FrontierExperiment,
+    NodeKind,
+    Strategy,
+    TargetNode,
+    WeaknessHypothesis,
+)
 from mesmer.core.constants import NodeSource, ToolName
+from mesmer.core.constants import BeliefRole
 
 if TYPE_CHECKING:
     from mesmer.core.agent.memory import TargetMemory
@@ -52,14 +63,18 @@ MAX_LEADER_CHAT_ITERATIONS = 8
 MAX_LIST_ATTEMPTS = 50
 MAX_SEARCH_LEAKS = 30
 MAX_RUN_TURNS = 50
+MAX_BELIEF_NODES = 50
 LEAK_PREVIEW_CHARS = 200
 TURN_PREVIEW_CHARS = 1000
+BELIEF_TEXT_PREVIEW_CHARS = 280
 
 
 class LeaderChatToolName(str, Enum):
     LIST_ATTEMPTS = "list_attempts"
     GET_ATTEMPT = "get_attempt"
     SEARCH_LEAKS = "search_leaks"
+    LIST_BELIEF_NODES = "list_belief_nodes"
+    GET_BELIEF_NODE = "get_belief_node"
     LIST_RUNS = "list_runs"
     GET_RUN_TURNS = "get_run_turns"
 
@@ -132,6 +147,54 @@ TOOL_SCHEMAS: list[dict] = [
                     "substring": {"type": "string", "description": "leave empty to list all leaks"},
                     "limit":     {"type": "integer"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": LeaderChatToolName.LIST_BELIEF_NODES.value,
+            "description": (
+                "List typed Belief Map nodes for this target. Use this when "
+                "the operator asks about hypotheses, evidence, frontier "
+                "experiments, attempts, target traits, or why the planner "
+                "prefers a next move. Filter by kind/status/state/module/run_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "target | hypothesis | evidence | attempt | strategy | frontier",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "hypothesis status: active | confirmed | refuted | stale",
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "frontier state: proposed | executing | fulfilled | dropped",
+                    },
+                    "module": {"type": "string", "description": "attempt/frontier module name"},
+                    "run_id": {"type": "string"},
+                    "limit": {"type": "integer", "description": f"cap (max {MAX_BELIEF_NODES})"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": LeaderChatToolName.GET_BELIEF_NODE.value,
+            "description": (
+                "Fetch one Belief Map node by id with full typed details. "
+                "Use after list_belief_nodes when discussing a specific "
+                "hypothesis, evidence item, attempt, strategy, or frontier experiment."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"node_id": {"type": "string"}},
+                "required": ["node_id"],
             },
         },
     },
@@ -279,6 +342,114 @@ def _node_full(node) -> dict:
     }
 
 
+def _preview(text: str, cap: int = BELIEF_TEXT_PREVIEW_CHARS) -> str:
+    text = (text or "").strip()
+    return text[:cap] + ("..." if len(text) > cap else "")
+
+
+def _belief_node_summary(node) -> dict:
+    """Compact typed Belief Map node summary."""
+    base = {
+        "id": node.id,
+        "kind": node.kind.value,
+        "created_at": node.created_at,
+        "run_id": node.run_id,
+    }
+    if isinstance(node, TargetNode):
+        return {
+            **base,
+            "target_hash": node.target_hash,
+            "trait_keys": sorted(node.traits.keys()),
+            "trait_count": len(node.traits),
+        }
+    if isinstance(node, WeaknessHypothesis):
+        return {
+            **base,
+            "family": node.family,
+            "status": node.status.value,
+            "confidence": node.confidence,
+            "claim": _preview(node.claim),
+            "description": _preview(node.description),
+        }
+    if isinstance(node, Evidence):
+        return {
+            **base,
+            "signal_type": node.signal_type.value,
+            "polarity": node.polarity.value,
+            "hypothesis_id": node.hypothesis_id,
+            "from_attempt": node.from_attempt,
+            "confidence_delta": node.confidence_delta,
+            "verbatim_fragment": _preview(node.verbatim_fragment),
+            "rationale": _preview(node.rationale),
+        }
+    if isinstance(node, Attempt):
+        return {
+            **base,
+            "module": node.module,
+            "outcome": node.outcome,
+            "judge_score": node.judge_score,
+            "experiment_id": node.experiment_id,
+            "tested_hypothesis_ids": list(node.tested_hypothesis_ids),
+            "approach": _preview(node.approach),
+            "module_output_preview": _preview(node.module_output),
+        }
+    if isinstance(node, Strategy):
+        return {
+            **base,
+            "family": node.family,
+            "local_success_rate": node.local_success_rate,
+            "success_count": node.success_count,
+            "attempt_count": node.attempt_count,
+            "template_summary": _preview(node.template_summary),
+        }
+    if isinstance(node, FrontierExperiment):
+        return {
+            **base,
+            "hypothesis_id": node.hypothesis_id,
+            "strategy_id": node.strategy_id,
+            "module": node.module,
+            "state": node.state.value,
+            "utility": node.utility,
+            "expected_progress": node.expected_progress,
+            "information_gain": node.information_gain,
+            "query_cost": node.query_cost,
+            "instruction": _preview(node.instruction),
+            "expected_signal": _preview(node.expected_signal),
+        }
+    return {**base, **node.to_dict()}
+
+
+def _truncate_belief_value(value, *, cap: int = 6000):
+    if isinstance(value, str):
+        return value[:cap] + ("..." if len(value) > cap else "")
+    if isinstance(value, list):
+        return [_truncate_belief_value(v, cap=cap) for v in value]
+    if isinstance(value, dict):
+        return {k: _truncate_belief_value(v, cap=cap) for k, v in value.items()}
+    return value
+
+
+def _artifact_specs_with_operator_notes(
+    specs: list[ArtifactSpec] | None,
+) -> list[ArtifactSpec]:
+    """Leader chat always has a durable operator scratchpad."""
+    out = list(specs or [])
+    if StandardArtifactId.OPERATOR_NOTES.value not in {spec.id for spec in out}:
+        out.append(_operator_notes_spec())
+    return out
+
+
+def _operator_notes_spec() -> ArtifactSpec:
+    return ArtifactSpec(
+        id=StandardArtifactId.OPERATOR_NOTES.value,
+        title="Operator Notes",
+        description=(
+            "Shared operator/leader scratchpad: discussion summaries, "
+            "open questions, and next-run steering."
+        ),
+    )
+
+
 def _run_list(memory: TargetMemory, limit: int) -> list[dict]:
     """Aggregate run metadata: id + timestamp + verdict + winning module."""
     run_ids = memory.list_runs()[:limit]
@@ -350,6 +521,8 @@ def dispatch_tool(
     """Synchronously run one inspection tool. Returns a JSON-serialisable
     dict (always a dict — wrap lists in ``{"items": [...]}`` for shape
     consistency, makes the LLM less likely to fumble result parsing)."""
+    declared_artifact_specs = list(artifact_specs or [])
+    artifact_specs = _artifact_specs_with_operator_notes(declared_artifact_specs)
     chat_tool = None
     try:
         chat_tool = LeaderChatToolName(name)
@@ -420,22 +593,81 @@ def dispatch_tool(
         hits.sort(key=lambda h: -h["score"])
         return {"items": hits[:limit]}
 
+    if chat_tool is LeaderChatToolName.LIST_BELIEF_NODES:
+        bg = memory.load_belief_graph()
+        kind = (args.get("kind") or "").strip()
+        status = (args.get("status") or "").strip()
+        state = (args.get("state") or "").strip()
+        module = (args.get("module") or "").strip()
+        run_id = (args.get("run_id") or "").strip()
+        limit = min(int(args.get("limit") or MAX_BELIEF_NODES), MAX_BELIEF_NODES)
+        kind_filter = None
+        if kind:
+            try:
+                kind_filter = NodeKind(kind)
+            except ValueError:
+                return {"error": f"unknown belief node kind {kind!r}"}
+
+        nodes = []
+        for n in bg.iter_nodes(kind_filter):
+            if status and not (
+                isinstance(n, WeaknessHypothesis) and n.status.value == status
+            ):
+                continue
+            if state and not (
+                isinstance(n, FrontierExperiment) and n.state.value == state
+            ):
+                continue
+            if module:
+                node_module = getattr(n, "module", "")
+                if node_module != module:
+                    continue
+            if run_id and n.run_id != run_id:
+                continue
+            nodes.append(n)
+        nodes.sort(
+            key=lambda n: (
+                getattr(n, "utility", 0.0)
+                if isinstance(n, FrontierExperiment)
+                else n.created_at
+            ),
+            reverse=True,
+        )
+        return {
+            "stats": bg.stats(),
+            "items": [_belief_node_summary(n) for n in nodes[:limit]],
+        }
+
+    if chat_tool is LeaderChatToolName.GET_BELIEF_NODE:
+        node_id = args.get("node_id") or ""
+        bg = memory.load_belief_graph()
+        node = bg.nodes.get(node_id)
+        if node is None:
+            return {"error": f"no belief node with id={node_id!r}"}
+        return _truncate_belief_value(node.to_dict())
+
     if artifact_tool is ToolName.LIST_ARTIFACTS:
         limit = max(1, min(int(args.get("limit") or 50), 100))
+        artifacts = memory.load_artifacts()
+        items = artifact_list_items(artifacts, artifact_specs)
+        if not declared_artifact_specs:
+            by_id = {item.id: item for item in artifact_list_items(artifacts)}
+            by_id[StandardArtifactId.OPERATOR_NOTES.value] = artifact_list_items(
+                artifacts,
+                [_operator_notes_spec()],
+            )[0]
+            items = sorted(by_id.values(), key=lambda item: item.id)
         return {
             "items": [
                 item.to_dict()
-                for item in artifact_list_items(
-                    memory.load_artifacts(),
-                    artifact_specs or [],
-                )[:limit]
+                for item in items[:limit]
             ]
         }
 
     if artifact_tool is ToolName.READ_ARTIFACT:
         artifacts = memory.load_artifacts()
         artifact_id = args.get("artifact_id") or ""
-        allowed = declared_artifact_ids(artifact_specs or [])
+        allowed = declared_artifact_ids(artifact_specs)
         if allowed and artifact_id not in allowed:
             allowed_text = ", ".join(f"`{item}`" for item in sorted(allowed))
             return {
@@ -445,7 +677,7 @@ def dispatch_tool(
                 )
             }
         declared = next(
-            (spec for spec in (artifact_specs or []) if spec.id == artifact_id),
+            (spec for spec in artifact_specs if spec.id == artifact_id),
             None,
         )
         sections = args.get("sections") if isinstance(args.get("sections"), list) else None
@@ -469,7 +701,7 @@ def dispatch_tool(
         artifact_ids = args.get("artifact_ids")
         if not isinstance(artifact_ids, list):
             artifact_ids = None
-        allowed = declared_artifact_ids(artifact_specs or [])
+        allowed = declared_artifact_ids(artifact_specs)
         if allowed:
             if artifact_ids is None:
                 artifact_ids = sorted(allowed)
@@ -508,7 +740,7 @@ def dispatch_tool(
     if artifact_tool is ToolName.UPDATE_ARTIFACT:
         artifacts = memory.load_artifacts()
         try:
-            allowed = declared_artifact_ids(artifact_specs or [])
+            allowed = declared_artifact_ids(artifact_specs)
             artifact_id = args.get("artifact_id") or ""
             if allowed and artifact_id not in allowed:
                 allowed_text = ", ".join(f"`{item}`" for item in sorted(allowed))
@@ -548,11 +780,17 @@ class LeaderChatResult:
     updated_artifact: dict | None            # populated when update_artifact ran
 
 
-def _system_prompt(scenario: Scenario, artifact_brief: str, graph_summary: str) -> str:
+def _system_prompt(
+    scenario: Scenario,
+    artifact_brief: str,
+    graph_summary: str,
+    belief_brief: str,
+) -> str:
     leader = ", ".join(scenario.modules) if scenario.modules else "(no managers)"
     objective = scenario.objective.goal
     rendered_artifact_brief = artifact_brief or f"{ARTIFACT_PROMPT_HEADING}\n(no artifacts yet)"
-    artifact_contract = render_artifact_contract(scenario.artifacts)
+    chat_artifact_specs = _artifact_specs_with_operator_notes(list(scenario.artifacts))
+    artifact_contract = render_artifact_contract(chat_artifact_specs)
     artifact_contract_block = f"{artifact_contract}\n\n" if artifact_contract else ""
     tool_lines = "\n".join(
         f"- {t['function']['name']}: {t['function']['description'].splitlines()[0]}"
@@ -568,11 +806,18 @@ def _system_prompt(scenario: Scenario, artifact_brief: str, graph_summary: str) 
         f"{artifact_contract_block}"
         f"{rendered_artifact_brief}\n\n"
         f"## Graph summary\n{graph_summary or '(no runs yet)'}\n\n"
+        f"## Belief Map leader brief\n{belief_brief or '(no belief map yet)'}\n\n"
         f"## Tools available\n{tool_lines}\n\n"
         f"Use update_artifact when you have a concrete lesson worth committing "
         f"for future runs; use artifact_id `{StandardArtifactId.OPERATOR_NOTES.value}` for human working "
-        f"notes. If the operator asks something you can answer from artifacts "
-        f"or graph_summary above, you don't need to call a tool. "
+        f"notes. Treat it as the shared scratchpad for discussion summaries, "
+        f"open questions, and next-run steering. Future executions read this "
+        f"artifact through the normal Artifact Brief, so commit concise "
+        f"discussion takeaways there when the operator asks you to remember "
+        f"them or when the conclusion would materially affect the next run. "
+        f"If the operator asks something you can answer from artifacts, the "
+        f"graph summary, or the Belief Map leader brief above, you don't need "
+        f"to call a tool. "
         f"After your tool calls, give the operator a clear, conversational "
         f"answer — not a JSON dump."
     )
@@ -606,8 +851,24 @@ async def run_leader_chat(
     artifact_brief = memory.load_artifacts().render_brief_for_prompt()
     graph = memory.load_graph()
     graph_summary = graph.format_summary()
+    belief_graph = memory.load_belief_graph()
+    belief_brief = GraphContextCompiler(graph=belief_graph).compile(
+        role=BeliefRole.LEADER,
+        available_modules=scenario.modules,
+        token_budget=3000,
+    )
 
-    messages: list[dict] = [{"role": "system", "content": _system_prompt(scenario, artifact_brief, graph_summary)}]
+    messages: list[dict] = [
+        {
+            "role": "system",
+            "content": _system_prompt(
+                scenario,
+                artifact_brief,
+                graph_summary,
+                belief_brief,
+            ),
+        }
+    ]
     for row in history:
         role = row.get("role")
         if role not in ("user", "assistant"):
@@ -680,7 +941,9 @@ async def run_leader_chat(
                     name,
                     args,
                     memory,
-                    artifact_specs=list(scenario.artifacts),
+                    artifact_specs=_artifact_specs_with_operator_notes(
+                        list(scenario.artifacts)
+                    ),
                 )
             except Exception as e:
                 result = {"error": f"{type(e).__name__}: {e}"}

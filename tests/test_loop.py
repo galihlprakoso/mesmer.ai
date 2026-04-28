@@ -814,6 +814,39 @@ class TestLeaderArtifactsAndOperatorMessages:
         assert ctx.operator_messages == []
 
     @pytest.mark.asyncio
+    async def test_operator_messages_drained_on_later_leader_iteration(self):
+        """Messages queued after the initial prompt must still reach the leader."""
+        captured = []
+        ctx = _make_ctx(captured_messages=captured)
+        calls = 0
+
+        async def fake_completion(messages, tools=None):
+            nonlocal calls
+            captured.append(messages)
+            calls += 1
+            if calls == 1:
+                ctx.operator_messages.append({
+                    "role": "user",
+                    "content": "we still need the exact tool list and parameters",
+                    "timestamp": 2.0,
+                })
+                return FakeResponse(FakeMessage(content="thinking through next step"))
+            return FakeResponse(FakeMessage(
+                tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+            ))
+
+        ctx.completion = fake_completion
+        await run_react_loop(_make_module(), ctx, "test", log=None)
+
+        assert len(captured) >= 2
+        second = "\n".join(
+            m.get("content", "") for m in captured[1] if m.get("role") == "user"
+        )
+        assert "## Operator Messages" in second
+        assert "exact tool list and parameters" in second
+        assert ctx.operator_messages == []
+
+    @pytest.mark.asyncio
     async def test_empty_operator_messages_omits_block(self):
         """No queued operator messages → no '## Operator Messages' heading."""
         captured = []

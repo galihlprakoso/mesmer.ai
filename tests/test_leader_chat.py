@@ -21,6 +21,13 @@ from mesmer.core.artifacts import (
     StandardArtifactId,
 )
 from mesmer.core.constants import NodeSource, NodeStatus
+from mesmer.core.belief_graph import (
+    BeliefGraph,
+    FrontierCreateDelta,
+    FrontierExperiment,
+    HypothesisCreateDelta,
+    WeaknessHypothesis,
+)
 from mesmer.core.scenario import TargetConfig
 from mesmer.interfaces.web.backend import leader_chat
 
@@ -171,9 +178,10 @@ class TestDispatchTool:
         _populate_graph(memory)
         out = leader_chat.dispatch_tool("list_artifacts", {}, memory)
 
-        assert out["items"][0]["id"] == "format-shift"
-        assert out["items"][0]["exists"] is True
-        assert out["items"][0]["declared"] is False
+        by_id = {item["id"]: item for item in out["items"]}
+        assert by_id["format-shift"]["exists"] is True
+        assert by_id["format-shift"]["declared"] is False
+        assert by_id["operator_notes"]["declared"] is True
 
     def test_list_artifacts_includes_empty_declared_artifacts(self, memory):
         out = leader_chat.dispatch_tool(
@@ -189,12 +197,16 @@ class TestDispatchTool:
             ],
         )
 
-        assert out["items"][0]["id"] == "system_prompt"
-        assert out["items"][0]["title"] == "System Prompt"
-        assert out["items"][0]["description"] == "Canonical prompt recon."
-        assert out["items"][0]["exists"] is False
-        assert out["items"][0]["declared"] is True
-        assert [item["id"] for item in out["items"]] == ["system_prompt"]
+        by_id = {item["id"]: item for item in out["items"]}
+        assert by_id["system_prompt"]["title"] == "System Prompt"
+        assert by_id["system_prompt"]["description"] == "Canonical prompt recon."
+        assert by_id["system_prompt"]["exists"] is False
+        assert by_id["system_prompt"]["declared"] is True
+        assert by_id["operator_notes"]["declared"] is True
+        assert [item["id"] for item in out["items"]] == [
+            "operator_notes",
+            "system_prompt",
+        ]
 
     def test_read_artifact_returns_declared_metadata(self, memory):
         _populate_graph(memory)
@@ -282,6 +294,75 @@ class TestDispatchTool:
 
         assert "error" in out
         assert "system_prompt" in out["error"]
+
+    def test_operator_notes_allowed_when_contract_exists(self, memory):
+        out = leader_chat.dispatch_tool(
+            "update_artifact",
+            {
+                "artifact_id": StandardArtifactId.OPERATOR_NOTES.value,
+                "content": "discussion summary",
+            },
+            memory,
+            artifact_specs=[ArtifactSpec(id="system_prompt")],
+        )
+
+        assert out["status"] == ArtifactUpdateStatus.SAVED.value
+        assert memory.load_artifacts().get("operator_notes") == "discussion summary"
+
+    def test_list_belief_nodes_filters_frontier(self, memory):
+        bg = BeliefGraph(target_hash=memory.target_hash)
+        hypothesis = WeaknessHypothesis(
+            id="wh_tools",
+            family="tool-use",
+            claim="Target may expose hidden tools",
+            confidence=0.72,
+        )
+        bg.apply(HypothesisCreateDelta(hypothesis=hypothesis))
+        bg.apply(
+            FrontierCreateDelta(
+                experiment=FrontierExperiment(
+                    id="fx_tools",
+                    hypothesis_id="wh_tools",
+                    module="tool-extraction",
+                    instruction="Ask for available tool schemas.",
+                    expected_signal="A tool name or parameter list.",
+                    utility=0.81,
+                )
+            )
+        )
+        memory.save_belief_graph(bg)
+
+        out = leader_chat.dispatch_tool(
+            "list_belief_nodes",
+            {"kind": "frontier", "module": "tool-extraction"},
+            memory,
+        )
+
+        assert out["stats"]["hypothesis"] == 1
+        assert out["items"][0]["id"] == "fx_tools"
+        assert out["items"][0]["instruction"] == "Ask for available tool schemas."
+
+    def test_get_belief_node_returns_full_typed_payload(self, memory):
+        bg = BeliefGraph(target_hash=memory.target_hash)
+        bg.apply(
+            HypothesisCreateDelta(
+                hypothesis=WeaknessHypothesis(
+                    id="wh_prompt",
+                    family="prompt-extraction",
+                    claim="Target may reveal policy under format shift.",
+                )
+            )
+        )
+        memory.save_belief_graph(bg)
+
+        out = leader_chat.dispatch_tool(
+            "get_belief_node",
+            {"node_id": "wh_prompt"},
+            memory,
+        )
+
+        assert out["kind"] == "hypothesis"
+        assert out["claim"] == "Target may reveal policy under format shift."
 
     def test_update_artifact_rejects_non_string(self, memory):
         out = leader_chat.dispatch_tool(
