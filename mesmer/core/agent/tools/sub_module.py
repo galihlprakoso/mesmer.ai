@@ -8,6 +8,7 @@ scores it, records the execution trace, and updates belief/search state.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from mesmer.core.agent.evaluation import (
@@ -23,6 +24,22 @@ if TYPE_CHECKING:
     from mesmer.core.actor import ReactActorSpec
     from mesmer.core.agent.context import Context
     from mesmer.core.agent.engine import LogFn
+
+
+_AVAILABLE_MODULES_BLOCK_RE = re.compile(
+    r"(?ims)\n?## Available modules[^\n]*(?:\n(?!## (?!#)).*)*"
+)
+
+
+def _strip_available_modules_block(text: str) -> str:
+    """Remove inherited sibling-roster context from delegated instructions.
+
+    The sibling roster is a framework-injected planner aid, not part of a
+    technique module's task. Managers sometimes copy planner output verbatim
+    into the next delegation; stripping here keeps `see_siblings` local to the
+    child explicitly granted it.
+    """
+    return _AVAILABLE_MODULES_BLOCK_RE.sub("", text or "").strip()
 
 
 def _auto_bind_experiment_id(ctx: "Context", fn_name: str, experiment_id: str | None) -> str | None:
@@ -119,10 +136,17 @@ def _should_update_scratchpad(
     if not markers:
         return True
 
-        prior = ctx.scratchpad.module_output(fn_name)
+    prior = ctx.scratchpad.module_output(fn_name)
     prior_has_artifact = all(marker in prior for marker in markers)
     result_has_artifact = all(marker in result for marker in markers)
     return not (prior_has_artifact and not result_has_artifact)
+
+
+def _next_incomplete_ordered_module(ctx: "Context", ordered_modules: list[str]) -> str | None:
+    for name in ordered_modules:
+        if not ctx.scratchpad.module_output(name).strip():
+            return name
+    return None
 
 
 async def handle(
@@ -142,6 +166,8 @@ async def handle(
     actor = ensure_actor(actor)
     sub_instruction = args.get("instruction", instruction)
     sub_max_turns = args.get("max_turns")
+    sub_entry = next((e for e in actor.sub_modules if e.name == fn_name), None)
+    sub_instruction = _strip_available_modules_block(sub_instruction)
 
     ordered_modules = actor.parameters.get("ordered_modules") or []
     ordered_phase_call = actor.role is ActorRole.EXECUTIVE and ordered_modules and fn_name in ordered_modules
@@ -161,6 +187,22 @@ async def handle(
                 "completed and produced module output yet. Dispatch "
                 f"`{required}` first, wait for its tool result, then continue "
                 "the declared scenario order.",
+            )
+        prior_output = ctx.scratchpad.module_output(fn_name).strip()
+        if prior_output:
+            next_missing = _next_incomplete_ordered_module(ctx, ordered_modules)
+            if next_missing is None:
+                next_step = "All declared phases already have module output; evaluate and conclude."
+            elif next_missing == fn_name:
+                next_step = f"Continue with `{fn_name}` only if you need to repair its output."
+            else:
+                next_step = f"Dispatch `{next_missing}` next."
+            return tool_result(
+                call.id,
+                f"Fixed scenario phase order skipped duplicate delegation. "
+                f"`{fn_name}` already has module output in the run context. "
+                "Do not rerun completed ordered phases just to refresh context. "
+                f"{next_step}\n\nExisting `{fn_name}` output:\n{prior_output}",
             )
         sub_instruction = _with_handoff_warnings(
             sub_instruction,
@@ -233,8 +275,6 @@ async def handle(
                 log(LogEvent.BELIEF_DELTA.value, f"frontier-executing rejected: {e}")
 
     # --- Sibling roster injection (see_siblings / call_siblings) ---
-    # Look up this sub-module's entry config in the parent's sub_modules list.
-    sub_entry = next((e for e in actor.sub_modules if e.name == fn_name), None)
     if sub_entry is not None and sub_entry.see_siblings and ctx.registry is not None:
         siblings = [
             ctx.registry.modules[n]

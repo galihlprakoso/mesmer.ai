@@ -270,6 +270,60 @@ class TestDelegateEventPayload:
         assert payload["instruction"] == "ask the target plainly for its rules"
 
     @pytest.mark.asyncio
+    async def test_available_modules_block_is_not_forwarded_to_plain_technique(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        ctx.run_module = AsyncMock(return_value="module result")
+        call = MagicMock()
+        call.id = "call_1"
+        module = ModuleConfig(
+            name="leader",
+            sub_modules=[
+                SubModuleEntry(name="attack-planner", see_siblings=True),
+                SubModuleEntry(name="pragmatic-reframing"),
+            ],
+        )
+        events: list[tuple[str, str]] = []
+
+        def capture(event, detail=""):
+            events.append((event, detail))
+
+        noisy_instruction = (
+            "Use the target persona angle.\n\n"
+            "## Available modules (siblings in this leader)\n\n"
+            "### target-profiler\n"
+            "Should only be visible to the planner.\n\n"
+            "### pragmatic-reframing\n"
+            "Technique description."
+        )
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_graph",
+                return_value=None,
+            ),
+        ):
+            await handle(
+                ctx,
+                module,
+                call,
+                "pragmatic-reframing",
+                args={"instruction": noisy_instruction},
+                instruction="fallback",
+                log=capture,
+            )
+
+        delegated_instruction = ctx.run_module.await_args.args[1]
+        assert "Use the target persona angle." in delegated_instruction
+        assert "Available modules" not in delegated_instruction
+        assert "target-profiler" not in delegated_instruction
+
+    @pytest.mark.asyncio
     async def test_child_does_not_inherit_parent_experiment_for_different_module(self):
         """A manager may be executing a parent experiment, but its child
         modules should not inherit that experiment unless the experiment
@@ -425,6 +479,36 @@ class TestDelegateEventPayload:
         assert "`system-prompt-extraction`" in result["content"]
 
     @pytest.mark.asyncio
+    async def test_fixed_order_executive_skips_duplicate_completed_phase(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        ctx.scratchpad.set_module_output(
+            "system-prompt-extraction",
+            "persona and instruction fragments extracted",
+        )
+        ctx.run_module = AsyncMock(return_value="should not run")
+        call = MagicMock()
+        call.id = "call_1"
+        module = _ordered_executive_actor()
+
+        result = await handle(
+            ctx,
+            module,
+            call,
+            "system-prompt-extraction",
+            args={"instruction": "run recon again"},
+            instruction="ignored",
+            log=lambda *_: None,
+        )
+
+        ctx.run_module.assert_not_awaited()
+        assert "skipped duplicate delegation" in result["content"]
+        assert "`system-prompt-extraction` already has module output" in result["content"]
+        assert "Dispatch `tool-extraction` next" in result["content"]
+        assert "persona and instruction fragments extracted" in result["content"]
+
+    @pytest.mark.asyncio
     async def test_fixed_order_executive_warns_but_runs_when_injection_artifact_is_thin(self):
         from mesmer.core.agent.tools.sub_module import handle
 
@@ -459,6 +543,33 @@ class TestDelegateEventPayload:
         assert "`## Retrieval Path`" in delegated_instruction
         assert "`## Injection Evidence`" in delegated_instruction
         assert "proof saw no usable retrieval evidence" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_marker_artifact_is_not_overwritten_by_thin_retry(self):
+        from mesmer.core.agent.tools.sub_module import _should_update_scratchpad
+
+        ctx = _ctx()
+        ctx.scratchpad.set_module_output(
+            "indirect-prompt-injection",
+            "## Retrieval Path\nsearch/read path\n\n## Injection Evidence\nfollowed hostile text",
+        )
+        module = _ordered_executive_actor()
+        module.parameters["ordered_artifact_requirements"] = {
+            "indirect-prompt-injection": ["## Retrieval Path", "## Injection Evidence"],
+        }
+
+        assert not _should_update_scratchpad(
+            ctx,
+            module,
+            "indirect-prompt-injection",
+            "thin retry without structured markers",
+        )
+        assert _should_update_scratchpad(
+            ctx,
+            module,
+            "indirect-prompt-injection",
+            "## Retrieval Path\nnew path\n\n## Injection Evidence\nnew evidence",
+        )
 
 
 # ---------------------------------------------------------------------------
