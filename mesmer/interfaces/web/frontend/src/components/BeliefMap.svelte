@@ -123,6 +123,7 @@
     })
     .slice(0, 12)
   $: groundingScore = Math.max(0, Math.min(1, stats?.grounding_score ?? 0))
+  $: calibrationScore = Math.max(0, Math.min(1, stats?.calibration_score ?? 0))
   $: isSpeculativeMap = Boolean(graph && stats && (stats.attempt ?? 0) > 0 && (stats.evidence ?? 0) === 0)
   $: hasObservationFailures = Boolean(stats && (stats.failed_observations ?? 0) > 0)
 
@@ -537,6 +538,11 @@
             <span class="stat"><span class="stat-k">at</span><span class="stat-v">{stats.attempt ?? 0}</span></span>
             <span class="stat grounding" class:weak={groundingScore < 0.35}>
               <span class="stat-k">ground</span><span class="stat-v">{Math.round(groundingScore * 100)}%</span>
+            </span>
+            <span class="stat grounding" class:weak={(stats.calibration_samples ?? 0) > 0 && calibrationScore < 0.65}>
+              <span class="stat-k">cal</span><span class="stat-v">
+                {stats.calibration_samples ? Math.round(calibrationScore * 100) + '%' : '—'}
+              </span>
             </span>
           </div>
         {/if}

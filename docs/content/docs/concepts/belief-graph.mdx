@@ -58,11 +58,18 @@ Every node carries `id` (kind-prefixed: `tg_…` `wh_…` `ev_…` `at_…`
 | Kind | Holds | Why it's distinct |
 |---|---|---|
 | **Target** (`TargetNode`) | singleton; `traits: dict[str, str]` | Free-form recon dossier. Latest-write-wins per key. The schema is intentionally loose — the extractor and planner both read traits as opaque text. |
-| **Weakness hypothesis** (`WeaknessHypothesis`) | `claim`, `family`, `confidence ∈ [0,1]`, `status` | The unit of planning. Confidence is linear (clamped, not Bayesian). `family` groups hypotheses by attack class so strategies can target the cluster, not the individual claim. |
+| **Weakness hypothesis** (`WeaknessHypothesis`) | `claim`, `family`, `confidence ∈ [0,1]`, `status` | The unit of planning. Evidence moves confidence through binary factor-graph inference over connected hypotheses: exact enumeration for normal components, damped loopy belief propagation for large components. `family` groups hypotheses by attack class so strategies can target the cluster, not the individual claim. New hypotheses auto-link to related same-family / text-similar hypotheses with `HYPOTHESIS_GENERALIZES_TO` edges. |
 | **Evidence** (`Evidence`) | `signal_type`, `polarity`, `verbatim_fragment`, `hypothesis_id?`, `confidence_delta` | Structured target signal extracted by the judge model. Polarity drives the support/refute edge automatically. |
 | **Attempt** (`Attempt`) | `module`, `messages_sent`, `target_responses`, `experiment_id?`, `tested_hypothesis_ids[]`, `judge_score`, `outcome` | One module execution. Replaces `AttackNode` for belief-graph purposes — but with explicit links to the hypotheses tested, the strategy used, the evidence observed, and the experiment fulfilled. |
 | **Strategy** (`Strategy`) | `family`, `template_summary`, `success_count`, `attempt_count` | Reusable attack pattern. Per-target stats here; global cross-target stats live in the [strategy library](./frontier-and-utility#the-strategy-library). |
-| **Frontier experiment** (`FrontierExperiment`) | `hypothesis_id`, `module`, `instruction`, `expected_signal`, `state`, `utility` + 8 ranking components | A proposed next move. Ranked by [utility](./frontier-and-utility); the leader picks one by `id` and the manager that runs it records an `Attempt` that links back. |
+| **Frontier experiment** (`FrontierExperiment`) | `hypothesis_id`, `module`, `instruction`, `expected_signal`, `state`, `utility` + 9 ranking components | A proposed next move. Ranked by [utility](./frontier-and-utility); the leader picks one by `id` and the manager that runs it records an `Attempt` that links back. |
+
+Frontier experiments are single-use decision slots. An `Attempt` with
+`experiment_id` must point at an existing open frontier; once a
+frontier is fulfilled or dropped, the reducer rejects stale attempts
+that try to fulfill it again. Dropped frontiers can be explicitly
+reopened to `PROPOSED`; fulfilled frontiers cannot return to
+`EXECUTING`.
 
 Statuses live as small enums in [`mesmer/core/constants.py`](../../../../mesmer/core/constants.py):
 
@@ -77,7 +84,14 @@ Statuses live as small enums in [`mesmer/core/constants.py`](../../../../mesmer/
   `format_following_strength`, `objective_leak`,
   `refusal_after_escalation`, `unknown`.
 - `ExperimentState`: PROPOSED → EXECUTING → FULFILLED / DROPPED.
-- `AttemptOutcome`: LEAK, PARTIAL, REFUSAL, DEAD, OBJECTIVE_MET.
+- `AttemptOutcome`: LEAK, PARTIAL, REFUSAL, DEAD, OBJECTIVE_MET,
+  INFRA_ERROR, NO_OBSERVATION.
+
+`BeliefGraph.stats()` also exposes calibration telemetry for completed
+frontier experiments: `calibration_samples`, `calibration_brier`, and
+`calibration_score`. These compare the frontier's stored pre-run
+`hypothesis_confidence` against the observed result, so operators can
+tell whether belief confidence is becoming reliable over time.
 
 ## Edges
 
@@ -255,7 +269,13 @@ The leader brief flagged with `★` looks like:
   fx_…
 ```
 
-Selector picks are advisory; the leader can override.
+Selector picks are advisory only when several open frontiers match the
+same module. An executive manager-dispatch must resolve to an open
+`FrontierExperiment` id for the selected module. If the model omits the
+id, the tool boundary auto-binds the highest-utility matching open
+frontier; if none exists, the delegation is rejected before any target
+call or attack-graph node is created. This keeps the belief graph as
+the real decision surface instead of an optional prompt annotation.
 
 ## Side-by-side with the attack graph
 

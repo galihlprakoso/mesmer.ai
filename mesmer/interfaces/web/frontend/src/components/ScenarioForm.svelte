@@ -23,8 +23,8 @@
     profilers: 'Profilers',
     techniques: 'Techniques',
   }
-  // Display order — leaders first since they're the natural pick for
-  // the scenario's `module:` field, then planners, profilers, techniques.
+  // Display order — managers first since they're the natural pick for
+  // the scenario's `modules:` list, then planners, profilers, techniques.
   const CATEGORY_ORDER = ['attacks', 'planners', 'profilers', 'techniques']
 
   $: groupedModules = groupByCategory(modules)
@@ -107,14 +107,8 @@
         ? o.success_signals.join('\n')
         : (o.success_signals ?? '')
       base.objective.max_turns = o.max_turns ?? 25
-      // ``modules:`` (list) is current; ``module:`` (single string) is the
-      // legacy field — we tolerate it in the form for read-only display
-      // purposes, but the backend's load_scenario will reject any save
-      // attempt that still uses it. Empty array if both absent.
       if (Array.isArray(data.modules)) {
         base.modules = data.modules.map(m => String(m))
-      } else if (data.module) {
-        base.modules = [String(data.module)]
       } else {
         base.modules = []
       }

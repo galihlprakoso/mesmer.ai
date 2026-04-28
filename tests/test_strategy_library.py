@@ -5,7 +5,7 @@ Cross-target strategy memory. Tests cover:
   - StrategyLibrary upsert merge semantics + family retrieval
   - JSON round-trip + atomic write + load fallbacks
   - merge_per_target_strategies aggregation from belief-graph Strategies
-  - retrieve_strategies_for_bootstrap family filtering
+  - retrieve_strategies_for_bootstrap family + trait ranking
   - render_for_prompt formatting
 """
 
@@ -312,6 +312,65 @@ def test_retrieve_uses_all_families_when_none() -> None:
     lib.upsert(GlobalStrategyEntry(family="f2", template_summary="t", global_attempt_count=1))
     rows = retrieve_strategies_for_bootstrap(library=lib)
     assert len(rows) == 2
+
+
+def test_retrieve_reranks_by_target_trait_affinity() -> None:
+    lib = StrategyLibrary()
+    lib.upsert(
+        GlobalStrategyEntry(
+            family="format-shift",
+            template_summary="slightly better generic",
+            global_success_count=8,
+            global_attempt_count=10,
+        )
+    )
+    lib.upsert(
+        GlobalStrategyEntry(
+            family="format-shift",
+            template_summary="matched trait",
+            global_success_count=7,
+            global_attempt_count=10,
+            works_against_traits=["schema_strict"],
+        )
+    )
+    rows = retrieve_strategies_for_bootstrap(
+        target_traits={"schema_strict": "true"},
+        families=["format-shift"],
+        top_k_per_family=2,
+        library=lib,
+    )
+    assert [r.template_summary for r in rows] == [
+        "matched trait",
+        "slightly better generic",
+    ]
+
+
+def test_retrieve_demotes_failed_matching_trait() -> None:
+    lib = StrategyLibrary()
+    lib.upsert(
+        GlobalStrategyEntry(
+            family="tool-use",
+            template_summary="failed on this trait",
+            global_success_count=8,
+            global_attempt_count=10,
+            fails_against_traits=["has_tools"],
+        )
+    )
+    lib.upsert(
+        GlobalStrategyEntry(
+            family="tool-use",
+            template_summary="generic",
+            global_success_count=8,
+            global_attempt_count=10,
+        )
+    )
+    rows = retrieve_strategies_for_bootstrap(
+        target_traits={"has_tools": "yes"},
+        families=["tool-use"],
+        top_k_per_family=2,
+        library=lib,
+    )
+    assert [r.template_summary for r in rows] == ["generic", "failed on this trait"]
 
 
 # ---------------------------------------------------------------------------

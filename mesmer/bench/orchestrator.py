@@ -41,6 +41,7 @@ from typing import Awaitable, Callable
 
 import yaml
 
+from mesmer.bench.belief_eval import aggregate_belief_planner_metrics
 from mesmer.bench.canary import scan_canary
 from mesmer.bench.trace import (
     BenchEventRecorder,
@@ -346,6 +347,10 @@ class TrialResult:
     # JSONL. Empty when the events file wasn't written (baseline arm, or
     # when the recorder was disabled).
     events_path: str = ""
+    # BeliefGraph planner-quality metrics for this trial: calibration,
+    # frontier binding/regret, duplicate attempt rate, no-observation
+    # rate, and fulfilled utility attribution.
+    belief_planner: dict = field(default_factory=dict)
 
     # --- Provenance fields (populated for every arm) ----------------------
     #
@@ -418,6 +423,7 @@ class TrialResult:
                 "compression_events": self.compression_events,
                 "event_counts": dict(self.event_counts),
                 "events_path": self.events_path,
+                "belief_planner": dict(self.belief_planner),
             },
         }
 
@@ -444,6 +450,9 @@ class BenchCellSummary:
     * ``errors_by_class`` — grouped error tally, so a spike in
       ``ThrottleTimeout`` or ``HumanQuestionTimeout`` shows up without
       reopening every JSONL row.
+    * ``belief_planner`` — nested BeliefGraph planner-quality rollup:
+      calibration, frontier binding/regret, duplicate/no-observation
+      rates, outcome counts, and utility-component attribution.
     """
 
     target_id: str
@@ -470,6 +479,7 @@ class BenchCellSummary:
     median_judge_score_by_tier: dict[int, float] = field(default_factory=dict)
     mean_compression_events: float = 0.0
     errors_by_class: dict[str, int] = field(default_factory=dict)
+    belief_planner: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -548,6 +558,7 @@ def _cell_as_json(c: BenchCellSummary) -> dict:
         },
         "mean_compression_events": round(c.mean_compression_events, 2),
         "errors_by_class": dict(sorted(c.errors_by_class.items())),
+        "belief_planner": dict(c.belief_planner),
     }
 
 
@@ -686,20 +697,19 @@ def load_spec(path: str | Path) -> BenchSpec:
     posture = _parse_contamination_posture(data.get("contamination_posture"), path)
 
     raw_modules = data.get("modules")
-    legacy_module = str(data.get("module", "") or "").strip()
+    if data.get("module") is not None and str(data.get("module", "")).strip():
+        raise ValueError(
+            f"{path}: benchmark spec uses legacy `module:`. "
+            "Rewrite it as `modules: [<name>, ...]`."
+        )
     if raw_modules is not None:
         if not isinstance(raw_modules, list):
             raise ValueError(f"{path}: `modules` must be a list of module names.")
         modules = [str(m).strip() for m in raw_modules if str(m).strip()]
-        if legacy_module and legacy_module not in modules:
-            raise ValueError(
-                f"{path}: contains both legacy `module` and current `modules` "
-                "with different values. Drop `module` or make it match."
-            )
     else:
-        modules = [legacy_module] if legacy_module else []
+        modules = []
     if not modules:
-        raise ValueError(f"{path}: benchmark spec must declare `modules` or legacy `module`.")
+        raise ValueError(f"{path}: benchmark spec must declare `modules`.")
 
     judge_raw = data.get("judge", {}) or {}
     judge_type = str(judge_raw.get("type", "substring") or "substring").strip().lower()
@@ -1229,6 +1239,7 @@ async def run_mesmer_trial(
         compression_events=trace.compression_events,
         event_counts=recorder.counts(),
         events_path=events_path,
+        belief_planner=trace.belief_planner,
         **provenance,
     )
 
@@ -1529,6 +1540,9 @@ def _aggregate_trace(trials: list[TrialResult]) -> dict:
         "median_judge_score_by_tier": median_judge_score_by_tier,
         "mean_compression_events": mean_compression_events,
         "errors_by_class": errors_by_class,
+        "belief_planner": aggregate_belief_planner_metrics(
+            [t.belief_planner for t in trials]
+        ),
     }
 
 
@@ -1681,6 +1695,28 @@ def render_markdown_table(summary: BenchSummary) -> str:
             else:
                 lines.append(f"- `{c.target_id}`: (no wins)")
         lines.append("")
+
+        planner_cells = [c for c in summary.cells if c.belief_planner]
+        if planner_cells:
+            lines.append("**Belief planner health:**")
+            lines.append("")
+            lines.append(
+                "| Target | Frontier binding | Duplicate probes | No observation | "
+                "Frontier regret | Calibration |"
+            )
+            lines.append("|---|---:|---:|---:|---:|---:|")
+            for c in planner_cells:
+                bp = c.belief_planner
+                lines.append(
+                    f"| `{c.target_id}` | "
+                    f"{float(bp.get('mean_frontier_binding_rate', 0.0)) * 100:.0f}% | "
+                    f"{float(bp.get('mean_duplicate_attempt_rate', 0.0)) * 100:.0f}% | "
+                    f"{float(bp.get('mean_no_observation_rate', 0.0)) * 100:.0f}% | "
+                    f"{float(bp.get('mean_frontier_regret', 0.0)):.2f} | "
+                    f"{float(bp.get('mean_calibration_score', 0.0)):.2f} |"
+                )
+            lines.append("")
+
         lines.append(
             "*Per-trial events stream to "
             '`events/{trial_id}.jsonl` — grep for `"event":"frontier"` '

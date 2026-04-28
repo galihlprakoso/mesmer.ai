@@ -952,7 +952,7 @@ The new code is fully testable in isolation and lint-clean.
   `LogEvent` values; `HYPOTHESIS_CONFIRMED_THRESHOLD = 0.85`,
   `HYPOTHESIS_REFUTED_THRESHOLD = 0.15`,
   `EVIDENCE_DEFAULT_WEIGHT = 0.10`, `EVIDENCE_TYPE_WEIGHTS` table
-  (per-type strength), `DEFAULT_UTILITY_WEIGHTS` table (8-component
+  (per-type strength), `DEFAULT_UTILITY_WEIGHTS` table (9-component
   utility blend), `HYPOTHESIS_STALE_RUNS = 3`.
 - `mesmer/core/errors.py` — added `BeliefGraphError`, `InvalidDelta`
   (carries `kind` + `reason`), `EvidenceExtractionError`,
@@ -1107,18 +1107,18 @@ contract is to plug the belief graph in without breaking the 748 tests.
    selection moves to `rank_frontier` — but the existing graph stats
    queries stay valid.
 
-Session 3 (web UI belief map), Session 4 (shallow MCTS, AutoDAN-Turbo
-strategy library) come later. The order is deliberate: Session 2's
-agent loop running on the belief graph IS the validation step for
-whether the utility weights, confidence rules, and extractor
-categories are calibrated correctly. Don't tune those against
-intuition; tune them against bench numbers once Session 2 lands.
+Session 3 (web UI belief map) and Session 4 (selector + AutoDAN-Turbo
+strategy library) shipped after Session 2, so the belief graph is now
+both the validation surface and the execution-planning substrate. Do
+not tune utility weights, confidence rules, or extractor categories
+against intuition alone; use the calibration telemetry and bench
+numbers as the audit loop.
 
 
-# All sessions complete (2026-04-26) — 786 tests passing
+# Belief graph shipped (2026-04-26), hardened again (2026-04-28)
 
-Sessions 2, 2.5, 3, 4A, 4B all landed locally on `main` (uncommitted).
-The full belief-graph pipeline is wired end-to-end:
+Sessions 2, 2.5, 3, 4A, 4B all landed. The belief-graph pipeline is
+wired end-to-end:
 
 - **Session 2** — `BeliefGraph` plumbed through `Context`, loaded/saved
   via `TargetMemory`, integrated into `runner.execute_run`,
@@ -1141,61 +1141,56 @@ The full belief-graph pipeline is wired end-to-end:
   AttackGraph and BeliefMap.
 
 - **Session 4A** — `select_next_experiment(graph, exploration_c=1.2)`
-  shallow UCT selector. Compiler's recommended-experiments list
-  flags the planner's pick with `★`. Pure function — automated
-  steppers can use it without an LLM in the loop.
+  UCB selector with recursive bounded lookahead. Compiler's
+  recommended-experiments list flags the planner's pick with `★`.
+  Pure function — automated steppers can use it without an LLM in the
+  loop.
 
 - **Session 4B** — `mesmer/core/strategy_library.py`:
   `GlobalStrategyEntry`, `StrategyLibrary`, `load_library` /
   `save_library` (atomic, schema-versioned),
   `merge_per_target_strategies` (run-end fold from per-target
-  Strategy nodes, counters add, traits dedupe), `retrieve_…` +
-  `render_for_prompt` for the generator. Wired into
+  Strategy nodes, counters add, traits dedupe), trait-aware
+  `retrieve_…` + `render_for_prompt` for the generator. Wired into
   `generate_hypotheses_user.prompt.md` via the new `{library_block}`
-  placeholder. Persists at `~/.mesmer/global/strategies.json`.
+  slot. Persists at `~/.mesmer/global/strategies.json`.
 
-## Final test counts
+- **2026-04-28 hardening** — belief updates use binary factor-graph
+  inference over connected hypothesis components: exact enumeration
+  for normal components and damped loopy belief propagation for large
+  components. Dependency factors come from `HYPOTHESIS_GENERALIZES_TO`
+  and observed multi-hypothesis attempts. Frontier ranking now carries
+  nine auditable components including real `transfer_value` and
+  registry-derived `query_cost`, persists transfer/cost provenance,
+  and reports calibration telemetry (`calibration_samples`,
+  `calibration_brier`, `calibration_score`) to the UI.
 
-- 786 tests passing (583 original + 203 new):
-  - 34 belief_graph schema/persistence/replay
-  - 12 evidence extractor (mocked LLM)
-  - 26 beliefs (generation + apply + rank + select_next_experiment)
-  - 19 graph_compiler (every role + token budget)
-  - 12 belief_graph_wiring (integration: outcome map, attempt creation,
-    extractor failure boundary, experiment_id contract, frontier rank)
-  - 21 strategy_library (entry math, upsert merge, persistence,
-    per-target merge, retrieval, prompt rendering)
-  - 79 baseline tests in adjacent files that imported new modules
-    (existing tests unaffected, just counted under the new totals)
+## Current verification snapshot
 
-## What's NOT done
+- 2026-04-28: `uv run pytest` passes with 710 Python tests.
+- 2026-04-28: frontend `npm run test` passes with 53 Vitest tests.
+- 2026-04-28: docs `pnpm typecheck` passes.
 
-- **The legacy `AttackGraph` is not removed.** Both graphs run
-  side-by-side. Removing the legacy one is a separate decision —
-  it requires deleting the legacy `propose_frontier` /
-  `refine_approach` paths, the `## Attack Intelligence` block in
-  the leader prompt, the per-target `graph.json` persistence, and
-  the entire `AttackGraph.svelte` component + its 12 referencing
-  test files. Deferred until bench numbers prove the belief graph
-  alone is sufficient.
+## Remaining honest boundaries
 
-- **Trait-similarity re-ranking in `retrieve_strategies_for_bootstrap`.**
-  Currently the library filter is family-only. Trait-Jaccard
-  re-ranking is reserved for when the library has enough data to
-  make trait correlations reliable.
+- **The `AttackGraph` execution trace is not removed.** Both graphs run
+  side-by-side. Removing the execution trace is a separate decision —
+  it requires deleting execution-trace persistence, the Attack Graph
+  web component, and many audit/benchmark tests. It is not search
+  state anymore; it is still useful execution telemetry.
 
-- **MCTS rollout / tree expansion.** Session 4A's selector is "depth-1
-  UCB on the current frontier" — the simplest useful slice. Full
-  tree search with simulation rollouts and value backup is a
-  Session 5-grade upgrade and should wait until benches show the
-  current selector is bottlenecking.
+- **Exact inference is bounded.** Connected hypothesis components are
+  exact-enumerated up to the configured cap. Larger components use
+  bounded loopy belief propagation, so dependency signal still moves
+  without exponential runtime.
 
 - **Bench tuning.** All weight constants
   (`HYPOTHESIS_CONFIRMED_THRESHOLD`,
   `EVIDENCE_TYPE_WEIGHTS`, `DEFAULT_UTILITY_WEIGHTS`,
-  `DEFAULT_EXPLORATION_C`) are calibrated by intuition, not against
-  Tensor Trust / bench results. The next change should be a bench
-  pass that perturbs each constant and reads ASR shifts.
+  `DEFAULT_EXPLORATION_C`) are engineered defaults with runtime
+  calibration telemetry, not yet benchmark-fit constants. The next
+  audit loop should perturb each constant and read ASR / calibration
+  shifts.
 
 - **Push to GitHub.** Everything sits uncommitted on local `main`.
   When ready, branch + commit per session for reviewable history,

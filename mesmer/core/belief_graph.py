@@ -28,10 +28,9 @@ Persistence sidecar — distinct from ``graph.json``::
     ├── belief_deltas.jsonl   # append-only delta log
     └── graph.json            # AttackGraph execution trace
 
-Session 1 ships this module + extractor + updater + context compiler as
-a parallel system. Session 2 replaces the planner's read of
-:class:`AttackGraph` with the belief-graph-derived brief from
-:mod:`mesmer.core.agent.graph_compiler`.
+The planner now reads the belief-graph-derived brief from
+:mod:`mesmer.core.agent.graph_compiler`; :class:`AttackGraph` remains
+the execution trace and benchmark forensics log.
 
 References:
     - TAP (Tree of Attacks with Pruning), arXiv 2312.02119 — tree search
@@ -40,16 +39,16 @@ References:
       single-branch iterative refinement when a hypothesis is promising.
     - GPTFuzzer, arXiv 2309.10253 — strategy mutation / corpus pressure.
     - AutoDAN-Turbo, arXiv 2410.05295 — lifelong cross-target strategy
-      memory (the global ``Strategy`` slice; scoped to per-target in
-      Session 1).
-    - POMCP / UCT — informs the future shallow-MCTS scheduler that runs
-      on top of this graph (Session 4, not Session 1).
+      memory for the global strategy library.
+    - POMCP / UCT — informs the bounded recursive selector that runs
+      on top of this graph.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -58,6 +57,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Iterable, Iterator
 
 from mesmer.core.constants import (
+    AttemptOutcome,
     DeltaKind,
     EdgeKind,
     EvidenceType,
@@ -67,6 +67,27 @@ from mesmer.core.constants import (
     Polarity,
 )
 from mesmer.core.errors import InvalidDelta
+
+_HYP_TOKEN_RE = re.compile(r"[a-z0-9]{4,}")
+
+
+def _hyp_tokens(text: str) -> set[str]:
+    return set(_HYP_TOKEN_RE.findall((text or "").lower()))
+
+
+def _hyp_jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _hypothesis_dependency_score(a: "WeaknessHypothesis", b: "WeaknessHypothesis") -> float:
+    if a.id == b.id:
+        return 0.0
+    claim_sim = _hyp_jaccard(_hyp_tokens(a.claim), _hyp_tokens(b.claim))
+    desc_sim = _hyp_jaccard(_hyp_tokens(a.description), _hyp_tokens(b.description))
+    family_bonus = 0.35 if a.family and a.family == b.family else 0.0
+    return min(1.0, family_bonus + 0.50 * claim_sim + 0.15 * desc_sim)
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +192,10 @@ class WeaknessHypothesis(BeliefNode):
     strategies are *means* the planner picks once a hypothesis is
     selected.
 
-    ``confidence`` is in [0.0, 1.0]. Updates are linear and clamped (see
-    :func:`mesmer.core.agent.beliefs.update_confidence`); we explicitly
-    reject full Bayesian inference for now — calibrating priors and
-    likelihoods against an LLM target is research-grade work and would
-    overengineer Session 1.
+    ``confidence`` is in [0.0, 1.0]. Evidence updates are applied by
+    :func:`mesmer.core.agent.beliefs.apply_evidence_to_beliefs` as
+    signed log-likelihood-ratio steps in log-odds space; the stored
+    deltas remain probability-space for simple replay.
 
     ``family`` groups hypotheses by attack class ("format-shift",
     "authority-bias", "instruction-recital") so the strategy library
@@ -380,7 +400,12 @@ class FrontierExperiment(BeliefNode):
     novelty: float = 0.0
     strategy_prior: float = 0.0
     transfer_value: float = 0.0
+    transfer_source: str = ""
+    transfer_success_rate: float = 0.0
+    transfer_attempts: int = 0
     query_cost: float = 0.0
+    query_cost_reason: str = ""
+    query_cost_tier: int = 0
     repetition_penalty: float = 0.0
     dead_similarity: float = 0.0
 
@@ -402,7 +427,12 @@ class FrontierExperiment(BeliefNode):
             novelty=self.novelty,
             strategy_prior=self.strategy_prior,
             transfer_value=self.transfer_value,
+            transfer_source=self.transfer_source,
+            transfer_success_rate=self.transfer_success_rate,
+            transfer_attempts=self.transfer_attempts,
             query_cost=self.query_cost,
+            query_cost_reason=self.query_cost_reason,
+            query_cost_tier=self.query_cost_tier,
             repetition_penalty=self.repetition_penalty,
             dead_similarity=self.dead_similarity,
         )
@@ -733,14 +763,15 @@ class FrontierUpdateStateDelta(GraphDelta):
 class FrontierRankDelta(GraphDelta):
     """Bulk-update utility scores for a set of frontier experiments.
 
-    ``rankings`` maps experiment_id → component dict (must include all
-    keys of :data:`mesmer.core.constants.DEFAULT_UTILITY_WEIGHTS` plus
-    the aggregate ``utility``). The apply path overwrites — frontier
-    rankings are recomputed every iteration in current design.
+    ``rankings`` maps experiment_id → component/metadata dict (must include all
+    keys of :data:`mesmer.core.constants.DEFAULT_UTILITY_WEIGHTS`, the aggregate
+    ``utility``, and may include provenance fields such as transfer source or
+    query-cost reason). The apply path overwrites — frontier rankings are
+    recomputed every iteration in current design.
     """
 
     kind: ClassVar[DeltaKind] = DeltaKind.FRONTIER_RANK
-    rankings: dict[str, dict[str, float]] = field(default_factory=dict)
+    rankings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = super().to_dict()
@@ -840,7 +871,16 @@ def _delta_from_dict(d: dict[str, Any]) -> GraphDelta:
         )
     if cls is FrontierRankDelta:
         rankings = {
-            eid: {k: float(v) for k, v in scores.items()}
+            eid: {
+                k: (
+                    v
+                    if k in {"transfer_source", "query_cost_reason"}
+                    else int(v or 0)
+                    if k in {"transfer_attempts", "query_cost_tier"}
+                    else float(v or 0.0)
+                )
+                for k, v in scores.items()
+            }
             for eid, scores in d.get("rankings", {}).items()
         }
         return cls(**common, rankings=rankings)
@@ -942,11 +982,28 @@ class BeliefGraph:
             raise InvalidDelta(delta.kind.value, f"id {h.id!r} already exists")
         if not h.family:
             raise InvalidDelta(delta.kind.value, "family is required")
+        existing_hypotheses = [
+            n for n in self.iter_nodes(NodeKind.HYPOTHESIS) if isinstance(n, WeaknessHypothesis)
+        ]
         # Deep-copy so subsequent mutations of the graph's node don't bleed
         # back into the delta's payload (which the audit log serialises
         # later). The delta is the snapshot at delta-emit time; the graph
         # owns the live mutable copy.
         self.nodes[h.id] = copy.deepcopy(h)
+        stored = self.nodes[h.id]
+        assert isinstance(stored, WeaknessHypothesis)
+        for other in existing_hypotheses:
+            if _hypothesis_dependency_score(stored, other) < 0.40:
+                continue
+            self._add_edge_validated(
+                Edge(
+                    src_id=stored.id,
+                    dst_id=other.id,
+                    kind=EdgeKind.HYPOTHESIS_GENERALIZES_TO,
+                    run_id=stored.run_id,
+                ),
+                delta.kind,
+            )
 
     def _apply_hypothesis_update_confidence(self, delta: HypothesisUpdateConfidenceDelta) -> None:
         node = self._require_node(delta.hypothesis_id, NodeKind.HYPOTHESIS, delta.kind)
@@ -1013,6 +1070,17 @@ class BeliefGraph:
                 raise InvalidDelta(
                     delta.kind.value,
                     f"evidence_id {eid!r} resolves to non-evidence node",
+                )
+        if a.experiment_id is not None:
+            fx = self._require_node(a.experiment_id, NodeKind.FRONTIER, delta.kind)
+            assert isinstance(fx, FrontierExperiment)
+            if fx.fulfilled_by is not None or fx.state in {
+                ExperimentState.FULFILLED,
+                ExperimentState.DROPPED,
+            }:
+                raise InvalidDelta(
+                    delta.kind.value,
+                    f"experiment_id {a.experiment_id!r} is already closed",
                 )
         self.nodes[a.id] = copy.deepcopy(a)
 
@@ -1113,6 +1181,21 @@ class BeliefGraph:
     def _apply_frontier_update_state(self, delta: FrontierUpdateStateDelta) -> None:
         node = self._require_node(delta.experiment_id, NodeKind.FRONTIER, delta.kind)
         assert isinstance(node, FrontierExperiment)
+        if node.state is ExperimentState.FULFILLED and delta.state is not ExperimentState.FULFILLED:
+            raise InvalidDelta(
+                delta.kind.value,
+                f"experiment {node.id!r} is fulfilled and cannot transition to {delta.state.value}",
+            )
+        if node.state is ExperimentState.DROPPED and delta.state not in {
+            ExperimentState.DROPPED,
+            ExperimentState.PROPOSED,
+        }:
+            raise InvalidDelta(
+                delta.kind.value,
+                f"experiment {node.id!r} is dropped and must be reopened before execution",
+            )
+        if delta.state is ExperimentState.FULFILLED and not delta.fulfilled_by:
+            raise InvalidDelta(delta.kind.value, "fulfilled_by is required when fulfilling frontier")
         node.state = delta.state
         if delta.fulfilled_by is not None:
             node.fulfilled_by = delta.fulfilled_by
@@ -1135,6 +1218,14 @@ class BeliefGraph:
             ):
                 if component in scores:
                     setattr(node, component, float(scores[component]))
+            for component in ("transfer_source", "query_cost_reason"):
+                if component in scores:
+                    setattr(node, component, str(scores[component] or ""))
+            for component in ("transfer_attempts", "query_cost_tier"):
+                if component in scores:
+                    setattr(node, component, int(scores[component] or 0))
+            if "transfer_success_rate" in scores:
+                node.transfer_success_rate = float(scores["transfer_success_rate"])
 
     def _apply_edge_create(self, delta: EdgeCreateDelta) -> None:
         if delta.edge is None:
@@ -1416,6 +1507,42 @@ class BeliefGraph:
             0.0
             if active_hypotheses == 0
             else min(1.0, (len(grounded_hypotheses) / active_hypotheses) * 0.7 + min(1.0, evidence_count / max(1, active_hypotheses)) * 0.3)
+        )
+
+        calibration_errors: list[float] = []
+        for fx in self.iter_nodes(NodeKind.FRONTIER):
+            assert isinstance(fx, FrontierExperiment)
+            if not fx.fulfilled_by:
+                continue
+            attempt = self.nodes.get(fx.fulfilled_by)
+            if not isinstance(attempt, Attempt):
+                continue
+            prediction = max(0.0, min(1.0, fx.hypothesis_confidence))
+            if attempt.outcome in {
+                AttemptOutcome.LEAK.value,
+                AttemptOutcome.OBJECTIVE_MET.value,
+            }:
+                observed = 1.0
+            elif attempt.outcome == AttemptOutcome.PARTIAL.value:
+                observed = 0.5
+            elif attempt.outcome in {
+                AttemptOutcome.DEAD.value,
+                AttemptOutcome.REFUSAL.value,
+            }:
+                observed = 0.0
+            else:
+                continue
+            calibration_errors.append((prediction - observed) ** 2)
+        out["calibration_samples"] = len(calibration_errors)
+        out["calibration_brier"] = (
+            sum(calibration_errors) / len(calibration_errors)
+            if calibration_errors
+            else 0.0
+        )
+        out["calibration_score"] = (
+            max(0.0, 1.0 - float(out["calibration_brier"]))
+            if calibration_errors
+            else 0.0
         )
         return out
 

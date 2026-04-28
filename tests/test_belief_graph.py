@@ -19,6 +19,7 @@ from mesmer.core.belief_graph import (
     EdgeCreateDelta,
     EvidenceCreateDelta,
     FrontierCreateDelta,
+    FrontierExperiment,
     FrontierRankDelta,
     FrontierUpdateStateDelta,
     HypothesisCreateDelta,
@@ -36,6 +37,7 @@ from mesmer.core.belief_graph import (
     make_strategy,
 )
 from mesmer.core.constants import (
+    AttemptOutcome,
     EdgeKind,
     EvidenceType,
     ExperimentState,
@@ -351,6 +353,72 @@ def test_frontier_update_state_and_attempt_link() -> None:
     assert g.nodes[f.id].fulfilled_by == a.id
 
 
+def test_attempt_create_unknown_experiment_raises() -> None:
+    g = BeliefGraph()
+    h = make_hypothesis(claim="c", description="d", family="format-shift")
+    g.apply(HypothesisCreateDelta(hypothesis=h))
+    a = make_attempt(
+        module="m",
+        approach="ap",
+        experiment_id="fx_missing",
+        tested_hypothesis_ids=[h.id],
+    )
+    with pytest.raises(InvalidDelta):
+        g.apply(AttemptCreateDelta(attempt=a))
+
+
+def test_attempt_create_cannot_fulfill_closed_experiment_twice() -> None:
+    g = BeliefGraph()
+    h = make_hypothesis(claim="c", description="d", family="format-shift")
+    g.apply(HypothesisCreateDelta(hypothesis=h))
+    f = make_frontier(
+        hypothesis_id=h.id, module="m", instruction="i", expected_signal="e"
+    )
+    g.apply(FrontierCreateDelta(experiment=f))
+
+    first = make_attempt(
+        module="m",
+        approach="ap",
+        experiment_id=f.id,
+        tested_hypothesis_ids=[h.id],
+    )
+    g.apply(AttemptCreateDelta(attempt=first))
+    second = make_attempt(
+        module="m",
+        approach="ap again",
+        experiment_id=f.id,
+        tested_hypothesis_ids=[h.id],
+    )
+
+    with pytest.raises(InvalidDelta):
+        g.apply(AttemptCreateDelta(attempt=second))
+
+
+def test_fulfilled_frontier_cannot_return_to_executing() -> None:
+    g = BeliefGraph()
+    h = make_hypothesis(claim="c", description="d", family="format-shift")
+    g.apply(HypothesisCreateDelta(hypothesis=h))
+    f = make_frontier(
+        hypothesis_id=h.id, module="m", instruction="i", expected_signal="e"
+    )
+    g.apply(FrontierCreateDelta(experiment=f))
+    g.apply(
+        FrontierUpdateStateDelta(
+            experiment_id=f.id,
+            state=ExperimentState.FULFILLED,
+            fulfilled_by="at_test",
+        )
+    )
+
+    with pytest.raises(InvalidDelta):
+        g.apply(
+            FrontierUpdateStateDelta(
+                experiment_id=f.id,
+                state=ExperimentState.EXECUTING,
+            )
+        )
+
+
 def test_frontier_rank_writes_components() -> None:
     g = BeliefGraph()
     h = make_hypothesis(claim="c", description="d", family="format-shift")
@@ -366,7 +434,12 @@ def test_frontier_rank_writes_components() -> None:
                 "novelty": 0.9,
                 "strategy_prior": 0.5,
                 "transfer_value": 0.0,
+                "transfer_source": "global yaml",
+                "transfer_success_rate": 0.8,
+                "transfer_attempts": 10,
                 "query_cost": 0.3,
+                "query_cost_reason": "tier=1",
+                "query_cost_tier": 1,
                 "repetition_penalty": 0.0,
                 "dead_similarity": 0.0,
                 "utility": 0.62,
@@ -377,6 +450,46 @@ def test_frontier_rank_writes_components() -> None:
     fx = g.nodes[f.id]
     assert pytest.approx(fx.utility, abs=1e-6) == 0.62
     assert pytest.approx(fx.expected_progress, abs=1e-6) == 0.7
+    assert fx.transfer_source == "global yaml"
+    assert fx.transfer_attempts == 10
+    assert fx.query_cost_reason == "tier=1"
+
+
+def test_frontier_rank_delta_replay_preserves_metadata(tmp_path: Path) -> None:
+    g = BeliefGraph()
+    h = make_hypothesis(claim="c", description="d", family="format-shift")
+    g.apply(HypothesisCreateDelta(hypothesis=h))
+    f = make_frontier(
+        hypothesis_id=h.id,
+        module="format-shift",
+        instruction="i",
+        expected_signal="e",
+    )
+    g.apply(FrontierCreateDelta(experiment=f))
+    g.apply(
+        FrontierRankDelta(
+            rankings={
+                f.id: {
+                    "utility": 0.7,
+                    "transfer_source": "global:format-shift",
+                    "transfer_attempts": 5,
+                    "query_cost_reason": "tier=2",
+                    "query_cost_tier": 2,
+                }
+            }
+        )
+    )
+    log_path = tmp_path / "belief_deltas.jsonl"
+    g.save(tmp_path / "belief_graph.json", delta_log_path=log_path)
+
+    replayed = BeliefGraph.replay(log_path)
+    fx = replayed.nodes[f.id]
+    assert isinstance(fx, FrontierExperiment)
+    assert fx.utility == 0.7
+    assert fx.transfer_source == "global:format-shift"
+    assert fx.transfer_attempts == 5
+    assert fx.query_cost_reason == "tier=2"
+    assert fx.query_cost_tier == 2
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +661,43 @@ def test_stats_counts_kinds() -> None:
     assert stats["frontier"] == 1
     assert stats["active_hypotheses"] == 1
     assert stats["proposed_frontier"] == 1
+
+
+def test_stats_reports_calibration_from_fulfilled_frontier() -> None:
+    g = BeliefGraph()
+    h = make_hypothesis(claim="c", description="d", family="x")
+    g.apply(HypothesisCreateDelta(hypothesis=h))
+    f = make_frontier(
+        hypothesis_id=h.id,
+        module="m",
+        instruction="i",
+        expected_signal="e",
+    )
+    g.apply(FrontierCreateDelta(experiment=f))
+    g.apply(
+        FrontierRankDelta(
+            rankings={
+                f.id: {
+                    "hypothesis_confidence": 0.8,
+                    "utility": 0.8,
+                }
+            }
+        )
+    )
+    a = make_attempt(
+        module="m",
+        approach="i",
+        experiment_id=f.id,
+        target_responses=["observed"],
+        tested_hypothesis_ids=[h.id],
+        outcome=AttemptOutcome.LEAK.value,
+    )
+    g.apply(AttemptCreateDelta(attempt=a))
+
+    stats = g.stats()
+    assert stats["calibration_samples"] == 1
+    assert pytest.approx(stats["calibration_brier"], abs=1e-6) == 0.04
+    assert pytest.approx(stats["calibration_score"], abs=1e-6) == 0.96
 
 
 # ---------------------------------------------------------------------------

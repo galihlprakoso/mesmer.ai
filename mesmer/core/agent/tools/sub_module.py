@@ -8,6 +8,7 @@ scores it, records the execution trace, and updates belief/search state.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import TYPE_CHECKING
 
@@ -58,7 +59,11 @@ def _auto_bind_experiment_id(ctx: "Context", fn_name: str, experiment_id: str | 
 
     if experiment_id:
         node = ctx.belief_graph.nodes.get(experiment_id)
-        if isinstance(node, FrontierExperiment) and node.module == fn_name:
+        if (
+            isinstance(node, FrontierExperiment)
+            and node.module == fn_name
+            and node.state in {ExperimentState.PROPOSED, ExperimentState.EXECUTING}
+        ):
             return experiment_id
         if isinstance(node, FrontierExperiment) and node.module != fn_name:
             experiment_id = None
@@ -74,6 +79,31 @@ def _auto_bind_experiment_id(ctx: "Context", fn_name: str, experiment_id: str | 
         return experiment_id
     candidates.sort(key=lambda fx: fx.utility, reverse=True)
     return candidates[0].id
+
+
+def _open_frontier_ids_for_module(ctx: "Context", fn_name: str) -> list[str]:
+    if ctx.belief_graph is None:
+        return []
+    from mesmer.core.belief_graph import FrontierExperiment
+    from mesmer.core.constants import ExperimentState
+
+    frontiers = [
+        n
+        for n in ctx.belief_graph.iter_nodes()
+        if isinstance(n, FrontierExperiment)
+        and n.state in {ExperimentState.PROPOSED, ExperimentState.EXECUTING}
+        and n.module == fn_name
+    ]
+    frontiers.sort(key=lambda fx: fx.utility, reverse=True)
+    return [fx.id for fx in frontiers]
+
+
+def _should_require_frontier(ctx: "Context", actor: "ReactActorSpec") -> bool:
+    return actor.role is ActorRole.EXECUTIVE and ctx.belief_graph is not None
+
+
+def _sibling_entries_for_child(actor: "ReactActorSpec", fn_name: str) -> list:
+    return [e for e in actor.sub_modules if e.name != fn_name]
 
 
 def _missing_output_markers(ctx: "Context", actor: "ReactActorSpec", fn_name: str) -> list[tuple[str, list[str]]]:
@@ -211,6 +241,29 @@ async def handle(
             LogEvent.BELIEF_DELTA.value,
             f"auto-bound {fn_name} to belief experiment {experiment_id}",
         )
+    if _should_require_frontier(ctx, actor) and not experiment_id:
+        options = _open_frontier_ids_for_module(ctx, fn_name)
+        options_text = ", ".join(options[:5]) if options else "none"
+        log(
+            LogEvent.FRONTIER_BLOCKED.value,
+            json.dumps(
+                {
+                    "module": fn_name,
+                    "open_frontier_ids": options[:5],
+                    "reason": "no_open_matching_frontier",
+                },
+                sort_keys=True,
+            ),
+        )
+        return tool_result(
+            call.id,
+            "Frontier discipline blocked this delegation. "
+            f"`{fn_name}` must be dispatched with an open BeliefGraph "
+            "Recommended Experiment id (`fx_...`). "
+            f"Open ids for this module: {options_text}. "
+            "Pick one from the Recommended Experiments list, or call "
+            "`conclude(...)` if no recommended experiment fits.",
+        )
     approach = args.get("instruction", fn_name)[:100]
 
     graph_node_id = None
@@ -233,11 +286,9 @@ async def handle(
     tier = None
     if ctx.registry is not None:
         tier = ctx.registry.tier_of(fn_name)
-    import json as _json
-
     log(
         LogEvent.DELEGATE.value,
-        _json.dumps(
+        json.dumps(
             {
                 "module": fn_name,
                 "tier": tier,
@@ -267,12 +318,13 @@ async def handle(
             except InvalidDelta as e:
                 log(LogEvent.BELIEF_DELTA.value, f"frontier-executing rejected: {e}")
 
-    # --- Sibling roster injection (see_siblings / call_siblings) ---
+    # --- Sibling roster / callable peer injection ---
+    sibling_entries = _sibling_entries_for_child(actor, fn_name)
     if sub_entry is not None and sub_entry.see_siblings and ctx.registry is not None:
         siblings = [
             ctx.registry.modules[n]
-            for e in actor.sub_modules
-            if e.name != fn_name and (n := e.name) in ctx.registry.modules
+            for e in sibling_entries
+            if (n := e.name) in ctx.registry.modules
         ]
         if siblings:
             roster_lines = ["## Available modules (siblings in this leader)"]
@@ -280,8 +332,6 @@ async def handle(
                 roster_lines.append(f"\n### {sib.name}")
                 roster_lines.append(sib.tool_description())
             sub_instruction = sub_instruction + "\n\n" + "\n".join(roster_lines)
-    # call_siblings: expose sibling modules as tools for this sub-module
-    # (future — not yet implemented; parsed and stored but not wired here)
 
     # Snapshot turn count before delegation so we can extract
     # the messages that THIS sub-module added
@@ -298,6 +348,8 @@ async def handle(
         run_kwargs["active_experiment_id"] = experiment_id
     if "graph_parent_id" in params:
         run_kwargs["graph_parent_id"] = graph_node_id
+    if sub_entry is not None and sub_entry.call_siblings and "delegate_submodules" in params:
+        run_kwargs["delegate_submodules"] = sibling_entries
 
     result = await ctx.run_module(fn_name, sub_instruction, sub_max_turns, **run_kwargs)
     log(LogEvent.DELEGATE_DONE.value, f"← {fn_name}: {result}")

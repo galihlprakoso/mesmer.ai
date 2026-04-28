@@ -7,7 +7,7 @@ import pytest
 from mesmer.core.constants import LogEvent, ScenarioMode
 from mesmer.core.agent.context import Context, Turn, TurnBudgetExhausted, is_target_error
 from mesmer.core.graph import AttackGraph
-from mesmer.core.module import ModuleConfig
+from mesmer.core.module import ModuleConfig, SubModuleEntry
 from mesmer.core.scenario import AgentConfig
 
 
@@ -223,6 +223,33 @@ class TestTargetReset:
 
         ctx.target.reset.assert_not_called()
         assert ctx._target_reset_at == 0
+
+    @pytest.mark.asyncio
+    async def test_run_module_exposes_delegate_submodules_to_child_actor(self):
+        ctx = _make_ctx(max_turns=10)
+        module = ModuleConfig(name="planner", description="test")
+        ctx.registry.get = MagicMock(return_value=module)
+        observed = {}
+
+        async def _fake_loop(actor, child_ctx, instruction, **kwargs):
+            observed["names"] = actor.sub_module_names
+            observed["dispatch"] = actor.tool_policy.dispatch_submodules
+            return "done"
+
+        with patch("mesmer.core.agent.run_react_loop", new=_fake_loop):
+            await ctx.run_module(
+                "planner",
+                "do it",
+                delegate_submodules=[
+                    SubModuleEntry(name="direct-ask"),
+                    SubModuleEntry(name="delimiter-injection"),
+                ],
+            )
+
+        assert observed == {
+            "names": ["direct-ask", "delimiter-injection"],
+            "dispatch": True,
+        }
 
     @pytest.mark.asyncio
     async def test_run_module_propagates_fresh_session_to_child(self):

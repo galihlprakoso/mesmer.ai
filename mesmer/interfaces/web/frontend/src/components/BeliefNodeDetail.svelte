@@ -35,6 +35,21 @@
     return Number(v ?? 0).toFixed(n)
   }
 
+  function frontierComponents(n) {
+    if (!n || n.kind !== 'frontier') return []
+    return [
+      ['expected progress', n.expected_progress],
+      ['information gain', n.information_gain],
+      ['hypothesis conf', n.hypothesis_confidence],
+      ['novelty', n.novelty],
+      ['strategy prior', n.strategy_prior],
+      ['transfer value', n.transfer_value],
+      ['query cost', n.query_cost],
+      ['repeat penalty', n.repetition_penalty],
+      ['dead similarity', n.dead_similarity],
+    ]
+  }
+
   // Kind-specific accent colors mirror the canvas palette so the badge
   // and the node a user just clicked read as the same thing.
   const KIND_COLOR = {
@@ -87,6 +102,20 @@
         ['module', n.module],
         ['state', n.state],
         ['utility', fixed(n.utility)],
+        ['expected_progress', fixed(n.expected_progress)],
+        ['information_gain', fixed(n.information_gain)],
+        ['hypothesis_confidence', fixed(n.hypothesis_confidence)],
+        ['novelty', fixed(n.novelty)],
+        ['strategy_prior', fixed(n.strategy_prior)],
+        ['transfer_value', fixed(n.transfer_value)],
+        ['transfer_source', n.transfer_source || '—'],
+        ['transfer_success_rate', fixed(n.transfer_success_rate)],
+        ['transfer_attempts', n.transfer_attempts ?? 0],
+        ['query_cost', fixed(n.query_cost)],
+        ['query_cost_reason', n.query_cost_reason || '—'],
+        ['query_cost_tier', n.query_cost_tier ?? '—'],
+        ['repetition_penalty', fixed(n.repetition_penalty)],
+        ['dead_similarity', fixed(n.dead_similarity)],
         ['hypothesis_id', n.hypothesis_id],
         ['strategy_id', n.strategy_id || '—'],
         ['instruction', n.instruction],
@@ -209,6 +238,25 @@
           {#if node.instruction}
             <div class="prose">{node.instruction}</div>
           {/if}
+          <div class="component-grid">
+            {#each frontierComponents(node) as [label, value]}
+              <div class="component">
+                <span class="component-k">{label}</span>
+                <span class="component-v mono">{fixed(value, 2)}</span>
+              </div>
+            {/each}
+          </div>
+          {#if node.transfer_source || node.query_cost_reason}
+            <div class="prose dim">
+              {#if node.transfer_source}
+                Transfer: {node.transfer_source}
+                ({fixed(node.transfer_success_rate, 2)}, {node.transfer_attempts ?? 0} attempts).
+              {/if}
+              {#if node.query_cost_reason}
+                Cost: {node.query_cost_reason}.
+              {/if}
+            </div>
+          {/if}
           {#if node.expected_signal}
             <div class="meta-row">
               <span class="meta-key">expected</span>
@@ -250,6 +298,12 @@
             <div class="meta-row">
               <span class="meta-key">experiment</span>
               <span class="meta-val mono">{node.experiment_id}</span>
+            </div>
+          {/if}
+          {#if node.outcome === 'infrastructure_error' || node.outcome === 'no_observation'}
+            <div class="prose dim">
+              This attempt is audit-only. It is excluded from belief confidence,
+              strategy stats, frontier fulfillment, and ranking history.
             </div>
           {/if}
           {#if (node.tested_hypothesis_ids || []).length}
@@ -411,6 +465,12 @@
     border-color: var(--red);
     color: var(--red);
   }
+  .status-badge.attempt-infrastructure_error,
+  .status-badge.attempt-no_observation {
+    background: rgba(245, 158, 11, 0.10);
+    border-color: var(--amber);
+    color: var(--amber);
+  }
 
   /* ---------- tab strip (mirrors NodeDetail.tab-strip) ---------- */
   .tab-strip {
@@ -513,6 +573,32 @@
   }
   .meta-val.mono,
   .mono { font-family: var(--mono); font-size: 11px; }
+
+  .component-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin: 10px 0;
+  }
+  .component {
+    min-width: 0;
+    padding: 6px 7px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+  }
+  .component-k {
+    display: block;
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 10px;
+    line-height: 1.25;
+  }
+  .component-v {
+    display: block;
+    margin-top: 3px;
+    color: var(--text);
+  }
 
   /* confidence / utility bar */
   .bar {

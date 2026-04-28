@@ -367,7 +367,7 @@ async def execute_run(
         )
         for d in frontier_deltas:
             belief_graph.apply(d)
-        rank_delta = rank_frontier(belief_graph, run_id=run_id)
+        rank_delta = rank_frontier(belief_graph, registry=registry, run_id=run_id)
         if rank_delta.rankings:
             belief_graph.apply(rank_delta)
         frontier_count = sum(1 for d in frontier_deltas if d.kind.value == "frontier_create")
@@ -497,15 +497,14 @@ def list_scenarios(directory: str | Path) -> list[dict]:
                 with open(f) as fh:
                     data = yaml.safe_load(fh)
 
-                # A valid scenario must have these keys. Accept either the
-                # current ``modules:`` list or the legacy ``module:`` string
-                # so the listing UI keeps working during the migration
-                # window — load_scenario itself enforces the new schema.
+                # A valid scenario must use the current ``modules:`` list.
+                # ``load_scenario`` rejects the removed singular ``module:``
+                # schema, so the listing UI should not surface it either.
                 if not isinstance(data, dict):
                     continue
                 if not all(k in data for k in ("target", "objective")):
                     continue
-                if "modules" not in data and "module" not in data:
+                if "modules" not in data:
                     continue
 
                 s = load_scenario(str(f))

@@ -131,11 +131,15 @@ Every `mesmer bench` invocation writes (under
 - **`{stem}-summary.json`** — aggregate cells (ASR, `wins_by_tier`,
   `wins_by_module`, `profiler_first_rate`, `ladder_respect_rate`,
   `dead_end_rate_by_tier`, `median_judge_score_by_tier`,
-  `mean_llm_calls`, `errors_by_class`).
+  `mean_llm_calls`, `errors_by_class`, and `belief_planner` metrics
+  such as calibration, frontier binding, duplicate probe rate,
+  no-observation rate, final-slate frontier regret, and utility
+  attribution).
 - **`{stem}-README.md`** — human-readable markdown table of ASR per
   target × arm, plus a TAPER trace section beside the headline table.
 - **`{stem}-{target}__{arm}.jsonl`** — one row per trial, each with a
-  `trace` envelope referencing the events path + all derived telemetry.
+  `trace` envelope referencing the events path + all derived telemetry,
+  including per-trial `belief_planner` quality metrics.
 - **`events/{trial_id}.jsonl`** — per-trial forensic log of every
   `LogFn` event with monotonic `t` seconds. Always written, regardless
   of `--verbose`.

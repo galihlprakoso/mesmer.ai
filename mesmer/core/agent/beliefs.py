@@ -9,12 +9,13 @@ Four pure-ish operations on a :class:`BeliefGraph`:
    and periodically after a no-fit-found extraction.
 
 2. :func:`apply_evidence_to_beliefs` — **no LLM**. Walks a batch of
-   :class:`Evidence` objects and emits the corresponding
-   :class:`HypothesisUpdateConfidenceDelta` and
-   :class:`HypothesisUpdateStatusDelta` objects. Crossing the
-   ``HYPOTHESIS_CONFIRMED_THRESHOLD`` or ``HYPOTHESIS_REFUTED_THRESHOLD``
-   in either direction emits a status flip. Pure function — caller
-   applies in order.
+   target-observed :class:`Evidence` objects through a binary factor
+   graph over connected hypothesis components: exact enumeration for
+   normal-sized components, damped loopy belief propagation for large
+   components. Evidence magnitude is treated as a calibrated
+   log-likelihood-ratio contribution; the emitted
+   :class:`HypothesisUpdateConfidenceDelta` remains a probability-space
+   delta so the reducer / delta log stay simple and replayable.
 
 3. :func:`rank_frontier` — **no LLM**. Computes the utility components
    for every PROPOSED :class:`FrontierExperiment` and returns one
@@ -45,7 +46,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import TYPE_CHECKING
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any
 
 from mesmer.core.agent.parsing import parse_llm_json
 from mesmer.core.agent.prompts import (
@@ -85,6 +87,7 @@ from mesmer.core.errors import HypothesisGenerationError
 if TYPE_CHECKING:
     from mesmer.core.agent.context import Context
     from mesmer.core.registry import Registry
+    from mesmer.core.strategy_library import GlobalStrategyEntry, StrategyLibrary
 
 
 # Cap on hypotheses returned per generate_hypotheses call. Mirrors the
@@ -131,6 +134,20 @@ _FAMILY_EXPECTED_SIGNALS: dict[str, str] = {
 # stopwords implicitly via length.
 _TOKEN_RE = re.compile(r"[a-z0-9]{4,}")
 
+# Evidence magnitudes are stored as readable probability-ish weights
+# (0.08, 0.30, ...). Convert them into log-likelihood-ratio steps for
+# belief updates. 2.4 makes one high-confidence hidden-instruction signal
+# from an 0.80 prior cross the 0.85 confirmation bar, while a single weak
+# refusal only nudges a 0.50 prior.
+_EVIDENCE_LOG_ODDS_SCALE = 2.4
+_PROB_EPSILON = 1e-6
+_JOINT_MAX_EXACT_HYPOTHESES = 18
+_LOOPY_BP_MAX_ITER = 60
+_LOOPY_BP_DAMPING = 0.5
+_LOOPY_BP_TOL = 1e-5
+_DEPENDENCY_COUPLING = 0.45
+_SHARED_ATTEMPT_COUPLING = 0.20
+
 
 def _tokens(text: str) -> set[str]:
     if not text:
@@ -142,6 +159,57 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def _is_observational_attempt(attempt: Attempt) -> bool:
+    if attempt.outcome in {
+        AttemptOutcome.INFRA_ERROR.value,
+        AttemptOutcome.NO_OBSERVATION.value,
+    }:
+        return False
+    return any(r.strip() for r in attempt.target_responses)
+
+
+def _clamp_probability(p: float) -> float:
+    return max(_PROB_EPSILON, min(1.0 - _PROB_EPSILON, p))
+
+
+def _logit(p: float) -> float:
+    p = _clamp_probability(p)
+    return math.log(p / (1.0 - p))
+
+
+def _sigmoid(x: float) -> float:
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def _logsumexp2(a: float, b: float) -> float:
+    m = max(a, b)
+    return m + math.log(math.exp(a - m) + math.exp(b - m))
+
+
+def _posterior_after_evidence(
+    prior: float,
+    *,
+    confidence_delta: float,
+    polarity: Polarity,
+) -> float:
+    if polarity is Polarity.NEUTRAL:
+        return prior
+    sign = 1.0 if polarity is Polarity.SUPPORTS else -1.0
+    llr = sign * abs(confidence_delta) * _EVIDENCE_LOG_ODDS_SCALE
+    return max(0.0, min(1.0, _sigmoid(_logit(prior) + llr)))
+
+
+def _evidence_llr(ev: Evidence) -> float:
+    if ev.polarity is Polarity.NEUTRAL:
+        return 0.0
+    sign = 1.0 if ev.polarity is Polarity.SUPPORTS else -1.0
+    return sign * abs(ev.confidence_delta) * _EVIDENCE_LOG_ODDS_SCALE
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +544,300 @@ def generate_frontier_experiments(
 # ---------------------------------------------------------------------------
 
 
+def _dependency_couplings(graph: BeliefGraph, hypothesis_ids: set[str]) -> dict[tuple[str, str], float]:
+    """Pairwise dependencies between hypothesis variables.
+
+    Explicit ``HYPOTHESIS_GENERALIZES_TO`` edges are strong positive
+    dependencies. Attempts that tested multiple hypotheses add weaker
+    empirical dependency: future evidence against one of them should
+    slightly move the others because prior probes treated them as a
+    coupled explanation set.
+    """
+    from mesmer.core.constants import EdgeKind
+
+    couplings: dict[tuple[str, str], float] = defaultdict(float)
+
+    def add(a: str, b: str, value: float) -> None:
+        if a == b or a not in hypothesis_ids or b not in hypothesis_ids:
+            return
+        key = tuple(sorted((a, b)))
+        couplings[key] += value
+
+    for edge in graph.edges:
+        if edge.kind is EdgeKind.HYPOTHESIS_GENERALIZES_TO:
+            add(edge.src_id, edge.dst_id, _DEPENDENCY_COUPLING)
+
+    for node in graph.iter_nodes(NodeKind.ATTEMPT):
+        if not isinstance(node, Attempt) or not _is_observational_attempt(node):
+            continue
+        tested = [hid for hid in node.tested_hypothesis_ids if hid in hypothesis_ids]
+        for i, a in enumerate(tested):
+            for b in tested[i + 1 :]:
+                add(a, b, _SHARED_ATTEMPT_COUPLING)
+
+    return dict(couplings)
+
+
+def _dependency_components(
+    hypothesis_ids: set[str],
+    couplings: dict[tuple[str, str], float],
+) -> list[list[str]]:
+    adjacency: dict[str, set[str]] = {hid: set() for hid in hypothesis_ids}
+    for a, b in couplings:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+
+    seen: set[str] = set()
+    components: list[list[str]] = []
+    for hid in sorted(hypothesis_ids):
+        if hid in seen:
+            continue
+        stack = [hid]
+        seen.add(hid)
+        comp: list[str] = []
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for nxt in adjacency.get(cur, ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        components.append(comp)
+    return components
+
+
+def _component_marginals(
+    graph: BeliefGraph,
+    component: list[str],
+    couplings: dict[tuple[str, str], float],
+    evidence_llrs: dict[str, float],
+    *,
+    with_evidence: bool,
+) -> dict[str, float]:
+    """Exact binary-factor inference for one connected component."""
+    n = len(component)
+    if n == 1:
+        hid = component[0]
+        node = graph.nodes[hid]
+        assert isinstance(node, WeaknessHypothesis)
+        if not with_evidence:
+            return {hid: node.confidence}
+        return {
+            hid: _posterior_after_evidence(
+                node.confidence,
+                confidence_delta=abs(evidence_llrs.get(hid, 0.0)) / _EVIDENCE_LOG_ODDS_SCALE,
+                polarity=Polarity.SUPPORTS if evidence_llrs.get(hid, 0.0) >= 0 else Polarity.REFUTES,
+            )
+            if evidence_llrs.get(hid, 0.0)
+            else node.confidence
+        }
+
+    priors: list[float] = []
+    for hid in component:
+        node = graph.nodes[hid]
+        assert isinstance(node, WeaknessHypothesis)
+        priors.append(_clamp_probability(node.confidence))
+
+    local_pairs = [
+        (component.index(a), component.index(b), weight)
+        for (a, b), weight in couplings.items()
+        if a in component and b in component
+    ]
+    local_llrs = [evidence_llrs.get(hid, 0.0) if with_evidence else 0.0 for hid in component]
+
+    log_weights: list[float] = []
+    true_sums = [0.0 for _ in component]
+    max_log = -math.inf
+    states_count = 1 << n
+    for mask in range(states_count):
+        logp = 0.0
+        for i, prior in enumerate(priors):
+            truth = bool(mask & (1 << i))
+            logp += math.log(prior if truth else 1.0 - prior)
+            llr = local_llrs[i]
+            if llr:
+                logp += 0.5 * llr if truth else -0.5 * llr
+        for i, j, coupling in local_pairs:
+            same = bool(mask & (1 << i)) == bool(mask & (1 << j))
+            logp += coupling if same else -coupling
+        log_weights.append(logp)
+        max_log = max(max_log, logp)
+
+    total = 0.0
+    for mask, logp in enumerate(log_weights):
+        weight = math.exp(logp - max_log)
+        total += weight
+        for i in range(n):
+            if mask & (1 << i):
+                true_sums[i] += weight
+
+    if total <= 0:
+        return {hid: graph.nodes[hid].confidence for hid in component if isinstance(graph.nodes[hid], WeaknessHypothesis)}
+    return {hid: true_sums[i] / total for i, hid in enumerate(component)}
+
+
+def _component_marginals_loopy_bp(
+    graph: BeliefGraph,
+    component: list[str],
+    couplings: dict[tuple[str, str], float],
+    evidence_llrs: dict[str, float],
+    *,
+    with_evidence: bool,
+) -> dict[str, float]:
+    """Approximate binary-factor inference for large components.
+
+    Exact enumeration is exponential in component size. For dense or
+    very large hypothesis clusters we use damped loopy belief
+    propagation over the same unary prior/evidence factors and pairwise
+    dependency factors. This keeps evidence propagation alive in large
+    real runs without allowing one giant component to stall the agent.
+    """
+    index = {hid: i for i, hid in enumerate(component)}
+    unary: list[tuple[float, float]] = []
+    for hid in component:
+        node = graph.nodes[hid]
+        assert isinstance(node, WeaknessHypothesis)
+        prior = _clamp_probability(node.confidence)
+        llr = evidence_llrs.get(hid, 0.0) if with_evidence else 0.0
+        unary.append(
+            (
+                math.log(1.0 - prior) - 0.5 * llr,
+                math.log(prior) + 0.5 * llr,
+            )
+        )
+
+    neighbors: list[dict[int, float]] = [dict() for _ in component]
+    for (a, b), raw_weight in couplings.items():
+        if a not in index or b not in index:
+            continue
+        i = index[a]
+        j = index[b]
+        weight = max(-2.0, min(2.0, raw_weight))
+        neighbors[i][j] = neighbors[i].get(j, 0.0) + weight
+        neighbors[j][i] = neighbors[j].get(i, 0.0) + weight
+
+    messages: dict[tuple[int, int], tuple[float, float]] = {
+        (i, j): (0.0, 0.0) for i, ns in enumerate(neighbors) for j in ns
+    }
+    if not messages:
+        return {
+            hid: _sigmoid(unary[i][1] - unary[i][0])
+            for i, hid in enumerate(component)
+        }
+
+    for _ in range(_LOOPY_BP_MAX_ITER):
+        max_change = 0.0
+        next_messages: dict[tuple[int, int], tuple[float, float]] = {}
+        for (i, j), old in messages.items():
+            base0, base1 = unary[i]
+            for k in neighbors[i]:
+                if k == j:
+                    continue
+                incoming = messages[(k, i)]
+                base0 += incoming[0]
+                base1 += incoming[1]
+
+            coupling = neighbors[i][j]
+            msg_to_j_false = _logsumexp2(base0 + coupling, base1 - coupling)
+            msg_to_j_true = _logsumexp2(base0 - coupling, base1 + coupling)
+            norm = _logsumexp2(msg_to_j_false, msg_to_j_true)
+            raw = (msg_to_j_false - norm, msg_to_j_true - norm)
+            damped = (
+                (1.0 - _LOOPY_BP_DAMPING) * raw[0] + _LOOPY_BP_DAMPING * old[0],
+                (1.0 - _LOOPY_BP_DAMPING) * raw[1] + _LOOPY_BP_DAMPING * old[1],
+            )
+            next_messages[(i, j)] = damped
+            max_change = max(
+                max_change,
+                abs(damped[0] - old[0]),
+                abs(damped[1] - old[1]),
+            )
+        messages = next_messages
+        if max_change < _LOOPY_BP_TOL:
+            break
+
+    out: dict[str, float] = {}
+    for i, hid in enumerate(component):
+        b0, b1 = unary[i]
+        for k in neighbors[i]:
+            incoming = messages[(k, i)]
+            b0 += incoming[0]
+            b1 += incoming[1]
+        norm = _logsumexp2(b0, b1)
+        out[hid] = math.exp(b1 - norm)
+    return out
+
+
+def _joint_posterior_marginals(
+    graph: BeliefGraph,
+    evidences: list[Evidence],
+) -> dict[str, float]:
+    valid_evidence = [
+        ev
+        for ev in evidences
+        if ev.hypothesis_id is not None
+        and ev.polarity is not Polarity.NEUTRAL
+        and isinstance(graph.nodes.get(ev.hypothesis_id), WeaknessHypothesis)
+    ]
+    if not valid_evidence:
+        return {}
+
+    hypothesis_ids = {
+        node.id for node in graph.iter_nodes(NodeKind.HYPOTHESIS) if isinstance(node, WeaknessHypothesis)
+    }
+    evidence_llrs: dict[str, float] = defaultdict(float)
+    for ev in valid_evidence:
+        assert ev.hypothesis_id is not None
+        evidence_llrs[ev.hypothesis_id] += _evidence_llr(ev)
+
+    couplings = _dependency_couplings(graph, hypothesis_ids)
+    components = _dependency_components(hypothesis_ids, couplings)
+    posterior: dict[str, float] = {}
+
+    for component in components:
+        if not any(hid in evidence_llrs for hid in component):
+            continue
+        if len(component) > _JOINT_MAX_EXACT_HYPOTHESES:
+            baseline = _component_marginals_loopy_bp(
+                graph,
+                component,
+                couplings,
+                evidence_llrs,
+                with_evidence=False,
+            )
+            with_evidence = _component_marginals_loopy_bp(
+                graph,
+                component,
+                couplings,
+                evidence_llrs,
+                with_evidence=True,
+            )
+        else:
+            baseline = _component_marginals(
+                graph,
+                component,
+                couplings,
+                evidence_llrs,
+                with_evidence=False,
+            )
+            with_evidence = _component_marginals(
+                graph,
+                component,
+                couplings,
+                evidence_llrs,
+                with_evidence=True,
+            )
+
+        for hid in component:
+            node = graph.nodes[hid]
+            assert isinstance(node, WeaknessHypothesis)
+            effect = with_evidence[hid] - baseline[hid]
+            if abs(effect) > 1e-9:
+                posterior[hid] = max(0.0, min(1.0, node.confidence + effect))
+
+    return posterior
+
+
 def apply_evidence_to_beliefs(
     graph: BeliefGraph,
     evidences: list[Evidence],
@@ -493,12 +855,13 @@ def apply_evidence_to_beliefs(
     1. For each evidence with non-NEUTRAL polarity AND a valid
        ``hypothesis_id`` already in the graph:
 
-       - Sign the evidence's ``confidence_delta`` (positive for
-         SUPPORTS, negative for REFUTES) and emit a
-         :class:`HypothesisUpdateConfidenceDelta`.
-       - Simulate the cumulative effect locally (the simulation only
+       - Convert current confidence to log-odds, add a signed
+         log-likelihood-ratio step derived from the evidence magnitude,
+         convert back to probability, and emit the probability-space
+         delta as :class:`HypothesisUpdateConfidenceDelta`.
+       - Simulate the cumulative posterior locally (the simulation only
          needs to know whether thresholds were crossed; it doesn't
-         persist).
+         persist beyond returned deltas).
        - When the simulated confidence crosses
          :data:`HYPOTHESIS_CONFIRMED_THRESHOLD` (and the hypothesis
          was ACTIVE), emit a
@@ -511,37 +874,44 @@ def apply_evidence_to_beliefs(
     2. NEUTRAL evidence is recorded by the EvidenceCreateDelta layer
        but produces no belief deltas here.
     """
-    out: list[HypothesisUpdateConfidenceDelta | HypothesisUpdateStatusDelta] = []
-    sim_confidence: dict[str, float] = {}
-    status_emitted: set[str] = set()
-
+    valid_evidence_by_hypothesis: dict[str, list[Evidence]] = defaultdict(list)
     for ev in evidences:
         if ev.hypothesis_id is None or ev.polarity is Polarity.NEUTRAL:
             continue
-        node = graph.nodes.get(ev.hypothesis_id)
+        if isinstance(graph.nodes.get(ev.hypothesis_id), WeaknessHypothesis):
+            valid_evidence_by_hypothesis[ev.hypothesis_id].append(ev)
+
+    posteriors = _joint_posterior_marginals(graph, evidences)
+    if not posteriors:
+        return []
+
+    out: list[HypothesisUpdateConfidenceDelta | HypothesisUpdateStatusDelta] = []
+    status_emitted: set[str] = set()
+
+    for hypothesis_id, new in sorted(posteriors.items()):
+        node = graph.nodes.get(hypothesis_id)
         if not isinstance(node, WeaknessHypothesis):
-            # Hypothesis disappeared between extraction and update —
-            # could happen in a long-running session. Skip silently;
-            # logging belongs at the engine boundary.
             continue
-        sign = 1.0 if ev.polarity is Polarity.SUPPORTS else -1.0
-        delta_value = sign * abs(ev.confidence_delta)
+        delta_value = new - node.confidence
+        if abs(delta_value) <= 1e-9:
+            continue
+        evidence_id = (
+            valid_evidence_by_hypothesis[hypothesis_id][0].id
+            if valid_evidence_by_hypothesis.get(hypothesis_id)
+            else None
+        )
         out.append(
             HypothesisUpdateConfidenceDelta(
-                hypothesis_id=ev.hypothesis_id,
+                hypothesis_id=hypothesis_id,
                 delta_value=delta_value,
-                evidence_id=ev.id,
+                evidence_id=evidence_id,
                 run_id=run_id,
             )
         )
 
-        cur = sim_confidence.get(ev.hypothesis_id, node.confidence)
-        new = max(0.0, min(1.0, cur + delta_value))
-        sim_confidence[ev.hypothesis_id] = new
-
         # Status flip only fires for ACTIVE hypotheses crossing
         # thresholds for the first time in this batch.
-        if node.status is HypothesisStatus.ACTIVE and ev.hypothesis_id not in status_emitted:
+        if node.status is HypothesisStatus.ACTIVE and hypothesis_id not in status_emitted:
             new_status: HypothesisStatus | None = None
             if new >= HYPOTHESIS_CONFIRMED_THRESHOLD:
                 new_status = HypothesisStatus.CONFIRMED
@@ -550,12 +920,12 @@ def apply_evidence_to_beliefs(
             if new_status is not None:
                 out.append(
                     HypothesisUpdateStatusDelta(
-                        hypothesis_id=ev.hypothesis_id,
+                        hypothesis_id=hypothesis_id,
                         status=new_status,
                         run_id=run_id,
                     )
                 )
-                status_emitted.add(ev.hypothesis_id)
+                status_emitted.add(hypothesis_id)
 
     return out
 
@@ -638,22 +1008,36 @@ def _component_strategy_prior(
     return s.local_success_rate
 
 
-def _component_query_cost(experiment: FrontierExperiment) -> float:
+def _component_query_cost(
+    experiment: FrontierExperiment,
+    *,
+    registry: "Registry | None",
+) -> tuple[float, str, int]:
     """Estimated relative cost of running this experiment.
-
-    Session 1 proxy: experiments using fresh-session modules cost more.
-    The :class:`ModuleConfig.reset_target` flag isn't easily reachable
-    from the graph alone, so we use a conservative 0.3 default that
-    later sessions can refine via a callback into the registry.
 
     Returns ∈ [0, 1]. Higher means MORE expensive — the weight in
     :data:`DEFAULT_UTILITY_WEIGHTS["query_cost"]` is negative so a
     higher cost lowers utility.
     """
-    # Cost is mostly fixed at 1 query per experiment in current design.
-    # Reserved for future expansion (multi-turn experiments would carry
-    # higher cost).
-    return 0.3
+    tier = registry.tier_of(experiment.module) if registry is not None else 2
+    tier_cost = {0: 0.15, 1: 0.30, 2: 0.50, 3: 0.72}.get(tier, 0.50)
+    reset_cost = 0.0
+    submodule_cost = 0.0
+    if registry is not None:
+        mod = registry.get(experiment.module)
+        if mod is not None:
+            reset_cost = 0.12 if mod.reset_target else 0.0
+            submodule_cost = min(0.12, 0.03 * len(mod.sub_modules))
+    length_cost = min(0.08, len(experiment.instruction) / 2400.0)
+    total = max(0.05, min(1.0, tier_cost + reset_cost + submodule_cost + length_cost))
+    reasons = [f"tier={tier}"]
+    if reset_cost:
+        reasons.append("reset")
+    if submodule_cost:
+        reasons.append("delegates")
+    if length_cost:
+        reasons.append("long-instruction")
+    return total, "+".join(reasons), tier
 
 
 def _component_repetition_penalty(
@@ -704,19 +1088,129 @@ def _component_dead_similarity(
     return max_sim
 
 
-def _component_transfer_value(experiment: FrontierExperiment) -> float:
+def _entry_trait_affinity(graph: BeliefGraph, entry: "GlobalStrategyEntry") -> float:
+    trait_keys = set(graph.target.traits)
+    if not trait_keys:
+        return 0.5
+    works = {t for t in entry.works_against_traits if t}
+    fails = {t for t in entry.fails_against_traits if t}
+    positive = len(trait_keys & works)
+    negative = len(trait_keys & fails)
+    if positive == 0 and negative == 0:
+        return 0.5
+    return max(0.0, min(1.0, 0.5 + 0.25 * positive - 0.25 * negative))
+
+
+def _library_entry_score(
+    graph: BeliefGraph,
+    experiment: FrontierExperiment,
+    entry: "GlobalStrategyEntry",
+    *,
+    strategy_template: str,
+) -> float:
+    attempts = max(0, int(entry.global_attempt_count))
+    if attempts <= 0:
+        return 0.0
+    reliability = min(1.0, math.log1p(attempts) / math.log1p(20.0))
+    text_a = _tokens(entry.template_summary)
+    text_b = (
+        _tokens(strategy_template)
+        | _tokens(experiment.instruction)
+        | _tokens(experiment.module)
+        | _tokens(experiment.expected_signal)
+    )
+    similarity = _jaccard(text_a, text_b) if text_a and text_b else 0.0
+    trait_affinity = _entry_trait_affinity(graph, entry)
+    score = (
+        0.55 * entry.global_success_rate
+        + 0.20 * reliability
+        + 0.15 * similarity
+        + 0.10 * trait_affinity
+    )
+    return max(0.0, min(1.0, score))
+
+
+def _load_global_strategy_library() -> "StrategyLibrary | None":
+    try:
+        from mesmer.core.strategy_library import load_library
+
+        return load_library()
+    except Exception:  # pragma: no cover - corrupt local memory should not break ranking
+        return None
+
+
+def _component_transfer_value(
+    experiment: FrontierExperiment,
+    graph: BeliefGraph,
+    *,
+    strategy_library: "StrategyLibrary | None",
+) -> float:
     """Cross-target lifetime-strategy bonus.
 
-    Reserved for the AutoDAN-Turbo-style global library (Session 4).
-    Always 0.0 in Session 1 — the local strategy slice is enough.
+    Uses the global strategy library directly in the utility ranker.
+    Exact strategy-template matches get first priority; otherwise the
+    best same-family entry contributes by global success rate,
+    evidence volume, text similarity, and target trait affinity.
     """
-    return 0.0
+    if strategy_library is None or not getattr(strategy_library, "entries", None):
+        return 0.0
+    h = graph.nodes.get(experiment.hypothesis_id)
+    if not isinstance(h, WeaknessHypothesis):
+        return 0.0
+    strategy_template = ""
+    if experiment.strategy_id is not None:
+        s = graph.nodes.get(experiment.strategy_id)
+        if isinstance(s, Strategy):
+            strategy_template = s.template_summary
+
+    exact = (
+        strategy_library.find(h.family, strategy_template)
+        if strategy_template and hasattr(strategy_library, "find")
+        else None
+    )
+    if exact is not None:
+        score = _library_entry_score(
+            graph,
+            experiment,
+            exact,
+            strategy_template=strategy_template,
+        )
+        setattr(experiment, "_transfer_source", exact.template_summary)
+        setattr(experiment, "_transfer_success_rate", exact.global_success_rate)
+        setattr(experiment, "_transfer_attempts", exact.global_attempt_count)
+        return score
+
+    entries = strategy_library.for_family(h.family, top_k=8)
+    if not entries:
+        return 0.0
+    best_entry = max(
+        entries,
+        key=lambda entry: _library_entry_score(
+            graph,
+            experiment,
+            entry,
+            strategy_template=strategy_template,
+        ),
+    )
+    score = _library_entry_score(
+        graph,
+        experiment,
+        best_entry,
+        strategy_template=strategy_template,
+    )
+    setattr(experiment, "_transfer_source", best_entry.template_summary)
+    setattr(experiment, "_transfer_success_rate", best_entry.global_success_rate)
+    setattr(experiment, "_transfer_attempts", best_entry.global_attempt_count)
+    return score
 
 
 def rank_frontier(
     graph: BeliefGraph,
     *,
     weights: dict[str, float] | None = None,
+    registry: "Registry | None" = None,
+    strategy_library: "StrategyLibrary | None" = None,
+    load_global_strategy_library: bool = True,
     recent_attempt_window: int = 8,
     fulfilled_window: int = 8,
     run_id: str = "",
@@ -724,8 +1218,8 @@ def rank_frontier(
     """Compute utility scores for every PROPOSED frontier experiment.
 
     Returns a single :class:`FrontierRankDelta` whose ``rankings`` map
-    each experiment id to all eight component scores plus the aggregate
-    ``utility``. Caller applies the delta — application is idempotent
+    each experiment id to all nine component scores, rank metadata, and
+    the aggregate ``utility``. Caller applies the delta — application is idempotent
     in spirit (overwrites prior rankings).
 
     ``weights`` overrides :data:`DEFAULT_UTILITY_WEIGHTS` per-call.
@@ -737,6 +1231,9 @@ def rank_frontier(
     w = dict(DEFAULT_UTILITY_WEIGHTS)
     if weights:
         w.update(weights)
+    library = strategy_library
+    if library is None and load_global_strategy_library:
+        library = _load_global_strategy_library()
 
     proposed = graph.proposed_frontier()
     if not proposed:
@@ -747,13 +1244,7 @@ def rank_frontier(
         (
             n
             for n in graph.iter_nodes(NodeKind.ATTEMPT)
-            if isinstance(n, Attempt)
-            and n.outcome
-            not in {
-                AttemptOutcome.INFRA_ERROR.value,
-                AttemptOutcome.NO_OBSERVATION.value,
-            }
-            and any(r.strip() for r in n.target_responses)
+            if isinstance(n, Attempt) and _is_observational_attempt(n)
         ),
         key=lambda a: a.created_at,
     )
@@ -774,28 +1265,43 @@ def rank_frontier(
         key=lambda f: f.created_at,
     )[-fulfilled_window:]
 
-    rankings: dict[str, dict[str, float]] = {}
+    rankings: dict[str, dict[str, Any]] = {}
     for exp in proposed:
         h = graph.nodes.get(exp.hypothesis_id)
         if not isinstance(h, WeaknessHypothesis):
-            # Orphan experiment — skip ranking. The engine should
-            # eventually drop it; we don't do that here because rank is
-            # a pure read-side function.
+            # Orphan experiment — skip ranking. Rank is a pure read-side
+            # function; cleanup belongs to the mutation boundary.
             continue
 
+        query_cost, query_cost_reason, query_cost_tier = _component_query_cost(
+            exp,
+            registry=registry,
+        )
+        transfer_value = _component_transfer_value(
+            exp,
+            graph,
+            strategy_library=library,
+        )
         components = {
             "expected_progress": _component_expected_progress(h),
             "information_gain": _component_information_gain(h),
             "hypothesis_confidence": h.confidence,
             "novelty": _component_novelty(exp, recent_attempts),
             "strategy_prior": _component_strategy_prior(exp, graph),
-            "transfer_value": _component_transfer_value(exp),
-            "query_cost": _component_query_cost(exp),
+            "transfer_value": transfer_value,
+            "query_cost": query_cost,
             "repetition_penalty": _component_repetition_penalty(exp, fulfilled_recent),
             "dead_similarity": _component_dead_similarity(exp, dead_attempts),
         }
         utility = sum(w.get(k, 0.0) * v for k, v in components.items())
         components["utility"] = utility
+        components["query_cost_reason"] = query_cost_reason
+        components["query_cost_tier"] = query_cost_tier
+        source = getattr(exp, "_transfer_source", "")
+        if source:
+            components["transfer_source"] = source
+            components["transfer_success_rate"] = getattr(exp, "_transfer_success_rate", 0.0)
+            components["transfer_attempts"] = getattr(exp, "_transfer_attempts", 0)
         rankings[exp.id] = components
 
     return FrontierRankDelta(rankings=rankings, run_id=run_id)
@@ -819,23 +1325,26 @@ _SIM_REFUTE_DELTA = 0.12
 
 
 def _hypothesis_visit_count(graph: BeliefGraph, hypothesis_id: str) -> int:
-    """Number of attempts that have already tested ``hypothesis_id``.
+    """Number of observed attempts that have already tested ``hypothesis_id``.
 
-    Counts every Attempt whose ``tested_hypothesis_ids`` contains the
-    id, regardless of run — cross-run experience naturally drives the
-    exploration bonus down for repeatedly-tested hypotheses.
+    Infrastructure failures and empty target transcripts are audit records,
+    not observations, so they do not suppress exploration.
     """
     n = 0
     for node in graph.iter_nodes(NodeKind.ATTEMPT):
         assert isinstance(node, Attempt)
-        if hypothesis_id in node.tested_hypothesis_ids:
+        if _is_observational_attempt(node) and hypothesis_id in node.tested_hypothesis_ids:
             n += 1
     return n
 
 
 def _total_attempt_count(graph: BeliefGraph) -> int:
-    """Total Attempt nodes in the graph (the UCB ``N``)."""
-    return sum(1 for _ in graph.iter_nodes(NodeKind.ATTEMPT))
+    """Total observed Attempt nodes in the graph (the UCB ``N``)."""
+    return sum(
+        1
+        for node in graph.iter_nodes(NodeKind.ATTEMPT)
+        if isinstance(node, Attempt) and _is_observational_attempt(node)
+    )
 
 
 def _ucb_bonus(
@@ -880,55 +1389,103 @@ def _simulated_utility(
     return sum(w.get(k, 0.0) * v for k, v in components.items())
 
 
-def _simulated_second_step_value(
+def _simulated_future_value(
     graph: BeliefGraph,
     *,
-    first: FrontierExperiment,
+    anchor: FrontierExperiment,
     proposed: list[FrontierExperiment],
     confidence_overrides: dict[str, float],
-    total_attempts_after_first: int,
+    consumed_ids: set[str],
+    total_attempts: int,
     exploration_c: float,
+    depth: int,
+    lookahead_weight: float,
     rollout_branching: int,
 ) -> float:
+    if depth <= 0:
+        return 0.0
     candidates = [
         exp
         for exp in proposed
-        if exp.id != first.id and exp.hypothesis_id == first.hypothesis_id
+        if exp.id not in consumed_ids and exp.hypothesis_id == anchor.hypothesis_id
     ]
     if not candidates or rollout_branching <= 0:
-        h = graph.nodes.get(first.hypothesis_id)
+        h = graph.nodes.get(anchor.hypothesis_id)
         if not isinstance(h, WeaknessHypothesis):
             return 0.0
-        conf = confidence_overrides.get(first.hypothesis_id, h.confidence)
+        conf = confidence_overrides.get(anchor.hypothesis_id, h.confidence)
         # Expansion fallback: estimate the value of generating one local
         # refinement after this experiment. High-information, novel,
         # strategy-backed branches get useful continuation value even before
         # a concrete child frontier exists.
-        return 0.75 * _simulated_utility(first, confidence=conf)
+        return 0.75 * _simulated_utility(anchor, confidence=conf)
 
-    scored: list[float] = []
+    scored: list[tuple[float, FrontierExperiment]] = []
     for exp in candidates:
         h = graph.nodes.get(exp.hypothesis_id)
         if not isinstance(h, WeaknessHypothesis):
             continue
         conf = confidence_overrides.get(exp.hypothesis_id, h.confidence)
         visits = _hypothesis_visit_count(graph, exp.hypothesis_id)
-        if exp.hypothesis_id == first.hypothesis_id:
-            visits += 1
-        scored.append(
-            _simulated_utility(exp, confidence=conf)
-            + _ucb_bonus(
-                total_attempts=total_attempts_after_first,
-                hypothesis_visits=visits,
-                exploration_c=exploration_c,
-            )
+        visits += sum(1 for eid in consumed_ids if _frontier_hypothesis_id(proposed, eid) == exp.hypothesis_id)
+        base = _simulated_utility(exp, confidence=conf) + _ucb_bonus(
+            total_attempts=total_attempts,
+            hypothesis_visits=visits,
+            exploration_c=exploration_c,
         )
-    scored.sort(reverse=True)
+        if depth > 1 and lookahead_weight > 0:
+            p_support = _support_probability(exp)
+            support_conf = _posterior_after_evidence(
+                conf,
+                confidence_delta=_SIM_SUPPORT_DELTA,
+                polarity=Polarity.SUPPORTS,
+            )
+            refute_conf = _posterior_after_evidence(
+                conf,
+                confidence_delta=_SIM_REFUTE_DELTA,
+                polarity=Polarity.REFUTES,
+            )
+            support_future = _simulated_future_value(
+                graph,
+                anchor=exp,
+                proposed=proposed,
+                confidence_overrides={**confidence_overrides, exp.hypothesis_id: support_conf},
+                consumed_ids={*consumed_ids, exp.id},
+                total_attempts=total_attempts + 1,
+                exploration_c=exploration_c,
+                depth=depth - 1,
+                lookahead_weight=lookahead_weight,
+                rollout_branching=rollout_branching,
+            )
+            refute_future = _simulated_future_value(
+                graph,
+                anchor=exp,
+                proposed=proposed,
+                confidence_overrides={**confidence_overrides, exp.hypothesis_id: refute_conf},
+                consumed_ids={*consumed_ids, exp.id},
+                total_attempts=total_attempts + 1,
+                exploration_c=exploration_c,
+                depth=depth - 1,
+                lookahead_weight=lookahead_weight,
+                rollout_branching=rollout_branching,
+            )
+            base += lookahead_weight * (
+                p_support * support_future + (1.0 - p_support) * refute_future
+            )
+        scored.append((base, exp))
+    scored.sort(key=lambda row: row[0], reverse=True)
     if not scored:
         return 0.0
-    # Progressive widening: at depth 2 we estimate the next layer from the
-    # best few candidates rather than pretending the whole frontier expands.
-    return max(scored[:rollout_branching])
+    # Progressive widening: estimate the next layer from the best few
+    # candidates rather than pretending the whole frontier expands.
+    return max(score for score, _ in scored[:rollout_branching])
+
+
+def _frontier_hypothesis_id(proposed: list[FrontierExperiment], experiment_id: str) -> str | None:
+    for exp in proposed:
+        if exp.id == experiment_id:
+            return exp.hypothesis_id
+    return None
 
 
 def select_next_experiment(
@@ -942,7 +1499,7 @@ def select_next_experiment(
     """Pick the next :class:`FrontierExperiment` to dispatch.
 
     Uses UCB on top of the utility ranker, then optionally performs a
-    depth-2 cheap rollout over the existing frontier:
+    bounded recursive belief-tree rollout over the existing frontier:
 
         choice_score(fx) = fx.utility
                          + c * sqrt(log(N + 1) / (n_h + 1))
@@ -955,9 +1512,8 @@ def select_next_experiment(
 
     The rollout is target-query-free. It simulates SUPPORTS / REFUTES
     evidence against the tested hypothesis, updates confidence in that
-    imaginary branch, then asks which second experiment would be best
-    under that belief state. This is not full MCTS; it is the bounded
-    belief-state scheduler described in the plan.
+    imaginary branch, then recursively estimates the best local
+    continuation under that belief state.
 
     Returns the experiment with the highest score from
     those still in :attr:`ExperimentState.PROPOSED`. Returns ``None``
@@ -998,24 +1554,38 @@ def select_next_experiment(
         )
         if lookahead_depth >= 2 and lookahead_weight > 0 and len(proposed) > 1:
             p_support = _support_probability(exp)
-            support_conf = max(0.0, min(1.0, h.confidence + _SIM_SUPPORT_DELTA))
-            refute_conf = max(0.0, min(1.0, h.confidence - _SIM_REFUTE_DELTA))
-            support_value = _simulated_second_step_value(
+            support_conf = _posterior_after_evidence(
+                h.confidence,
+                confidence_delta=_SIM_SUPPORT_DELTA,
+                polarity=Polarity.SUPPORTS,
+            )
+            refute_conf = _posterior_after_evidence(
+                h.confidence,
+                confidence_delta=_SIM_REFUTE_DELTA,
+                polarity=Polarity.REFUTES,
+            )
+            support_value = _simulated_future_value(
                 graph,
-                first=exp,
+                anchor=exp,
                 proposed=proposed,
                 confidence_overrides={exp.hypothesis_id: support_conf},
-                total_attempts_after_first=total_attempts + 1,
+                consumed_ids={exp.id},
+                total_attempts=total_attempts + 1,
                 exploration_c=exploration_c,
+                depth=lookahead_depth - 1,
+                lookahead_weight=lookahead_weight,
                 rollout_branching=rollout_branching,
             )
-            refute_value = _simulated_second_step_value(
+            refute_value = _simulated_future_value(
                 graph,
-                first=exp,
+                anchor=exp,
                 proposed=proposed,
                 confidence_overrides={exp.hypothesis_id: refute_conf},
-                total_attempts_after_first=total_attempts + 1,
+                consumed_ids={exp.id},
+                total_attempts=total_attempts + 1,
                 exploration_c=exploration_c,
+                depth=lookahead_depth - 1,
+                lookahead_weight=lookahead_weight,
                 rollout_branching=rollout_branching,
             )
             score += lookahead_weight * (

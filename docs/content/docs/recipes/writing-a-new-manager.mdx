@@ -122,8 +122,10 @@ siblings to recommend*. The canonical case is `attack-planner`. Leave
 it false (or omit) for techniques that just probe — they don't need
 to know about siblings.
 
-`call_siblings: true` is parsed but not yet wired to expose siblings
-as callable tools. Reserved.
+`call_siblings: true` exposes siblings as callable tools inside that
+child module's own ReAct loop. Use it only when the child is an
+orchestrator that should directly execute peer techniques; ordinary
+planners usually need `see_siblings`, not callable peers.
 
 ## Mode and reset semantics
 

@@ -222,6 +222,7 @@ class LogEvent(str, Enum):
     EVIDENCE_EXTRACT_ERROR = "evidence_extract_error"
     FRONTIER_RANKED = "frontier_ranked"
     FRONTIER_DROPPED = "frontier_dropped"
+    FRONTIER_BLOCKED = "frontier_blocked"
 
 
 # ---------------------------------------------------------------------------
@@ -467,9 +468,9 @@ TARGET_ERROR_MARKERS: tuple[str, ...] = (
 # --- Belief Attack Graph (Session 1) ---
 #
 # Confidence on a :class:`WeaknessHypothesis` lives in [0.0, 1.0]. The
-# planner reads it as a probability-shaped quantity, but the update is
-# linear (Bayes-flavoured, not full Bayesian) — see
-# ``mesmer.core.agent.beliefs.update_confidence``.
+# planner reads it as a probability-shaped quantity. Evidence magnitudes
+# are applied as signed log-likelihood-ratio steps in
+# ``mesmer.core.agent.beliefs.apply_evidence_to_beliefs``.
 
 # At or above: status flips to CONFIRMED, planner switches to exploit
 # instead of further test.
@@ -509,8 +510,8 @@ EVIDENCE_TYPE_WEIGHTS: dict[str, float] = {
 
 # Default weights for the FrontierExperiment utility ranker. Each
 # component is in [-1, 1] before weighting; final utility is the
-# weighted sum, then clamped to [0, 1] for display. Tune these per
-# scenario if needed (RunConfig will eventually expose an override).
+# weighted sum. The UI clamps for bar display, but the stored value
+# remains auditable as the raw influence-diagram utility.
 DEFAULT_UTILITY_WEIGHTS: dict[str, float] = {
     "expected_progress": 0.30,
     "information_gain": 0.25,

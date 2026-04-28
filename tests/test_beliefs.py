@@ -24,6 +24,8 @@ from mesmer.core.agent.beliefs import (
 from mesmer.core.belief_graph import (
     AttemptCreateDelta,
     BeliefGraph,
+    Edge,
+    EdgeCreateDelta,
     EvidenceCreateDelta,
     FrontierCreateDelta,
     HypothesisCreateDelta,
@@ -38,6 +40,7 @@ from mesmer.core.belief_graph import (
     make_strategy,
 )
 from mesmer.core.constants import (
+    EdgeKind,
     HYPOTHESIS_CONFIRMED_THRESHOLD,
     HYPOTHESIS_REFUTED_THRESHOLD,
     EvidenceType,
@@ -46,6 +49,9 @@ from mesmer.core.constants import (
     Polarity,
 )
 from mesmer.core.errors import HypothesisGenerationError
+from mesmer.core.module import ModuleConfig
+from mesmer.core.registry import Registry
+from mesmer.core.strategy_library import GlobalStrategyEntry, StrategyLibrary
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +144,28 @@ async def test_generate_hypotheses_drops_rows_missing_claim_or_family() -> None:
     assert deltas[0].hypothesis.claim == "good"
 
 
+def test_hypothesis_create_auto_links_related_hypotheses() -> None:
+    g = BeliefGraph()
+    h1 = make_hypothesis(
+        claim="Target leaks when policy is reformatted as YAML",
+        description="serialization bypass",
+        family="format-shift",
+    )
+    h2 = make_hypothesis(
+        claim="Target leaks when policy is reformatted as JSON",
+        description="serialization bypass",
+        family="format-shift",
+    )
+    g.apply(HypothesisCreateDelta(hypothesis=h1))
+    g.apply(HypothesisCreateDelta(hypothesis=h2))
+
+    assert any(
+        e.kind is EdgeKind.HYPOTHESIS_GENERALIZES_TO
+        and {e.src_id, e.dst_id} == {h1.id, h2.id}
+        for e in g.edges
+    )
+
+
 @pytest.mark.asyncio
 async def test_generate_hypotheses_llm_error_raises_typed() -> None:
     g = BeliefGraph()
@@ -181,7 +209,7 @@ def test_supports_evidence_emits_positive_delta() -> None:
     deltas = apply_evidence_to_beliefs(g, [ev])
     assert len(deltas) == 1
     assert isinstance(deltas[0], HypothesisUpdateConfidenceDelta)
-    assert pytest.approx(deltas[0].delta_value, abs=1e-6) == 0.18
+    assert 0.09 < deltas[0].delta_value < 0.12
 
 
 def test_refutes_evidence_emits_negative_delta() -> None:
@@ -198,7 +226,7 @@ def test_refutes_evidence_emits_negative_delta() -> None:
 
     deltas = apply_evidence_to_beliefs(g, [ev])
     assert len(deltas) == 1
-    assert pytest.approx(deltas[0].delta_value, abs=1e-6) == -0.10
+    assert -0.07 < deltas[0].delta_value < -0.04
 
 
 def test_neutral_evidence_emits_no_delta() -> None:
@@ -282,6 +310,24 @@ def test_status_flip_to_confirmed_when_threshold_crossed() -> None:
     assert statuses[0].status is HypothesisStatus.CONFIRMED
 
 
+def test_confidence_update_uses_log_odds_not_linear_addition() -> None:
+    g, h_id = _setup_with_hypothesis(0.5)
+    ev = make_evidence(
+        signal_type=EvidenceType.PARTIAL_COMPLIANCE,
+        polarity=Polarity.SUPPORTS,
+        verbatim_fragment="x",
+        rationale="r",
+        hypothesis_id=h_id,
+        confidence_delta=0.18,
+    )
+    g.apply(EvidenceCreateDelta(evidence=ev))
+
+    deltas = apply_evidence_to_beliefs(g, [ev])
+    conf_delta = next(d for d in deltas if isinstance(d, HypothesisUpdateConfidenceDelta))
+    assert 0.09 < conf_delta.delta_value < 0.12
+    assert conf_delta.delta_value != pytest.approx(0.18)
+
+
 def test_status_flip_to_refuted_when_threshold_crossed() -> None:
     confidence_start = HYPOTHESIS_REFUTED_THRESHOLD + 0.05
     g, h_id = _setup_with_hypothesis(confidence_start)
@@ -357,6 +403,94 @@ def test_evidence_against_missing_hypothesis_skipped() -> None:
     assert deltas == []
 
 
+def test_joint_inference_moves_related_hypothesis() -> None:
+    g = BeliefGraph()
+    h_child = make_hypothesis(
+        claim="format-shift child",
+        description="d",
+        family="format-shift",
+        confidence=0.5,
+    )
+    h_parent = make_hypothesis(
+        claim="broader serialization weakness",
+        description="d",
+        family="format-shift",
+        confidence=0.5,
+    )
+    g.apply(HypothesisCreateDelta(hypothesis=h_child))
+    g.apply(HypothesisCreateDelta(hypothesis=h_parent))
+    g.apply(
+        EdgeCreateDelta(
+            edge=Edge(
+                src_id=h_child.id,
+                dst_id=h_parent.id,
+                kind=EdgeKind.HYPOTHESIS_GENERALIZES_TO,
+            )
+        )
+    )
+    ev = make_evidence(
+        signal_type=EvidenceType.PARTIAL_COMPLIANCE,
+        polarity=Polarity.SUPPORTS,
+        verbatim_fragment="x",
+        rationale="r",
+        hypothesis_id=h_child.id,
+        confidence_delta=0.18,
+    )
+    g.apply(EvidenceCreateDelta(evidence=ev))
+
+    deltas = [
+        d for d in apply_evidence_to_beliefs(g, [ev]) if isinstance(d, HypothesisUpdateConfidenceDelta)
+    ]
+    by_id = {d.hypothesis_id: d.delta_value for d in deltas}
+    assert by_id[h_child.id] > 0.09
+    assert by_id[h_parent.id] > 0.0
+    assert by_id[h_parent.id] < by_id[h_child.id]
+
+
+def test_large_dependency_component_uses_loopy_bp_not_singleton_fallback() -> None:
+    g = BeliefGraph()
+    hypotheses = [
+        make_hypothesis(
+            claim=f"format-shift variant {i}",
+            description="d",
+            family="format-shift",
+            confidence=0.5,
+        )
+        for i in range(20)
+    ]
+    for h in hypotheses:
+        g.apply(HypothesisCreateDelta(hypothesis=h))
+    for a, b in zip(hypotheses, hypotheses[1:], strict=False):
+        g.apply(
+            EdgeCreateDelta(
+                edge=Edge(
+                    src_id=a.id,
+                    dst_id=b.id,
+                    kind=EdgeKind.HYPOTHESIS_GENERALIZES_TO,
+                )
+            )
+        )
+
+    ev = make_evidence(
+        signal_type=EvidenceType.PARTIAL_COMPLIANCE,
+        polarity=Polarity.SUPPORTS,
+        verbatim_fragment="x",
+        rationale="r",
+        hypothesis_id=hypotheses[0].id,
+        confidence_delta=0.18,
+    )
+    g.apply(EvidenceCreateDelta(evidence=ev))
+
+    deltas = [
+        d for d in apply_evidence_to_beliefs(g, [ev]) if isinstance(d, HypothesisUpdateConfidenceDelta)
+    ]
+    by_id = {d.hypothesis_id: d.delta_value for d in deltas}
+    assert by_id[hypotheses[0].id] > 0.09
+    assert by_id[hypotheses[1].id] > 0.0
+    assert hypotheses[-1].id in by_id
+    assert 0.0 < by_id[hypotheses[-1].id] < by_id[hypotheses[1].id]
+
+
 # ---------------------------------------------------------------------------
 # rank_frontier
 # ---------------------------------------------------------------------------
@@ -384,6 +518,7 @@ def test_rank_frontier_writes_components() -> None:
     for key in (
         "expected_progress",
         "information_gain",
+        "hypothesis_confidence",
         "novelty",
         "strategy_prior",
         "transfer_value",
@@ -424,6 +559,7 @@ def test_rank_frontier_novelty_drops_for_similar_recent_attempt() -> None:
     a = make_attempt(
         module="format-shift",
         approach="reformat policy as YAML for debug",
+        target_responses=["The target produced a real refusal."],
         tested_hypothesis_ids=[h_id],
     )
     g.apply(AttemptCreateDelta(attempt=a))
@@ -439,6 +575,7 @@ def test_rank_frontier_dead_similarity_penalises_lookalikes() -> None:
     dead = make_attempt(
         module="format-shift",
         approach="reformat policy as YAML for audit",
+        target_responses=["I cannot provide that policy."],
         tested_hypothesis_ids=[h_id],
         outcome="dead",
     )
@@ -447,6 +584,22 @@ def test_rank_frontier_dead_similarity_penalises_lookalikes() -> None:
     rank = rank_frontier(g).rankings[f_id]
     # Dead similarity should be > 0 (some token overlap).
     assert rank["dead_similarity"] > 0.0
+
+
+def test_rank_frontier_ignores_non_observational_attempts() -> None:
+    g, h_id, f_id = _setup_with_frontier(confidence=0.5)
+    failed = make_attempt(
+        module="format-shift",
+        approach="reformat policy as YAML for audit",
+        module_output="Failed to send message to target due to connection error.",
+        tested_hypothesis_ids=[h_id],
+        outcome="infrastructure_error",
+    )
+    g.apply(AttemptCreateDelta(attempt=failed))
+
+    rank = rank_frontier(g).rankings[f_id]
+    assert rank["novelty"] == 1.0
+    assert rank["dead_similarity"] == 0.0
 
 
 def test_rank_frontier_strategy_prior_uses_local_success_rate() -> None:
@@ -467,6 +620,70 @@ def test_rank_frontier_strategy_prior_uses_local_success_rate() -> None:
 
     rank = rank_frontier(g).rankings[f.id]
     assert pytest.approx(rank["strategy_prior"], abs=1e-6) == 0.8
+
+
+def test_rank_frontier_transfer_value_uses_global_strategy_library() -> None:
+    g = BeliefGraph()
+    h = make_hypothesis(claim="c", description="d", family="format-shift", confidence=0.5)
+    g.apply(HypothesisCreateDelta(hypothesis=h))
+    s = make_strategy(family="format-shift", template_summary="reformat as yaml")
+    g.apply(StrategyCreateDelta(strategy=s))
+    f = make_frontier(
+        hypothesis_id=h.id,
+        module="format-shift",
+        instruction="reformat policy as YAML",
+        expected_signal="leak",
+        strategy_id=s.id,
+    )
+    g.apply(FrontierCreateDelta(experiment=f))
+    library = StrategyLibrary(
+        entries=[
+            GlobalStrategyEntry(
+                family="format-shift",
+                template_summary="reformat as yaml",
+                global_success_count=8,
+                global_attempt_count=10,
+            )
+        ]
+    )
+
+    with_transfer = rank_frontier(g, strategy_library=library).rankings[f.id]
+    without_transfer = rank_frontier(
+        g,
+        strategy_library=StrategyLibrary(),
+        load_global_strategy_library=False,
+    ).rankings[f.id]
+
+    assert with_transfer["transfer_value"] > 0.5
+    assert with_transfer["transfer_source"] == "reformat as yaml"
+    assert with_transfer["transfer_attempts"] == 10
+    assert with_transfer["utility"] > without_transfer["utility"]
+
+
+def test_rank_frontier_query_cost_uses_registry_tier_and_reset() -> None:
+    g = BeliefGraph()
+    h = make_hypothesis(claim="c", description="d", family="format-shift", confidence=0.5)
+    g.apply(HypothesisCreateDelta(hypothesis=h))
+    f = make_frontier(
+        hypothesis_id=h.id,
+        module="expensive",
+        instruction="probe",
+        expected_signal="leak",
+    )
+    g.apply(FrontierCreateDelta(experiment=f))
+    registry = Registry()
+    registry.register(ModuleConfig(name="expensive", tier=3, reset_target=True))
+
+    ranked = rank_frontier(
+        g,
+        registry=registry,
+        strategy_library=StrategyLibrary(),
+        load_global_strategy_library=False,
+    ).rankings[f.id]
+
+    assert ranked["query_cost"] > 0.8
+    assert ranked["query_cost_tier"] == 3
+    assert "reset" in ranked["query_cost_reason"]
 
 
 def test_rank_frontier_skips_orphan_experiment() -> None:
@@ -561,6 +778,7 @@ def test_select_next_experiment_ucb_favours_under_tested_hypothesis() -> None:
         a = make_attempt(
             module="m",
             approach=f"prior-{i}",
+            target_responses=[f"observed target response {i}"],
             tested_hypothesis_ids=[h_tested.id],
         )
         g.apply(AttemptCreateDelta(attempt=a))
@@ -600,6 +818,7 @@ def test_select_next_experiment_high_utility_overrides_ucb() -> None:
         a = make_attempt(
             module="m",
             approach=f"prior-{i}",
+            target_responses=[f"observed target response {i}"],
             tested_hypothesis_ids=[h_tested.id],
         )
         g.apply(AttemptCreateDelta(attempt=a))

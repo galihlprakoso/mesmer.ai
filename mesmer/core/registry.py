@@ -140,9 +140,9 @@ class Registry:
                                     "user prompt), pass the experiment id (`fx_…`) here. "
                                     "The resulting Attempt will link explicitly to that "
                                     "experiment's hypothesis and strategy, so the planner "
-                                    "tracks belief shifts precisely. Omit only when no "
-                                    "recommended experiment fits — and prefer adding a "
-                                    "new hypothesis over freelancing."
+                                    "tracks belief shifts precisely. Executive dispatch "
+                                    "requires an open matching experiment; if none fits, "
+                                    "conclude honestly instead of freelancing."
                                 ),
                             },
                         },

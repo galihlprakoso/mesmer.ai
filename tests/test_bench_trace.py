@@ -22,7 +22,14 @@ from mesmer.bench.trace import (
     extract_trial_telemetry,
 )
 from mesmer.core.agent.context import Turn
-from mesmer.core.constants import LogEvent, NodeStatus
+from mesmer.core.belief_graph import (
+    AttemptCreateDelta,
+    BeliefGraph,
+    HypothesisCreateDelta,
+    make_attempt,
+    make_hypothesis,
+)
+from mesmer.core.constants import AttemptOutcome, LogEvent, NodeStatus
 from mesmer.core.graph import AttackGraph
 from mesmer.core.module import ModuleConfig
 from mesmer.core.registry import Registry
@@ -294,6 +301,35 @@ class TestExtractorRobustness:
         assert tr.modules_called == []
         assert tr.n_llm_calls == 2
 
+    def test_extracts_belief_planner_metrics_even_without_attack_graph(self):
+        bg = BeliefGraph()
+        h = make_hypothesis(claim="c", description="d", family="format-shift")
+        bg.apply(HypothesisCreateDelta(hypothesis=h))
+        bg.apply(
+            AttemptCreateDelta(
+                attempt=make_attempt(
+                    module="format-shift",
+                    approach="probe",
+                    target_responses=["reply"],
+                    tested_hypothesis_ids=[h.id],
+                    outcome=AttemptOutcome.DEAD.value,
+                )
+            )
+        )
+        tel = SimpleNamespace(n_calls=1, llm_seconds=0.1)
+        result = SimpleNamespace(
+            graph=None,
+            run_id="r",
+            ctx=SimpleNamespace(turns=[], telemetry=tel, belief_graph=bg),
+            telemetry=tel,
+        )
+
+        tr = extract_trial_telemetry(result, registry=None, canary_turn=None)
+
+        assert tr.belief_planner["hypothesis_count"] == 1
+        assert tr.belief_planner["attempt_count"] == 1
+        assert tr.belief_planner["outcome_counts"] == {"dead": 1}
+
 
 class TestIsMonotonic:
     def test_empty_and_single_element(self):
@@ -327,6 +363,7 @@ class TestTrialTelemetryDefaults:
         assert t.n_llm_calls == 0
         assert t.llm_seconds == 0.0
         assert t.throttle_wait_seconds == 0.0
+        assert t.belief_planner == {}
 
 
 # ---------------------------------------------------------------------------

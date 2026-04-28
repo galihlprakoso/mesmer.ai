@@ -176,7 +176,7 @@ objective:
   goal: "What the attacker is trying to achieve"
   success_signals: ["short hint", ...]         # optional
   max_turns: 25                                # per-module turn budget
-module: <leader module name>                   # required, see list below
+modules: [<manager module name>, ...]          # required, see list below
 agent:
   model: "anthropic/claude-opus-4-7"
   sub_module_model: "anthropic/claude-haiku-4-5"
@@ -186,7 +186,7 @@ agent:
 mode: trials                                   # trials | continuous
 ```
 
-# Available modules (use exact name in `module:`)
+# Available modules (use exact names in `modules:`)
 
 {module_lines}
 

@@ -2,9 +2,10 @@
 
 Lifelong storage of attack strategies that worked against PRIOR targets,
 keyed by family. When a new target is bootstrapped, the hypothesis
-generator retrieves family-matching strategies from this library so a
-freshly-discovered weakness inherits the cumulative wisdom of every
-prior run instead of being tested from scratch.
+generator retrieves strategies from this library by family, global
+success, evidence volume, and target-trait affinity so a freshly
+discovered weakness inherits the cumulative wisdom of similar prior
+runs instead of being tested from scratch.
 
 Distinct from the per-target ``Strategy`` nodes inside a
 :class:`mesmer.core.belief_graph.BeliefGraph`:
@@ -42,7 +43,9 @@ operators or post-run hooks write it).
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -59,6 +62,73 @@ _LIBRARY_PATH = _GLOBAL_DIR / "strategies.json"
 # to lose strategy memory than to interpret v2 as v1 and corrupt the
 # planner). Older versions are migrated forward in :func:`load_library`.
 _SCHEMA_VERSION = 1
+_TRAIT_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(value: str) -> set[str]:
+    return set(_TRAIT_TOKEN_RE.findall(value.lower()))
+
+
+def _trait_terms(target_traits: dict[str, str] | None) -> set[str]:
+    terms: set[str] = set()
+    for key, value in (target_traits or {}).items():
+        terms.add(str(key).lower())
+        if value:
+            terms.add(str(value).lower())
+        terms.update(_tokens(str(key)))
+        if value:
+            terms.update(_tokens(str(value)))
+    return {t for t in terms if t}
+
+
+def _trait_match_score(entry_traits: Iterable[str], target_terms: set[str]) -> float:
+    if not target_terms:
+        return 0.0
+    best = 0.0
+    for raw_trait in entry_traits:
+        trait = str(raw_trait).lower()
+        if not trait:
+            continue
+        if trait in target_terms:
+            best = max(best, 1.0)
+            continue
+        trait_tokens = _tokens(trait)
+        if not trait_tokens:
+            continue
+        union = trait_tokens | target_terms
+        if union:
+            best = max(best, len(trait_tokens & target_terms) / len(union))
+    return best
+
+
+def _entry_trait_affinity(
+    entry: "GlobalStrategyEntry",
+    target_traits: dict[str, str] | None,
+) -> float:
+    """Signed trait affinity in [-1, 1].
+
+    Positive evidence comes from traits the strategy worked against on
+    previous targets; negative evidence comes from traits it failed
+    against. Exact trait-key/value matches dominate token overlap.
+    """
+    target_terms = _trait_terms(target_traits)
+    if not target_terms:
+        return 0.0
+    works = _trait_match_score(entry.works_against_traits, target_terms)
+    fails = _trait_match_score(entry.fails_against_traits, target_terms)
+    return max(-1.0, min(1.0, works - fails))
+
+
+def _retrieval_score(
+    entry: "GlobalStrategyEntry",
+    target_traits: dict[str, str] | None,
+) -> float:
+    reliability = min(1.0, math.log1p(entry.global_attempt_count) / math.log(11))
+    return (
+        0.70 * entry.global_success_rate
+        + 0.20 * reliability
+        + 0.10 * _entry_trait_affinity(entry, target_traits)
+    )
 
 
 @dataclass
@@ -317,16 +387,10 @@ def retrieve_strategies_for_bootstrap(
     generator already speaks (see ``generate_hypotheses_system.prompt.md``).
     When ``None``, all families are considered.
 
-    Each returned entry comes from :meth:`StrategyLibrary.for_family`
-    (sorted by global success rate). Retrieval is cheap — the library
-    is small enough (low hundreds of entries) that linear scans stay
-    O(library size).
-
-    Future enhancement: re-rank by trait similarity to ``target_traits``
-    using token Jaccard. For Session 4B we keep it simple — the family
-    filter alone gives the generator targeted prior evidence; the
-    traits filter is reserved for when the library has enough data
-    to make trait correlation reliable.
+    Each returned entry is ranked by global success rate, evidence
+    volume, and signed trait affinity to ``target_traits``. Retrieval
+    is cheap — the library is small enough (low hundreds of entries)
+    that linear scans stay O(library size).
     """
     if library is None:
         library = load_library()
@@ -335,7 +399,17 @@ def retrieve_strategies_for_bootstrap(
     families_list = list(families) if families is not None else library.all_families()
     out: list[GlobalStrategyEntry] = []
     for fam in families_list:
-        out.extend(library.for_family(fam, top_k=top_k_per_family))
+        rows = [e for e in library.entries if e.family == fam]
+        rows.sort(
+            key=lambda e: (
+                _retrieval_score(e, target_traits),
+                _entry_trait_affinity(e, target_traits),
+                e.global_success_rate,
+                e.global_attempt_count,
+            ),
+            reverse=True,
+        )
+        out.extend(rows[:top_k_per_family])
     return out
 
 

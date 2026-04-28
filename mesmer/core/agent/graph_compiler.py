@@ -322,6 +322,20 @@ class GraphContextCompiler:
                 f"{i}.{star} {exp.id} (utility {exp.utility:.2f}) — {h_label}{strategy_label}"
             )
             lines.append(f"   module: {exp.module}")
+            lines.append(
+                "   utility components: "
+                f"progress={exp.expected_progress:.2f}, "
+                f"info={exp.information_gain:.2f}, "
+                f"transfer={exp.transfer_value:.2f}, "
+                f"cost={exp.query_cost:.2f}"
+            )
+            if exp.transfer_source:
+                lines.append(
+                    f"   transfer source: {exp.transfer_source} "
+                    f"({exp.transfer_success_rate:.2f}, {exp.transfer_attempts} attempts)"
+                )
+            if exp.query_cost_reason:
+                lines.append(f"   cost basis: {exp.query_cost_reason}")
             lines.append(f"   instruction: {exp.instruction}")
             if exp.expected_signal:
                 lines.append(f"   expected signal: {exp.expected_signal}")

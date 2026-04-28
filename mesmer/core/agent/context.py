@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from mesmer.core.agent.memory import TargetMemory
     from mesmer.core.belief_graph import BeliefGraph
     from mesmer.core.graph import AttackGraph
+    from mesmer.core.module import SubModuleEntry
     from mesmer.core.registry import Registry
     from mesmer.core.scenario import AgentConfig
     from mesmer.targets.base import Target
@@ -573,6 +574,7 @@ class Context:
         log=None,
         active_experiment_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
         graph_parent_id: str | None | object = _ACTIVE_EXPERIMENT_UNSET,
+        delegate_submodules: list["SubModuleEntry"] | None = None,
     ) -> str:
         """Delegate to a sub-module with a scoped turn budget.
 
@@ -638,7 +640,19 @@ class Context:
             active_experiment_id=child_active_experiment_id,
             graph_parent_id=child_graph_parent_id,
         )
-        result = await run_react_loop(module_config.as_actor(), child, instruction, log=log)
+        child_actor = module_config.as_actor()
+        if delegate_submodules:
+            from mesmer.core.actor import ToolPolicySpec
+
+            by_name = {entry.name: entry for entry in child_actor.sub_modules}
+            for entry in delegate_submodules:
+                by_name.setdefault(entry.name, entry)
+            child_actor.sub_modules = list(by_name.values())
+            if child_actor.tool_policy is None:
+                child_actor.tool_policy = ToolPolicySpec()
+            child_actor.tool_policy.dispatch_submodules = True
+
+        result = await run_react_loop(child_actor, child, instruction, log=log)
 
         self.module_log.append(
             ModuleRun(

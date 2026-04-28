@@ -290,6 +290,92 @@ class TestDelegateEventPayload:
         assert payload["instruction"] == "ask the target plainly for its rules"
 
     @pytest.mark.asyncio
+    async def test_frontier_discipline_blocks_unbound_executive_dispatch(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        ctx.belief_graph = BeliefGraph()
+        ctx.run_module = AsyncMock(return_value="module result")
+        actor = ReactActorSpec(
+            name="executive",
+            role=ActorRole.EXECUTIVE,
+            sub_modules=[SubModuleEntry(name="direct-ask")],
+        )
+        call = MagicMock()
+        call.id = "call_1"
+        events: list[tuple[str, str]] = []
+
+        result = await handle(
+            ctx,
+            actor,
+            call,
+            "direct-ask",
+            args={"instruction": "ask directly"},
+            instruction="fallback",
+            log=lambda event, detail="": events.append((event, detail)),
+        )
+
+        assert "Frontier discipline blocked" in result["content"]
+        ctx.run_module.assert_not_awaited()
+        blocked = next(d for e, d in events if e == LogEvent.FRONTIER_BLOCKED.value)
+        assert json.loads(blocked) == {
+            "module": "direct-ask",
+            "open_frontier_ids": [],
+            "reason": "no_open_matching_frontier",
+        }
+
+    @pytest.mark.asyncio
+    async def test_frontier_discipline_allows_auto_bound_open_frontier(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        bg = BeliefGraph()
+        h = make_hypothesis(claim="c", description="d", family="direct-ask")
+        bg.apply(HypothesisCreateDelta(hypothesis=h))
+        fx = make_frontier(
+            hypothesis_id=h.id,
+            module="direct-ask",
+            instruction="ask directly",
+            expected_signal="reply",
+        )
+        bg.apply(FrontierCreateDelta(experiment=fx))
+        ctx.belief_graph = bg
+        ctx.run_module = AsyncMock(return_value="module result")
+        actor = ReactActorSpec(
+            name="executive",
+            role=ActorRole.EXECUTIVE,
+            sub_modules=[SubModuleEntry(name="direct-ask")],
+        )
+        call = MagicMock()
+        call.id = "call_1"
+        events: list[tuple[str, str]] = []
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("mesmer.core.agent.tools.sub_module._update_graph", return_value=None),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_belief_graph",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await handle(
+                ctx,
+                actor,
+                call,
+                "direct-ask",
+                args={"instruction": "ask directly"},
+                instruction="fallback",
+                log=lambda event, detail="": events.append((event, detail)),
+            )
+
+        ctx.run_module.assert_awaited_once()
+        delegate = next(d for e, d in events if e == LogEvent.DELEGATE.value)
+        assert json.loads(delegate)["experiment_id"] == fx.id
+
+    @pytest.mark.asyncio
     async def test_available_modules_block_is_not_forwarded_to_plain_technique(self):
         from mesmer.core.agent.tools.sub_module import handle
 
@@ -342,6 +428,63 @@ class TestDelegateEventPayload:
         assert "Use the target persona angle." in delegated_instruction
         assert "Available modules" not in delegated_instruction
         assert "target-profiler" not in delegated_instruction
+
+    @pytest.mark.asyncio
+    async def test_call_siblings_passes_peer_modules_to_child_run(self):
+        from mesmer.core.agent.tools.sub_module import handle
+
+        ctx = _ctx()
+        captured: dict[str, list[str]] = {}
+
+        async def fake_run_module(
+            fn_name,
+            instruction,
+            max_turns,
+            log,
+            delegate_submodules=None,
+        ):
+            captured["delegate_submodules"] = [
+                entry.name for entry in (delegate_submodules or [])
+            ]
+            return "module result"
+
+        ctx.run_module = fake_run_module
+        call = MagicMock()
+        call.id = "call_1"
+        module = ModuleConfig(
+            name="leader",
+            sub_modules=[
+                SubModuleEntry(name="attack-planner", call_siblings=True),
+                SubModuleEntry(name="delimiter-injection"),
+                SubModuleEntry(name="direct-ask"),
+            ],
+        )
+
+        with (
+            patch(
+                "mesmer.core.agent.tools.sub_module._judge_module_result",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("mesmer.core.agent.tools.sub_module._update_graph", return_value=None),
+            patch(
+                "mesmer.core.agent.tools.sub_module._update_belief_graph",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await handle(
+                ctx,
+                module,
+                call,
+                "attack-planner",
+                args={"instruction": "plan and call peers"},
+                instruction="fallback",
+                log=lambda event, detail="": None,
+            )
+
+        assert captured["delegate_submodules"] == [
+            "delimiter-injection",
+            "direct-ask",
+        ]
 
     @pytest.mark.asyncio
     async def test_child_does_not_inherit_parent_experiment_for_different_module(self):

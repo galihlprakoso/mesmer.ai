@@ -353,6 +353,35 @@ class TestAggregateTrace:
         cells = aggregate(trials)
         assert cells[0].mean_compression_events == 1.0
 
+    def test_belief_planner_metrics_aggregate_into_cell(self):
+        trials = [
+            self._mk(
+                success=True,
+                belief_planner={
+                    "frontier_binding_rate": 1.0,
+                    "mean_frontier_regret": 0.0,
+                    "outcome_counts": {"leak": 1},
+                    "fulfilled_utility_components": {"utility": 0.8},
+                },
+            ),
+            self._mk(
+                success=False,
+                belief_planner={
+                    "frontier_binding_rate": 0.5,
+                    "mean_frontier_regret": 0.4,
+                    "outcome_counts": {"dead": 1},
+                    "fulfilled_utility_components": {"utility": 0.4},
+                },
+            ),
+        ]
+        cells = aggregate(trials)
+        assert cells[0].belief_planner["mean_frontier_binding_rate"] == 0.75
+        assert cells[0].belief_planner["mean_frontier_regret"] == 0.2
+        assert cells[0].belief_planner["outcome_counts"] == {"dead": 1, "leak": 1}
+        assert cells[0].belief_planner["mean_fulfilled_utility_components"] == {
+            "utility": 0.6
+        }
+
 
 class TestMarkdownRender:
     def test_renders_headline_and_rows(self):
@@ -427,6 +456,45 @@ class TestMarkdownRender:
         )
         md = render_markdown_table(summary)
         assert " — |" in md  # em-dash for missing median
+
+    def test_renders_belief_planner_health_when_present(self):
+        summary = BenchSummary(
+            spec_name="x",
+            spec_version="v0",
+            module="m",
+            date_iso="2026-01-01T00:00:00Z",
+            mesmer_version="0",
+            dataset_sha256="0" * 64,
+            n_rows_sampled=1,
+            trials_per_row=1,
+            contamination_posture=_test_posture(),
+            cells=[
+                BenchCellSummary(
+                    target_id="t",
+                    arm="mesmer",
+                    n_trials=1,
+                    n_successes=1,
+                    asr=1.0,
+                    asr_stderr=0.0,
+                    median_turns=1,
+                    mean_total_tokens=10.0,
+                    total_wall_seconds=1.0,
+                    wins_by_tier={1: 1},
+                    belief_planner={
+                        "mean_frontier_binding_rate": 1.0,
+                        "mean_duplicate_attempt_rate": 0.25,
+                        "mean_no_observation_rate": 0.0,
+                        "mean_frontier_regret": 0.125,
+                        "mean_calibration_score": 0.75,
+                    },
+                )
+            ],
+        )
+
+        md = render_markdown_table(summary)
+
+        assert "Belief planner health" in md
+        assert "| `t` | 100% | 25% | 0% | 0.12 | 0.75 |" in md
 
     def test_emits_methodology_contamination_reproducibility_limitations(self):
         """Every published README carries the fixed caveats template."""
@@ -639,7 +707,7 @@ contamination_posture:
         assert spec.contamination_posture.attacker_model_cutoff == "2025-01"
         assert "training overlap" in spec.contamination_posture.risk_assessment
 
-    def test_legacy_module_loads_as_single_module(self, tmp_path: Path):
+    def test_legacy_module_field_is_rejected(self, tmp_path: Path):
         spec_path = tmp_path / "legacy-module.yaml"
         spec_path.write_text("""
 name: legacy
@@ -661,9 +729,8 @@ contamination_posture:
   attacker_model_cutoff: "2025-01"
   risk_assessment: "ok"
 """)
-        spec = load_spec(spec_path)
-        assert spec.modules == ["system-prompt-extraction"]
-        assert spec.module == "system-prompt-extraction"
+        with pytest.raises(ValueError, match="legacy `module:`"):
+            load_spec(spec_path)
 
     def test_spec_rejects_missing_contamination_posture(self, tmp_path: Path):
         """Specs without a contamination block must fail loading."""
@@ -1215,6 +1282,7 @@ class TestRunBenchmarkEndToEnd:
                 "compression_events",
                 "event_counts",
                 "events_path",
+                "belief_planner",
             ]:
                 assert key in r["trace"], f"missing trace.{key} in JSONL row"
             # events_path points somewhere under events/ when recording fired.

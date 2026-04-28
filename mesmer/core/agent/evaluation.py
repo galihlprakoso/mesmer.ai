@@ -403,11 +403,14 @@ async def _update_belief_graph(
     # touched on incidentally.
     active = bg.active_hypotheses()
 
-    observable_responses = _observable_target_responses(
-        extractor_target_responses if extractor_target_responses is not None else target_responses
+    observable_attempt_responses = _observable_target_responses(target_responses)
+    observable_extractor_responses = (
+        _observable_target_responses(extractor_target_responses)
+        if extractor_target_responses is not None
+        else observable_attempt_responses
     )
 
-    if not observable_responses:
+    if not observable_attempt_responses:
         outcome = _observation_failure_outcome(
             messages_sent=messages_sent,
             target_responses=target_responses,
@@ -518,6 +521,7 @@ async def _update_belief_graph(
     # per-send extraction already handled some turns, the caller passes
     # only the remaining transcript slice here to avoid double-counting
     # evidence.
+    evidences = []
     extractor_attempt = attempt
     if extractor_messages_sent is not None or extractor_target_responses is not None:
         extractor_attempt = replace(
@@ -525,15 +529,16 @@ async def _update_belief_graph(
             messages_sent=list(extractor_messages_sent or []),
             target_responses=list(extractor_target_responses or []),
         )
-    try:
-        evidences = await extract_evidence(
-            ctx,
-            attempt=extractor_attempt,
-            active_hypotheses=active,
-        )
-    except EvidenceExtractionError as e:
-        log(LogEvent.EVIDENCE_EXTRACT_ERROR.value, str(e))
-        evidences = []
+    if observable_extractor_responses:
+        try:
+            evidences = await extract_evidence(
+                ctx,
+                attempt=extractor_attempt,
+                active_hypotheses=active,
+            )
+        except EvidenceExtractionError as e:
+            log(LogEvent.EVIDENCE_EXTRACT_ERROR.value, str(e))
+            evidences = []
 
     # Step 3: apply evidence deltas. Skip on InvalidDelta (the auto-emit
     # edge could fail if the hypothesis just went REFUTED elsewhere; we
@@ -591,7 +596,7 @@ async def _update_belief_graph(
     # Re-rank frontier so the next leader brief shows fresh utility
     # numbers. The rank delta is one structured payload covering every
     # PROPOSED experiment.
-    rank_delta = rank_frontier(bg, run_id=ctx.run_id)
+    rank_delta = rank_frontier(bg, registry=getattr(ctx, "registry", None), run_id=ctx.run_id)
     if rank_delta.rankings:
         try:
             bg.apply(rank_delta)
@@ -623,7 +628,7 @@ async def _update_belief_graph_from_turn(
     ``EvidenceCreateDelta`` already permits.
     """
     bg = ctx.belief_graph
-    if bg is None or not target_response.strip():
+    if bg is None or not _observable_target_responses([target_response]):
         return []
 
     from mesmer.core.agent.beliefs import apply_evidence_to_beliefs, rank_frontier
@@ -690,7 +695,7 @@ async def _update_belief_graph_from_turn(
         except InvalidDelta as e:
             log(LogEvent.BELIEF_DELTA.value, f"turn-belief-delta rejected: {e}")
 
-    rank_delta = rank_frontier(bg, run_id=ctx.run_id)
+    rank_delta = rank_frontier(bg, registry=getattr(ctx, "registry", None), run_id=ctx.run_id)
     if rank_delta.rankings:
         try:
             bg.apply(rank_delta)

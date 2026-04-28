@@ -129,7 +129,7 @@ mesmer/                          # repo root
 │   │   │   │                    #   HypothesisGenerationError),
 │   │   │   │                    #   apply_evidence_to_beliefs (pure: evidence →
 │   │   │   │                    #   confidence/status deltas with threshold flips),
-│   │   │   │                    #   rank_frontier (pure: 8-component utility
+│   │   │   │                    #   rank_frontier (pure: 9-component utility
 │   │   │   │                    #   ranker, weights from DEFAULT_UTILITY_WEIGHTS),
 │   │   │   │                    #   generate_frontier_experiments (DETERMINISTIC
 │   │   │   │                    #   bridge from hypotheses → fx_… experiments
@@ -223,6 +223,10 @@ mesmer/                          # repo root
 │   │   │                        #   find_canary_in_turns (diagnostic-only)
 │   │   ├── trace.py             # BenchEventRecorder, extract_trial_telemetry,
 │   │   │                        #   write_trial_graph_snapshot (TAPER trace)
+│   │   ├── belief_eval.py       # Pure BeliefGraph planner-quality metrics:
+│   │   │                        #   calibration, frontier binding/regret,
+│   │   │                        #   duplicate/no-observation rates, utility
+│   │   │                        #   attribution. Folded into bench trace.
 │   │   ├── viz.py               # build_viz_html — post-run interactive HTML
 │   │   │                        #   of each trial's decision tree; auto-invoked
 │   │   │                        #   by run_benchmark, backfillable via
@@ -430,10 +434,9 @@ Persistence lives *outside* the repo at `~/.mesmer/`:
 │   │                             # state (Session 1, parallel to graph.json).
 │   │                             # Holds TargetNode + WeaknessHypothesis + Evidence
 │   │                             # + Attempt + Strategy + FrontierExperiment nodes
-│   │                             # plus typed edges. NOT YET WIRED into the engine —
-│   │                             # the file is created on demand by callers of
-│   │                             # BeliefGraph.save(). Session 2 lands the runner.py
-│   │                             # / memory.py wiring that auto-loads it on init.
+│   │                             # plus typed edges. Loaded at run start, updated
+│   │                             # during target-observed turns / module returns,
+│   │                             # and saved at run end by runner.py / memory.py.
 │   └── belief_deltas.jsonl       # append-only delta log — every BeliefGraph
 │                                 # mutation recorded as one JSON line
 │                                 # (TargetTraitsUpdate / HypothesisCreate /
@@ -463,6 +466,62 @@ module run is one `AttackNode` with a score and a status. That answers
 this target?" The belief graph in `core/belief_graph.py::BeliefGraph` is
 the typed planner state.
 
+**Grounded design contract (audit target).** The BeliefGraph is a
+Bayesian belief-state influence graph over a partially-observed target,
+not an LLM mind map. Future changes must preserve these concepts and
+invariants:
+
+- **Bayesian factor-graph update:** `WeaknessHypothesis.confidence`
+  is a probability-shaped belief. Evidence updates run through exact
+  binary factor-graph inference over normal connected hypothesis
+  components and damped loopy belief propagation over large
+  components, using calibrated log-odds / likelihood-ratio observation
+  factors plus graph dependency factors, not free-form LLM judgment or
+  arbitrary score accumulation.
+- **Influence diagram:** hypothesis nodes are chance variables,
+  frontier nodes are decisions/actions, evidence nodes are observations,
+  and utility components are explicit value terms. The planner may use
+  LLMs to propose hypotheses and classify observations, but deterministic
+  reducer code owns confidence, status, utility, and selection.
+- **POMDP belief-state planning:** target policy is hidden; Mesmer
+  observes only target replies. Every dispatch is an experiment chosen
+  under uncertainty to either reduce uncertainty or advance the
+  objective.
+- **UCB + value-of-information selection:** frontier choice balances
+  expected objective progress, information gain, local/cross-target
+  priors, novelty, repetition/dead-similarity penalties, and exploration
+  of under-tested hypotheses.
+- **ReAct is execution, not belief authority:** ReAct modules generate
+  actions and transcripts. They do not get to assert that a belief moved
+  unless target-observed evidence supports it.
+- **Production invariant:** no target observation, no belief movement.
+  Empty transcripts, timeouts, connection errors, rate limits, gateway
+  failures, and module-only summaries create `Attempt` audit records
+  with `INFRA_ERROR` / `NO_OBSERVATION`, but they do not create
+  evidence, do not test hypotheses, do not update strategy stats, do
+  not fulfill frontier experiments, and do not affect novelty/dead-end
+  ranking. The UI and prompt context must label such maps as
+  speculative rather than learned.
+- **Frontier lifecycle invariant:** a `FrontierExperiment` is a
+  single-use decision slot. Attempts that carry `experiment_id` must
+  reference an existing open frontier; once fulfilled or dropped, the
+  frontier cannot be executed or fulfilled again unless explicitly
+  reopened from DROPPED to PROPOSED.
+- **Planner-binding invariant:** the synthesized executive can dispatch
+  a manager only through an open `FrontierExperiment` (`fx_...`) for
+  that module. The tool boundary may auto-bind the highest-utility
+  matching open frontier, but if no such frontier exists, delegation is
+  blocked before any target call or AttackGraph node is created. This
+  makes the BeliefGraph the enforced decision surface, not just a
+  prompt hint.
+
+Grounding references: Pearl-style probabilistic belief networks,
+Howard/Matheson influence diagrams, POMDP/POMCP belief-state planning,
+Kocsis/Szepesvári UCT/UCB exploration, value-of-information decision
+analysis, ReAct for action/observation loops, and TAP/PAIR/GPTFuzzer as
+attack-search operators beneath the belief-state planner rather than as
+the belief graph itself.
+
 **Six node kinds, one mutation primitive.** Every node carries `id`
 (prefix-tagged: `tg_…` `wh_…` `ev_…` `at_…` `st_…` `fx_…`),
 `created_at`, `run_id`, plus its own typed payload:
@@ -470,11 +529,11 @@ the typed planner state.
 | Kind | Holds | Why it's distinct |
 |---|---|---|
 | `TargetNode` | singleton; `traits: dict[str, str]` | Free-form recon dossier. Replaces the rejected typed `TargetProfile` abstraction. |
-| `WeaknessHypothesis` | `claim`, `family`, `confidence ∈ [0,1]`, `status` | Unit of planning. The planner asks "which hypothesis to test?", not "which module to run?". |
+| `WeaknessHypothesis` | `claim`, `family`, `confidence ∈ [0,1]`, `status` | Unit of planning. The planner asks "which hypothesis to test?", not "which module to run?". Creating a hypothesis auto-links it to related same-family / text-similar hypotheses via `HYPOTHESIS_GENERALIZES_TO` dependency edges. |
 | `Evidence` | `signal_type`, `polarity`, `verbatim_fragment`, `hypothesis_id?`, `confidence_delta` | Structured target signal extracted by `agent/evidence.py`. Polarity drives the support/refute edge. |
 | `Attempt` | `module`, `messages_sent`, `target_responses`, `experiment_id?`, `tested_hypothesis_ids[]` | Replaces `AttackNode` for attempt recording — but with explicit hypothesis links. |
 | `Strategy` | `family`, `template_summary`, `success_count`, `attempt_count` | Reusable attack pattern. Per-target stats now; cross-target lifetime library lives in Session 4. |
-| `FrontierExperiment` | `hypothesis_id`, `module`, `instruction`, `expected_signal`, `state`, `utility` + 8 ranking components | Proposed next move. The leader picks one by id; the manager records an Attempt that links back. |
+| `FrontierExperiment` | `hypothesis_id`, `module`, `instruction`, `expected_signal`, `state`, `utility` + 9 ranking components | Proposed next move. The leader picks one by id; the manager records an Attempt that links back. |
 
 **11 typed edges** with endpoint contracts in `_EDGE_END_TYPES`:
 `HYPOTHESIS_SUPPORTED_BY_EVIDENCE`, `HYPOTHESIS_REFUTED_BY_EVIDENCE`,
@@ -491,7 +550,9 @@ caller mutates `graph.nodes` directly. Deltas are append-only —
 replaying them in order reconstructs the state, so the JSONL audit
 log doubles as the recovery log. Apply paths deep-copy on insert so a
 delta object's payload stays pristine after the graph mutates the
-copy in place.
+copy in place. Attempt creation validates every referenced hypothesis,
+strategy, and frontier; a stale or closed `experiment_id` raises
+`InvalidDelta` instead of silently corrupting the planner queue.
 
 **Five pure-ish operations on the graph** (one LLM-driven, four
 deterministic):
@@ -510,15 +571,21 @@ deterministic):
 
 2. **`agent/beliefs.py::apply_evidence_to_beliefs`** — pure, no LLM.
    Walks Evidence list and emits `HypothesisUpdateConfidenceDelta`
-   (signed by polarity) plus at most one
+   plus at most one
    `HypothesisUpdateStatusDelta` per hypothesis when the cumulative
    shift crosses `HYPOTHESIS_CONFIRMED_THRESHOLD` /
-   `HYPOTHESIS_REFUTED_THRESHOLD`. The thresholds are deliberately
-   asymmetric (0.85 / 0.15) so the agent doesn't ping-pong on
-   mid-confidence hypotheses.
+   `HYPOTHESIS_REFUTED_THRESHOLD`. Evidence magnitude becomes a
+   signed log-likelihood-ratio observation factor. Explicit
+   auto-created `HYPOTHESIS_GENERALIZES_TO` edges and multi-hypothesis
+   observed attempts become pairwise dependency factors. The reducer performs
+   exact binary inference per normal connected component and damped
+   loopy belief propagation for large components, then emits
+   probability-space deltas so JSONL replay remains simple. The
+   thresholds are deliberately asymmetric (0.85 / 0.15) so the agent
+   doesn't ping-pong on mid-confidence hypotheses.
 
 3. **`agent/beliefs.py::rank_frontier`** — pure, no LLM. For every
-   PROPOSED `FrontierExperiment`, computes 8 utility components
+   PROPOSED `FrontierExperiment`, computes 9 utility components
    (expected_progress, information_gain, hypothesis_confidence,
    novelty, strategy_prior, transfer_value, query_cost,
    repetition_penalty, dead_similarity) and a weighted aggregate per
@@ -526,9 +593,20 @@ deterministic):
    (`1 - |2c - 1|`) — peaks at 0.5 confidence so the planner naturally
    tests uncertain hypotheses before exploiting confirmed ones.
    Novelty / repetition / dead-similarity use Jaccard on
-   instruction+module token bags against recent attempts and
+   instruction+module token bags against observed target attempts and
    fulfilled experiments; cap on the comparison window keeps ranking
-   O(1) per experiment.
+   O(1) per experiment. `INFRA_ERROR` and `NO_OBSERVATION` attempts
+   are excluded from these cohorts because they are audit records, not
+   target observations. `transfer_value` reads the cross-target
+   strategy library directly: exact strategy-template matches win
+   first; otherwise the best same-family global strategy contributes
+   by global success rate, evidence volume, text similarity, and
+   target trait affinity. `query_cost` reads the module registry:
+   tier, reset behaviour, delegation fanout, and instruction length
+   all affect cost. Frontier nodes persist `transfer_source`,
+   `transfer_success_rate`, `transfer_attempts`, `query_cost_reason`,
+   and `query_cost_tier` so the UI and leader brief can audit the
+   utility score.
 
 4. **`agent/beliefs.py::generate_frontier_experiments`** — pure, no
    LLM. Bridges hypotheses → dispatchable `fx_…` experiments using
@@ -691,6 +769,13 @@ a role-scoped Markdown decision brief. Roles:
   - Leader prompt's "Required Action" section explicitly
     instructs the model to pass `experiment_id="<fx_…>"` as a tool
     argument; auto-binding catches the case when it doesn't.
+  - The tool boundary turns that advisory contract into an enforcement
+    boundary for the synthesized executive: manager dispatch without
+    an open matching frontier is rejected at `tools/sub_module.handle`
+    before target execution and logged as `LogEvent.FRONTIER_BLOCKED`.
+    This is intentionally scoped to the executive; manager/employee
+    sub-delegation still runs under the manager's active experiment
+    context rather than inventing new frontier slots.
 
 - **Session 3 + dashboard panels (shipped)** —
   - Backend `GET /api/targets/{hash}/belief-graph` returns
@@ -739,36 +824,48 @@ a role-scoped Markdown decision brief. Roles:
   `agent/beliefs.py::select_next_experiment(graph, exploration_c=1.2,
   lookahead_depth=2, lookahead_weight=0.4, rollout_branching=2)`.
   Layer 1 is the same UCB the original Session 4A spec described:
-  `utility + c · sqrt(log(N + 1) / (n_h + 1))`. Layer 2 (when ≥ 2
-  proposed experiments exist) adds a target-query-free belief-state
-  rollout: simulate SUPPORTS (confidence + 0.18) and REFUTES
-  (confidence − 0.12) outcomes, each weighted by
+  `utility + c · sqrt(log(N + 1) / (n_h + 1))`, where `N` and `n_h`
+  count observed target attempts only. The rollout layer (when ≥ 2
+  proposed experiments exist and `lookahead_depth >= 2`) is recursive
+  and target-query-free: simulate SUPPORTS / REFUTES outcomes through
+  the same log-odds transition used by `apply_evidence_to_beliefs`,
+  each weighted by
   `_support_probability(fx)` (a [0.1, 0.9] blend of utility,
-  strategy_prior, novelty), then estimate the second-step value
-  as the best remaining UCB-augmented utility under the simulated
+  strategy_prior, novelty), then recursively estimate the best
+  remaining UCB-augmented local continuation under the simulated
   belief. Progressive widening caps each branch at
   `rollout_branching` candidates so the lookahead stays O(N²) over
   the proposed set, not exponential. The compiler's "Recommended
   Experiments" section still flags the selector's pick with `★`;
   the leader is free to override.
 
+- **Calibration telemetry (shipped)** —
+  `BeliefGraph.stats()` reports `calibration_samples`,
+  `calibration_brier`, and `calibration_score` from fulfilled
+  frontier experiments by comparing the stored pre-run
+  `hypothesis_confidence` against observed outcomes
+  (LEAK/OBJECTIVE_MET=1, PARTIAL=0.5, DEAD/REFUSAL=0). The web UI
+  renders this as the `cal` chip so confidence quality becomes
+  measurable during real runs.
+
 - **Session 4B (shipped)** — cross-target strategy library at
   `~/.mesmer/global/strategies.json` (atomic write, schema-versioned).
   `mesmer/core/strategy_library.py` defines `GlobalStrategyEntry`
   (with `global_success_count` / `global_attempt_count` aggregate
   counters and trait correlations), `StrategyLibrary` (with
-  upsert-merge semantics, family retrieval, JSON round-trip), and
+  upsert-merge semantics, trait-aware retrieval, JSON round-trip), and
   helpers `load_library` / `save_library` /
   `merge_per_target_strategies` / `retrieve_strategies_for_bootstrap`
   / `render_for_prompt`. At run end, the runner folds this run's
   per-target Strategy nodes (those with `attempt_count > 0`) into
   the library — counters add (driven by `StrategyUpdateStatsDelta`
   emissions during the run), traits dedupe-merge.
-  `generate_hypotheses` retrieves family-matching entries at
-  bootstrap time and renders them into the
+  `generate_hypotheses` retrieves entries by family, success rate,
+  evidence volume, and target-trait affinity at bootstrap time and
+  renders them into the
   generate_hypotheses_user prompt as a `## Cross-target strategy
   library` section so the generator grounds its proposals in what
-  worked against prior targets.
+  worked against similar prior targets.
 
 The graph is now a complete planner substrate — typed beliefs +
 evidence-driven updates (per-attempt AND per-send) + deterministic
@@ -812,10 +909,16 @@ sub_modules:
   - name: attack-planner
     see_siblings: true        # inject sibling roster into this module's prompt
   - name: recon-util
-    call_siblings: true       # expose siblings as callable tools (future — parsed but not wired)
+    call_siblings: true       # expose siblings as callable tools
 ```
 
 `see_siblings: true` makes `sub_module.handle` inject a `## Available modules (siblings under the same parent)` block — name + description + theory of every sibling — into this sub-module's instruction before delegation. The `attack-planner` module needs this so it can name specific siblings in its plan; without it the planner would have to be hardcoded to a known module list (the original failure mode that motivated this flag). Use `see_siblings` for any sub-module that reasons about which siblings to recommend; leave it false for techniques that just probe.
+
+`call_siblings: true` exposes the entry's siblings as callable tools
+inside the child module's own ReAct loop. The delegated child receives
+its authored tools plus peer tools from the parent, with duplicates
+deduped by module name. Use it only for orchestrator-style modules
+whose job is to directly execute sibling techniques.
 
 Test your manager's sub-module entries are dataclass-correct (not bare strings everywhere) when you need a flag — `module.sub_module_names` returns the flat name list for backward-compat call sites, while `module.sub_modules` is the typed list of `SubModuleEntry`.
 
@@ -1080,11 +1183,12 @@ Every mesmer bench trial captures a **forensic trace** — not just box-score. T
 
 2. **`{trial_id}.graph.json`** — trial-scoped slice of the attack graph (root + only this `run_id`'s nodes). Lets consumers diff across trials / runs without parsing the cross-run persisted graph at `~/.mesmer/targets/…/graph.json`.
 
-3. **The per-(target, arm) JSONL row** for this trial carries a `trace` envelope referencing the events path plus all derived telemetry — `n_llm_calls`, `modules_called`, `tier_sequence`, `winning_module`, `winning_tier`, `per_module_scores`, `dead_ends`, `profiler_ran_first`, `ladder_monotonic`, `compression_events`, `event_counts`, `events_path`.
+3. **The per-(target, arm) JSONL row** for this trial carries a `trace` envelope referencing the events path plus all derived telemetry — `n_llm_calls`, `modules_called`, `tier_sequence`, `winning_module`, `winning_tier`, `per_module_scores`, `dead_ends`, `profiler_ran_first`, `ladder_monotonic`, `compression_events`, `event_counts`, `events_path`, and `belief_planner`.
 
 The derivation pipeline is pure:
 - `BenchEventRecorder` (callable, implements `LogFn`) captures in-memory; optional `tee_to` forwards to a parent log for `--verbose`.
 - `extract_trial_telemetry(result, registry, canary_turn, recorder)` walks `result.graph` for this `run_id` + reads `result.telemetry` + recorder counts. Robust to `graph is None` / `registry is None` (test stubs get zero-shaped telemetry).
+- `bench/belief_eval.py::evaluate_belief_planner` walks `result.ctx.belief_graph` and emits planner-health metrics: calibration score/Brier, frontier binding rate, duplicate attempt rate, no-observation/infra rates, final-slate frontier regret, outcome counts, and fulfilled utility-component attribution. `aggregate_belief_planner_metrics` folds those into `BenchCellSummary.belief_planner`.
 - `write_trial_graph_snapshot(result, path)` persists the trial-scoped graph.
 
 Winning-module attribution: first try `ctx.turns[canary_turn - 1].module` (engine stamps every Turn with the sub-module that produced it — authoritative). Fall back to the highest-scoring node ≥ 7 in this run. `None` when neither applies.
@@ -1209,6 +1313,7 @@ mode: trials                   # trials | continuous (Scenario.mode)
 Top-level sibling of `core/` — **not a core concern**. Bench drives many runs of the attacker agent over a pinned dataset of defenses and reports aggregate numbers (ASR per cell, ±stderr). It consumes `core.runner.execute_run` + `core.scenario`; `core/` has no reverse dependency on `bench/`.
 
 - `bench/orchestrator.py` — spec loader, trial dispatch, aggregation, artifact writing. Also owns the `AgentConfig.throttle` block (`ThrottleConfig`: `max_rpm`, `max_concurrent`, `max_wait_seconds`) surfaced through `spec.agent.throttle:` in the YAML.
+- `bench/belief_eval.py` — pure BeliefGraph planner evaluation used by benchmark traces. This is the audit harness for ASR-adjacent planner quality: calibration, frontier regret, duplicate/no-observation rates, binding discipline, and utility attribution.
 - `bench/canary.py` — deterministic substring judge. **`judge_trial_success(result, canary)` is the authoritative bench success scanner**: it scans the EXECUTIVE's concluded output (`RunResult.result`). An accidental canary leak in a manager's probe that the executive never consolidated into its `conclude(result=...)` text does NOT count. `find_canary_in_turns` and `scan_canary` stay as diagnostic utilities (e.g. "which target turn first mentioned the canary") but no longer decide success. Pure function, zero LLM, zero randomness.
 - `bench/trace.py` — per-trial event capture (`BenchEventRecorder`) + post-run telemetry extraction (`extract_trial_telemetry`, `write_trial_graph_snapshot`). See "Per-trial tracing" above for the full contract.
 - `bench/viz.py` — post-run interactive visualisation. `build_viz_html(summary_path)` reads a run's `{stem}-summary.json` + `events/*.graph.json` and writes a self-contained `{stem}-viz.html` next to them. Open the HTML in a browser to pan/zoom each trial's attack tree with a per-node detail panel (module, tier, score, sent messages, target responses, reflection, leaked info). Auto-invoked at end of `run_benchmark` (gated by `generate_viz: bool = True`); backfillable via `mesmer bench-viz <summary.json>`. Above `VIZ_INLINE_BYTES_LIMIT` (50 MB of JSON) the generator splits per-target and emits `{stem}-viz-index.html`. `--offline` inlines the vendored `_assets/d3.v7.min.js` (~280 KB) so the HTML renders without network.

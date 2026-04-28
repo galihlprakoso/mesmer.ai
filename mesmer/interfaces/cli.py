@@ -151,6 +151,7 @@ def _make_verbose_log():
             "judge_error":   ("red",          "\u2696\u2717"),
             "graph_update":  ("cyan",         "\U0001f4ca"),
             "reflect_error": ("red",          "\U0001f4ad\u2717"),
+            "frontier_blocked": ("bold red",  "!"),
             "send_error":    ("bold red",     "\u2192\u2717"),
             "throttle_wait": ("yellow",       "\u23f8"),
             # Executive \u2194 operator surface (visible without --verbose

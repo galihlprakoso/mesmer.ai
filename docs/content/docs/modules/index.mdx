@@ -141,8 +141,8 @@ sub_modules:
   - target-profiler              # bare string — shorthand
   - name: attack-planner
     see_siblings: true           # inject sibling roster into this module's prompt
-  - name: my-future-recon
-    call_siblings: true          # parsed but not yet wired — reserved
+  - name: my-orchestrator
+    call_siblings: true          # expose siblings as callable tools
 ```
 
 `see_siblings: true` makes the framework inject a `## Available modules
@@ -154,9 +154,11 @@ known module list. Use `see_siblings` for any sub-module that
 *reasons about which siblings to recommend*; leave it false for
 techniques that just probe the target.
 
-`call_siblings: true` is parsed (it's a real `SubModuleEntry` field)
-but the runtime doesn't expose siblings as callable tools yet. Reserved
-for future use.
+`call_siblings: true` exposes sibling modules as callable tools inside
+that child module's own ReAct loop. The child receives its authored
+tools plus peer tools from the parent, with duplicate module names
+deduped. Use it for orchestrator-style children that should directly
+execute sibling techniques.
 
 ## Writing your own
 

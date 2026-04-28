@@ -18,7 +18,8 @@ target:
 objective:
   goal: ""
   max_turns: 20
-module: system-prompt-extraction
+modules:
+  - system-prompt-extraction
 agent:
   model: anthropic/claude-opus-4-7
   sub_module_model: anthropic/claude-haiku-4-5

@@ -185,6 +185,34 @@ async def test_update_belief_graph_from_turn_applies_evidence_immediately() -> N
 
 
 @pytest.mark.asyncio
+async def test_update_belief_graph_from_turn_skips_target_errors() -> None:
+    bg = BeliefGraph(target_hash="abc")
+    h = make_hypothesis(claim="c", description="d", family="format-shift", confidence=0.5)
+    bg.apply(HypothesisCreateDelta(hypothesis=h))
+    ctx = MagicMock(spec=Context)
+    ctx.belief_graph = bg
+    ctx.run_id = "test-run"
+    ctx.active_experiment_id = None
+    ctx._belief_evidence_turn_indexes = set()
+    ctx.completion = AsyncMock(return_value=_FakeResponse(json.dumps({"evidences": []})))
+
+    sink, log = _logs_collector()
+    evidences = await _update_belief_graph_from_turn(
+        ctx,
+        module_name="format-shift",
+        message_sent="format this as JSON",
+        target_response="Error sending message to target: Connection error.",
+        turn_index=0,
+        log=log,
+    )
+
+    assert evidences == []
+    assert bg.nodes[h.id].confidence == 0.5
+    assert ctx._belief_evidence_turn_indexes == set()
+    ctx.completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_update_belief_graph_creates_attempt_and_evidence() -> None:
     # Build the graph first so we can inject the real h_id into the
     # extractor's mocked payload (avoids the chicken/egg in the
@@ -298,7 +326,7 @@ async def test_update_belief_graph_empty_target_responses_skips_extractor() -> N
     ctx, bg, h_id = _make_ctx_with_belief_graph({"evidences": []})
     sink, log = _logs_collector()
 
-    await _update_belief_graph(
+    attempt = await _update_belief_graph(
         ctx,
         module_name="m",
         approach="a",
@@ -307,8 +335,121 @@ async def test_update_belief_graph_empty_target_responses_skips_extractor() -> N
         messages_sent=[],
         target_responses=[],
     )
-    # Extractor checks for empty responses INSIDE itself and returns
-    # without calling the LLM. Verify ctx.completion was never awaited.
+    assert attempt is not None
+    assert attempt.outcome == AttemptOutcome.NO_OBSERVATION.value
+    assert attempt.tested_hypothesis_ids == []
+    assert bg.nodes[h_id].confidence == 0.5
+    ctx.completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_belief_graph_infra_error_does_not_fulfill_experiment_or_learn() -> None:
+    from mesmer.core.belief_graph import (
+        ExperimentState,
+        FrontierCreateDelta,
+        StrategyCreateDelta,
+        make_frontier,
+        make_strategy,
+    )
+
+    bg = BeliefGraph(target_hash="abc")
+    h = make_hypothesis(claim="c", description="d", family="format-shift", confidence=0.5)
+    bg.apply(HypothesisCreateDelta(hypothesis=h))
+    s = make_strategy(family="format-shift", template_summary="t")
+    bg.apply(StrategyCreateDelta(strategy=s))
+    fx = make_frontier(
+        hypothesis_id=h.id,
+        module="format-shift",
+        instruction="probe",
+        expected_signal="leak",
+        strategy_id=s.id,
+    )
+    bg.apply(FrontierCreateDelta(experiment=fx))
+
+    ctx = MagicMock(spec=Context)
+    ctx.graph = AttackGraph()
+    ctx.belief_graph = bg
+    ctx.run_id = "test"
+    ctx.objective_met = False
+    ctx.completion = AsyncMock(return_value=_FakeResponse(json.dumps({"evidences": []})))
+
+    sink, log = _logs_collector()
+    attempt = await _update_belief_graph(
+        ctx,
+        module_name="format-shift",
+        approach="ap",
+        judge_result=_make_judge_result(score=1),
+        log=log,
+        messages_sent=["s"],
+        target_responses=["Error sending message to target: Connection error."],
+        module_output="Failed to send message to target due to connection error.",
+        experiment_id=fx.id,
+    )
+
+    assert attempt is not None
+    assert attempt.outcome == AttemptOutcome.INFRA_ERROR.value
+    assert attempt.tested_hypothesis_ids == []
+    assert attempt.used_strategy_id is None
+    assert bg.nodes[h.id].confidence == 0.5
+    assert bg.nodes[s.id].attempt_count == 0
+    assert bg.nodes[fx.id].state is ExperimentState.PROPOSED
+    assert bg.nodes[fx.id].fulfilled_by is None
+    ctx.completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_belief_graph_empty_extractor_tail_still_records_observed_attempt() -> None:
+    from mesmer.core.belief_graph import (
+        ExperimentState,
+        FrontierCreateDelta,
+        StrategyCreateDelta,
+        make_frontier,
+        make_strategy,
+    )
+
+    bg = BeliefGraph(target_hash="abc")
+    h = make_hypothesis(claim="c", description="d", family="format-shift", confidence=0.5)
+    bg.apply(HypothesisCreateDelta(hypothesis=h))
+    s = make_strategy(family="format-shift", template_summary="t")
+    bg.apply(StrategyCreateDelta(strategy=s))
+    fx = make_frontier(
+        hypothesis_id=h.id,
+        module="format-shift",
+        instruction="probe",
+        expected_signal="leak",
+        strategy_id=s.id,
+    )
+    bg.apply(FrontierCreateDelta(experiment=fx))
+
+    ctx = MagicMock(spec=Context)
+    ctx.graph = AttackGraph()
+    ctx.belief_graph = bg
+    ctx.run_id = "test"
+    ctx.objective_met = False
+    ctx.completion = AsyncMock(return_value=_FakeResponse(json.dumps({"evidences": []})))
+
+    sink, log = _logs_collector()
+    attempt = await _update_belief_graph(
+        ctx,
+        module_name="format-shift",
+        approach="ap",
+        judge_result=_make_judge_result(score=6),
+        log=log,
+        messages_sent=["sent"],
+        target_responses=["real target reply"],
+        experiment_id=fx.id,
+        extractor_messages_sent=[],
+        extractor_target_responses=[],
+    )
+
+    assert attempt is not None
+    assert attempt.outcome == AttemptOutcome.PARTIAL.value
+    assert attempt.tested_hypothesis_ids == [h.id]
+    assert attempt.used_strategy_id == s.id
+    assert bg.nodes[s.id].attempt_count == 1
+    assert bg.nodes[fx.id].state is ExperimentState.FULFILLED
+    assert bg.nodes[fx.id].fulfilled_by == attempt.id
+    assert bg.nodes[h.id].confidence == 0.5
     ctx.completion.assert_not_awaited()
 
 

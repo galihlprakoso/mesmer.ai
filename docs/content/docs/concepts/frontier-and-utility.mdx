@@ -23,7 +23,7 @@ fx_a1b2c3d4
 ├── instruction    "Probe the …"  (the actual prompt body)
 ├── expected_signal "target follows the requested structure …"
 ├── state          PROPOSED
-└── utility        0.71  (+ 8 component scores)
+└── utility        0.71  (+ 9 component scores)
 ```
 
 State lives on a small lifecycle:
@@ -53,10 +53,10 @@ This means the `fx_…` linkage works even with weaker attacker models
 that ignore the prompt's required-action contract — the planner queue
 stays auditable end-to-end.
 
-## The 8-component utility formula
+## The 9-component utility formula
 
 `rank_frontier` (in [`agent/beliefs.py`](../../../../mesmer/core/agent/beliefs.py))
-computes nine numbers per PROPOSED experiment: eight components plus
+computes ten numbers per PROPOSED experiment: nine components plus
 the weighted aggregate `utility`. Components are designed to fall in
 [-1, 1] before weighting; the aggregate is the signed weighted sum.
 
@@ -67,22 +67,24 @@ the weighted aggregate `utility`. Components are designed to fall in
 | `hypothesis_confidence` | **+0.15** | [0, 1] | Raw confidence on the linked hypothesis. |
 | `novelty` | **+0.10** | [0, 1] | `1 − max-Jaccard(instruction+module tokens, recent attempts)`. High when the experiment doesn't look like anything in the last 8 attempts. |
 | `strategy_prior` | **+0.10** | [0, 1] | The linked strategy's local success rate (against this target). 0.5 when no strategy is linked or no attempts yet. |
-| `transfer_value` | **+0.05** | [0, 1] | Cross-target lifetime bonus from the [strategy library](#the-strategy-library). Reserved — emits 0.0 today; Session 2 wires it through. |
-| `query_cost` | **−0.10** | [0, 1] | Estimated relative cost of running the experiment. Conservative 0.3 default; future sessions refine via the registry. |
+| `transfer_value` | **+0.05** | [0, 1] | Cross-target lifetime bonus from the [strategy library](#the-strategy-library). Exact strategy-template matches win first; otherwise the best same-family global strategy contributes by success rate, evidence volume, text similarity, and target trait affinity. |
+| `query_cost` | **−0.10** | [0, 1] | Estimated relative cost of running the experiment. Uses registry tier, reset behaviour, delegation fanout, and instruction length; falls back to the default cognitive tier when the registry is unavailable. |
 | `repetition_penalty` | **−0.20** | [0, 1] | Token-Jaccard against fulfilled experiments in the last 8. High similarity lowers utility — we don't waste budget repeating. |
 | `dead_similarity` | **−0.25** | [0, 1] | Token-Jaccard against attempts whose outcome was dead/refusal. Look-alikes to dead approaches are heavily penalised. |
 
 The defaults live in
 `DEFAULT_UTILITY_WEIGHTS` in [`mesmer/core/constants.py`](../../../../mesmer/core/constants.py).
 `rank_frontier(weights={"novelty": 0.20, ...})` overrides per-call.
-Weights are tuned by intuition; they'll be perturbed against
-benchmarks once the benchmarking surface is wired in.
-
+Frontier nodes persist the transfer source / global success rate /
+attempt count and the query-cost basis so the Belief Map and leader
+brief can explain why a utility score moved.
 The `recent_attempt_window` and `fulfilled_window` (default 8 each)
 cap how far back the novelty / repetition / dead-similarity
-comparisons look. Small windows keep ranking O(1) per experiment
-relative to graph size — frontier ranking stays cheap even after
-many runs.
+comparisons look. Only target-observed attempts count; infrastructure
+errors and empty transcripts are audit records and do not reduce
+novelty, feed dead-similarity, or suppress UCB exploration. Small
+windows keep ranking O(1) per experiment relative to graph size —
+frontier ranking stays cheap even after many runs.
 
 ## UCB-with-lookahead
 
@@ -99,31 +101,32 @@ choice_score(fx) = fx.utility
                  + c · sqrt(log(N + 1) / (n_h + 1))
 ```
 
-`N` is the total `Attempt` count across the graph, `n_h` is the count
-of attempts that have already tested `fx.hypothesis_id`. The +1
-smoothing keeps the bonus finite for fresh hypotheses (`n_h = 0`).
-The default `c = 1.2` is slightly under the textbook `√2` because
-utility is already in [-1, 1] (not [0, 1]) — a smaller `c` keeps the
-bonus from dominating exploitative picks.
+`N` is the total observed `Attempt` count across the graph, `n_h` is
+the observed-attempt count for `fx.hypothesis_id`. The +1 smoothing
+keeps the bonus finite for fresh hypotheses (`n_h = 0`). The default
+`c = 1.2` is slightly under the textbook `√2` because utility is
+already in [-1, 1] (not [0, 1]) — a smaller `c` keeps the bonus from
+dominating exploitative picks.
 
-**Layer 2 — depth-2 belief-state rollout** (when at least two
-proposed experiments exist). For each candidate the selector
-simulates two outcomes against the tested hypothesis and picks the
-expected best second move under each:
+**Rollout layer — recursive belief-state lookahead** (when at least
+two proposed experiments exist). For each candidate the selector
+simulates two outcomes against the tested hypothesis and recursively
+estimates the expected best local continuation:
 
 ```
 choice_score(fx) +=
     lookahead_weight ·
-      (p_support · best_next(confidence + 0.16)
-     + (1 - p_support) · best_next(confidence - 0.12))
+      (p_support · best_next(log_odds_update(SUPPORTS, 0.16))
+     + (1 - p_support) · best_next(log_odds_update(REFUTES, 0.12)))
 ```
 
 `p_support` is a cheap world-model prior (`_support_probability`)
 that blends utility, strategy_prior, and novelty into [0.1, 0.9].
-`best_next(...)` is the highest UCB-augmented utility among
-*remaining* proposed experiments under the simulated belief, capped
-at `rollout_branching` candidates by progressive widening so the
-lookahead stays O(N²) over the proposed set rather than exponential.
+The simulated updates use the same log-odds transition as
+`apply_evidence_to_beliefs`. `best_next(...)` is the highest
+UCB-augmented local continuation among remaining proposed experiments
+under the simulated belief, capped at `rollout_branching` candidates
+by progressive widening so deeper lookahead remains bounded.
 Defaults: `lookahead_depth=2`, `lookahead_weight=0.35`,
 `rollout_branching=3`.
 
@@ -176,11 +179,13 @@ Schema (versioned for forward compatibility):
 At run end, every per-target `Strategy` with `attempt_count > 0` is
 folded into the library by `merge_per_target_strategies`. Counters
 add; trait correlations dedupe-merge. At bootstrap, the hypothesis
-generator pulls family-matching entries via
-`retrieve_strategies_for_bootstrap` and renders them into the
-`generate_hypotheses` user prompt as a `## Cross-target strategy
-library` section — so a fresh target's hypotheses are grounded in
-what worked against prior targets.
+generator pulls entries via `retrieve_strategies_for_bootstrap`,
+ranked by family, global success rate, evidence volume, and signed
+target-trait affinity. It renders them into the `generate_hypotheses`
+user prompt as a `## Cross-target strategy library` section — so a
+fresh target's hypotheses are grounded in what worked against
+similar prior targets, while patterns that failed against matching
+traits are demoted.
 
 The library is **never** edited by the agent in flight. The planner
 reads it; operators or post-run hooks write it. Atomic writes via a
@@ -199,6 +204,11 @@ Three places make the planner's decision visible:
 - **The leader's user prompt** — every iteration includes a `# Belief
   Attack Graph` block from `GraphContextCompiler`. The recommended
   experiments list flags the selector's pick with `★`.
+- **Frontier discipline** — executive dispatches to manager modules
+  must bind to an open frontier id for that module. Omitted ids are
+  auto-bound to the highest-utility matching open frontier; absent
+  matches are blocked before target execution and emitted as
+  `frontier_blocked`.
 - **The trace events** — `BELIEF_DELTA` carries the delta kind +
   fields; `FRONTIER_RANKED` fires after `rank_frontier`;
   `FRONTIER_DROPPED` fires when an experiment is pruned. See

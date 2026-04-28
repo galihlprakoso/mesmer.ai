@@ -40,6 +40,7 @@ Every `ctx.completion` (attacker, judge, compressor) auto-emits
 A single line from `events/{trial_id}.jsonl` looks like this (whitespace
 added for readability — the real file is one JSON object per line):
 
+```jsonc
 // judge_verdict — full JudgeResult after evaluate_attempt
 {
   "t": 12.04,
@@ -105,6 +106,20 @@ recorder and produces:
   "profiler_ran_first": true,
   "ladder_monotonic": true,
   "compression_events": 0,
+  "belief_planner": {
+    "calibration_score": 0.82,
+    "frontier_binding_rate": 0.91,
+    "duplicate_attempt_rate": 0.04,
+    "no_observation_rate": 0.00,
+    "mean_frontier_regret": 0.08,
+    "fulfilled_utility_components": {
+      "expected_progress": 0.67,
+      "information_gain": 0.42,
+      "transfer_value": 0.31,
+      "query_cost": 0.22,
+      "utility": 0.58
+    }
+  },
   "event_counts": {"judge_verdict": 3, "delegate": 3, "llm_completion": 17},
   "events_path": "events/{trial_id}.jsonl"
 }
@@ -115,6 +130,15 @@ Winning-module attribution: first tries `ctx.turns[canary_turn - 1].module`
 authoritative). Falls back to the highest-scoring node ≥ 7 in this run.
 `None` when neither applies.
 
+`belief_planner` comes from `bench/belief_eval.py` walking the completed
+`BeliefGraph`. It reports planner-health metrics that ASR alone cannot:
+calibration (`calibration_score`, `calibration_brier`), frontier
+discipline (`frontier_binding_rate`), duplicate probe pressure
+(`duplicate_attempt_rate`), observability (`no_observation_rate`,
+`infra_error_rate`), final-slate frontier regret
+(`mean_frontier_regret`), outcome counts, and fulfilled utility
+component attribution.
+
 ## Cell-level aggregates
 
 `BenchCellSummary` (one per target × arm) adds:
@@ -124,6 +148,8 @@ authoritative). Falls back to the highest-scoring node ≥ 7 in this run.
 - `dead_end_rate_by_tier`, `median_judge_score_by_tier`
 - `mean_llm_calls`, `mean_compression_events`
 - `errors_by_class`
+- `belief_planner` — means of per-trial belief metrics, summed outcome
+  counts, and mean fulfilled utility components
 
 The markdown `{stem}-README.md` renders these in a "TAPER trace" section
 beside the headline ASR table.
@@ -155,6 +181,9 @@ jq '.cells | to_entries[] | {cell: .key, asr: .value.asr, wins_by_tier: .value.w
 
 # Per-trial: which modules actually ran, in what order?
 jq '.trace | {modules: .modules_called, tiers: .tier_sequence, winner: .winning_module, ladder: .ladder_monotonic}' <(head -1 *__mesmer.jsonl)
+
+# Planner health: did the belief map guide real decisions?
+jq '.trace.belief_planner | {binding: .frontier_binding_rate, duplicate: .duplicate_attempt_rate, no_obs: .no_observation_rate, regret: .mean_frontier_regret, cal: .calibration_score}' <(head -1 *__mesmer.jsonl)
 
 # Judge scored <5 — show the dead_end reasons
 cat events/*.jsonl | jq -r 'select(.event=="judge_verdict") | .detail | fromjson | select(.score < 5) | "\(.module) score=\(.score): \(.dead_end)"'

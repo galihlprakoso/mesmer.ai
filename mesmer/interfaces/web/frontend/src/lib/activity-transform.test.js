@@ -155,10 +155,13 @@ describe('eventsToActivity', () => {
       { type: 'event', event: 'target_wait', detail: '[x] waiting for target response', timestamp: 3.5 },
       { type: 'event', event: 'recv', detail: '← hello', timestamp: 4 },
       { type: 'event', event: 'judge_score', detail: 'Score: 5/10 — ok', timestamp: 5 },
+      { type: 'event', event: 'frontier_blocked', detail: '{"module":"direct-ask","open_frontier_ids":[],"reason":"no_open_matching_frontier"}', timestamp: 5.5 },
       { type: 'event', event: 'llm_error', detail: '401 unauthorized', timestamp: 6 },
     ]
     const rows = eventsToActivity(events)
-    expect(rows.map(r => r.kind)).toEqual(['llm', 'module-start', 'send', 'wait', 'recv', 'judge', 'error'])
+    expect(rows.map(r => r.kind)).toEqual(['llm', 'module-start', 'send', 'wait', 'recv', 'judge', 'frontier-blocked', 'error'])
+    expect(rows[6].title).toBe('Planner blocked delegation: direct-ask')
+    expect(rows[6].body).toBe('No open matching frontier')
   })
 
   it('handles empty input', () => {

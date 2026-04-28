@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from mesmer.bench.belief_eval import evaluate_belief_planner
 from mesmer.core.agent import LogFn
 from mesmer.core.constants import LogEvent
 from mesmer.core.graph import AttackNode
@@ -173,6 +174,9 @@ class TrialTelemetry:
     n_llm_calls: int = 0
     llm_seconds: float = 0.0
     throttle_wait_seconds: float = 0.0
+    # BeliefGraph planner-quality metrics. Empty when the run did not
+    # produce a belief graph (baseline arm, old stubs, or early crash).
+    belief_planner: dict = field(default_factory=dict)
 
 
 def extract_trial_telemetry(
@@ -205,10 +209,11 @@ def extract_trial_telemetry(
     """
     graph = result.graph
     run_id = result.run_id
+    belief_planner = _belief_planner_metrics_from(result)
 
     # Early exit for stubs / crashed runs.
     if graph is None or registry is None:
-        return _telemetry_only_from(result, recorder)
+        return _telemetry_only_from(result, recorder, belief_planner=belief_planner)
 
     # Only this run's nodes, in timestamp order — sibling runs persisted
     # on the same graph must not bleed into the trace.
@@ -275,12 +280,15 @@ def extract_trial_telemetry(
         n_llm_calls=tel.n_calls,
         llm_seconds=round(tel.llm_seconds, 3),
         throttle_wait_seconds=round(throttle_wait_s, 3),
+        belief_planner=belief_planner,
     )
 
 
 def _telemetry_only_from(
     result: RunResult,
     recorder: BenchEventRecorder | None,
+    *,
+    belief_planner: dict | None = None,
 ) -> TrialTelemetry:
     """Build a :class:`TrialTelemetry` with just the counters sourced from
     ``result.telemetry`` + the recorder. Called when graph / registry are
@@ -295,7 +303,16 @@ def _telemetry_only_from(
         llm_seconds=round(tel.llm_seconds, 3),
         throttle_wait_seconds=round(throttle, 3),
         compression_events=counts.get(LogEvent.COMPRESSION.value, 0),
+        belief_planner=belief_planner or {},
     )
+
+
+def _belief_planner_metrics_from(result: RunResult) -> dict:
+    ctx = getattr(result, "ctx", None)
+    graph = getattr(ctx, "belief_graph", None) if ctx is not None else None
+    metrics = evaluate_belief_planner(graph)
+    d = metrics.to_dict()
+    return d if d.get("hypothesis_count") or d.get("attempt_count") or d.get("frontier_count") else {}
 
 
 def _resolve_winning_module(

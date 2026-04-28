@@ -156,6 +156,16 @@ export function eventToRow(evt) {
     case 'frontier':
       return { kind: 'frontier', time: evt.timestamp, icon: '🌱', color: 'var(--blue)',
                title: 'New idea', body: shorten(d.replace(/^🌿\s*New frontier:\s*/u, ''), 200) }
+    case 'frontier_blocked':
+      {
+        const payload = parseJson(d)
+        const module = payload?.module ? `: ${payload.module}` : ''
+        const ids = Array.isArray(payload?.open_frontier_ids) && payload.open_frontier_ids.length
+          ? `Open frontiers: ${payload.open_frontier_ids.join(', ')}`
+          : 'No open matching frontier'
+        return { kind: 'frontier-blocked', time: evt.timestamp, icon: '!', color: 'var(--red)',
+                 title: `Planner blocked delegation${module}`, body: ids }
+      }
     case 'ask_human':
       return { kind: 'ask', time: evt.timestamp, icon: '?', color: 'var(--accent)',
                title: 'Agent asked you', body: shorten(d.replace(/^\?\s*/, ''), 300) }
