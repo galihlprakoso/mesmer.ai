@@ -435,6 +435,7 @@ async def test_loop_no_tool_calls_returns_text(memory, target_config):
     assert len(chat) == 2
     assert chat[0]["role"] == "user"
     assert chat[1]["role"] == "assistant"
+    assert memory.load_artifacts().get(StandardArtifactId.OPERATOR_NOTES.value) == ""
 
 
 @pytest.mark.asyncio

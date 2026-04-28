@@ -808,13 +808,14 @@ def _system_prompt(
         f"## Graph summary\n{graph_summary or '(no runs yet)'}\n\n"
         f"## Belief Map leader brief\n{belief_brief or '(no belief map yet)'}\n\n"
         f"## Tools available\n{tool_lines}\n\n"
-        f"Use update_artifact when you have a concrete lesson worth committing "
-        f"for future runs; use artifact_id `{StandardArtifactId.OPERATOR_NOTES.value}` for human working "
-        f"notes. Treat it as the shared scratchpad for discussion summaries, "
-        f"open questions, and next-run steering. Future executions read this "
-        f"artifact through the normal Artifact Brief, so commit concise "
-        f"discussion takeaways there when the operator asks you to remember "
-        f"them or when the conclusion would materially affect the next run. "
+        f"You can update any declared artifact with `update_artifact`. "
+        f"Use artifact_id `{StandardArtifactId.OPERATOR_NOTES.value}` as the "
+        f"shared operator/leader scratchpad for discussion summaries, open "
+        f"questions, and next-run steering. If a conversation with the "
+        f"operator produces a reusable decision, hypothesis, correction, or "
+        f"follow-up instruction, call `update_artifact` before your final "
+        f"reply and append a concise note to `operator_notes`. Do not save "
+        f"every transient chat turn; save only durable takeaways. "
         f"If the operator asks something you can answer from artifacts, the "
         f"graph summary, or the Belief Map leader brief above, you don't need "
         f"to call a tool. "
@@ -973,7 +974,8 @@ async def run_leader_chat(
             "with a more specific question.)"
         )
 
-    memory.append_chat("assistant", final_text, time.time())
+    reply_ts = time.time()
+    memory.append_chat("assistant", final_text, reply_ts)
 
     return LeaderChatResult(
         reply=final_text,

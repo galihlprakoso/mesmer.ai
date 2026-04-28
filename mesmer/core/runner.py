@@ -274,6 +274,7 @@ async def execute_run(
         run_id=run_id,
         human_broker=config.human_broker,
         target_memory=memory,
+        operator_history=[] if config.fresh else memory.load_chat(limit=12),
         judge_rubric_additions=scenario.judge_rubric_additions,
         scenario_mode=effective_scenario_mode,
         _turns=seeded_turns,

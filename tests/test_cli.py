@@ -244,3 +244,26 @@ class TestRunModeOverride:
         result = runner.invoke(cli, ["run", scenario_file, "--mode", "persistent"])
         assert result.exit_code != 0
         assert "persistent" in result.output.lower() or "invalid" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# serve command
+# ---------------------------------------------------------------------------
+
+class TestServeCommand:
+    def test_disables_uvicorn_websocket_keepalive_ping(self, runner, tmp_path):
+        """Avoid noisy websockets legacy keepalive assertions during active UI runs."""
+        with (
+            patch("webbrowser.open"),
+            patch("threading.Timer") as mock_timer,
+            patch("uvicorn.run") as mock_run,
+        ):
+            mock_timer.return_value.start = MagicMock()
+
+            result = runner.invoke(
+                cli,
+                ["serve", "--no-browser", "--scenario-dir", str(tmp_path)],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.kwargs["ws_ping_interval"] is None

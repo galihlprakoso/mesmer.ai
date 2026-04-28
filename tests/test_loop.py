@@ -71,6 +71,7 @@ def _make_ctx(
     graph=None,
     captured_messages=None,
     operator_messages=None,
+    operator_history=None,
     leader_artifact=None,
     leader_module_name=None,
 ):
@@ -129,6 +130,7 @@ def _make_ctx(
         graph=graph,
         run_id="test-run",
         operator_messages=list(operator_messages) if operator_messages else None,
+        operator_history=list(operator_history) if operator_history else None,
     )
     ctx.completion = fake_completion
     if leader_artifact is not None and leader_module_name:
@@ -812,6 +814,33 @@ class TestLeaderArtifactsAndOperatorMessages:
         assert "Spanish translation angle" in combined
         # Drained — queue must be empty after rendering.
         assert ctx.operator_messages == []
+
+    @pytest.mark.asyncio
+    async def test_operator_history_injected_as_prior_chat_not_completed_work(self):
+        captured = []
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+            captured_messages=captured,
+            operator_history=[
+                {"role": "user", "content": "okay let's do that on the next iterations", "timestamp": 1.0},
+                {"role": "assistant", "content": "I will dispatch indirect-prompt-injection next.", "timestamp": 2.0},
+            ],
+        )
+        await run_react_loop(_make_module(), ctx, "test", log=None)
+
+        first = captured[0]
+        combined = "\n".join(
+            m.get("content", "") for m in first if m.get("role") == "user"
+        )
+        assert "## Operator Conversation History" in combined
+        assert "okay let's do that on the next iterations" in combined
+        assert "I will dispatch indirect-prompt-injection next." in combined
+        assert "not as proof that an action already happened" in combined
+        assert "plan/commitment, not a completed dispatch" in combined
 
     @pytest.mark.asyncio
     async def test_operator_messages_drained_on_later_leader_iteration(self):

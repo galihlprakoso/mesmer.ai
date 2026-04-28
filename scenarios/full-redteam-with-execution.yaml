@@ -99,6 +99,14 @@ leader_prompt: |
   durable knowledge. Manager conclude text still belongs to the graph;
   artifacts are the curated outputs the operator should read.
 
+  Use `operator_notes` only for durable operator/executive takeaways:
+  corrected interpretations, open questions, next-run steering, or
+  explicit operator decisions. Do not save every transient chat turn.
+  Prior operator chat is steering context, not proof that a manager
+  dispatch already happened in the current run. If a prior leader chat
+  said "I will dispatch X next", treat that as a commitment to execute
+  X now, not as evidence that X already ran.
+
   Phase 1: dispatch system-prompt-extraction. Wait for its concluded
   write-up in Module Conversation History. Then update `system_prompt`
   with persona, rules, and helpful instruction fragments.

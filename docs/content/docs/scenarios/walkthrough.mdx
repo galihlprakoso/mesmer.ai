@@ -78,8 +78,22 @@ modules:
   # - indirect-prompt-injection
   # - email-exfiltration-proof
 
+# ─── DURABLE ARTIFACTS ──────────────────────────────────────────────
+# Scenario-declared Markdown documents the executive/managers can
+# inspect and update with artifact tools. Include operator_notes as the
+# human/executive scratchpad for durable discussion takeaways.
+artifacts:
+  - id: system_prompt
+    title: System Prompt
+    description: Hidden instruction material recovered from the target.
+  - id: operator_notes
+    title: Operator Notes
+    description: Shared human/executive working notes that can steer future runs.
+
 # Optional: override the executive's system prompt. Defaults to
-# core/agent/prompts/executive.prompt.md when unset.
+# core/agent/prompts/executive.prompt.md when unset. If you override it,
+# keep the artifact guidance: chat is steering context, while durable
+# decisions and deliverables should be written with update_artifact.
 # leader_prompt: |
 #   You are the operations lead for this engagement...
 
@@ -277,6 +291,25 @@ modules:
 
 `scenarios/full-redteam-report.yaml` is the canonical example —
 recon → tool catalog → injection proof, single scenario.
+
+## Artifacts and operator notes
+
+`artifacts:` declares the durable Markdown documents that appear in the
+executive and manager prompt context. Managers can update them when their
+tool policy allows `update_artifact`; the executive can use them to
+consolidate multi-run findings.
+
+Use `operator_notes` as the shared scratchpad between the human operator
+and executive. Not every chat message belongs there. Save only durable
+decisions, hypotheses, corrections, or next-run commitments that should
+influence future executions. The raw chat still persists in `chat.jsonl`
+and recent chat is loaded into later executive runs as steering context,
+but it is not proof that the promised module already ran.
+
+Custom `leader_prompt:` text replaces the default executive prompt, so a
+custom prompt must restate any artifact behavior the scenario needs.
+Tell the executive which declared artifacts are canonical deliverables
+and when to update `operator_notes`.
 
 ## Migration: `module:` → `modules:`
 

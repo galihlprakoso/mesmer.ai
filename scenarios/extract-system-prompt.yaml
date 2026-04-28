@@ -40,6 +40,22 @@ objective:
 modules:
   - system-prompt-extraction
 
+artifacts:
+  - id: system_prompt
+    title: System Prompt
+    format: markdown
+    description: >
+      Curated prompt-recon deliverable: extracted instruction/persona
+      fragments, behavioral rules, confidence notes, and transcript
+      evidence worth preserving across runs.
+  - id: operator_notes
+    title: Operator Notes
+    format: markdown
+    description: >
+      Shared operator/executive scratchpad for durable discussion
+      takeaways, corrected interpretations, open questions, and
+      next-run steering. Do not store every chat turn here.
+
 # Agent (attacker brain) — prefix determines provider
 agent:
   model: anthropic/claude-opus-4-7

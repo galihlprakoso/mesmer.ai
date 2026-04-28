@@ -73,7 +73,7 @@ mesmer/                          # repo root
 │   │   │   │   │                    #   to dedupe with module-level extraction.
 │   │   │   │   ├── ask_human.py       # executive-only: blocking question
 │   │   │   │   ├── talk_to_operator.py # executive-only: non-blocking chat reply
-│   │   │   │   ├── artifacts/update_artifact.py # shared whiteboard: full replace or patch ops
+│   │   │   │   ├── artifacts/update_artifact.py # durable artifact writes by artifact_id
 │   │   │   │   ├── conclude.py  # no handler — engine short-circuits
 │   │   │   │   ├── sub_module.py # dynamic: executes sub-module + judge + graph.
 │   │   │   │   │                #   _auto_bind_experiment_id resolves the
@@ -159,17 +159,18 @@ mesmer/                          # repo root
 │   │   │                        #   AttackNode.is_leader_verdict distinguishes the
 │   │   │                        #   leader's own execution node (source=LEADER)
 │   │   │                        #   from sub-module attempts.
-│   │   ├── artifacts.py        # Artifacts dataclass — one shared markdown
-│   │   │                        #   whiteboard plus a separate latest-output
-│   │   │                        #   cache keyed by module name. Only the
-│   │   │                        #   whiteboard renders into prompts; module
-│   │   │                        #   outputs support phase gates / handoff checks.
+│   │   ├── artifacts.py        # Artifact specs/store plus a separate
+│   │   │                        #   latest-output cache keyed by module name.
+│   │   │                        #   Only the scenario-declared artifact brief
+│   │   │                        #   renders into prompts; module outputs support
+│   │   │                        #   phase gates / handoff checks.
 │   │   ├── runner.py            # execute_run — RunConfig → RunResult (shared by
 │   │   │                        #   CLI, web, bench); SYNTHESIZES the scenario-
 │   │   │                        #   scoped ExecutiveSpec / ReactActorSpec in
 │   │   │                        #   memory (name "<stem>:executive"), seeds
-│   │   │                        #   module_outputs from graph history and the
-│   │   │                        #   shared whiteboard from artifacts/*.md, and at
+│   │   │                        #   module_outputs from graph history, declared
+│   │   │                        #   artifacts from artifacts/*.md, operator_history
+│   │   │                        #   from chat.jsonl tail, and at
 │   │   │                        #   run end records the executive's own execution
 │   │   │                        #   as an AttackNode with source=LEADER. Belief-
 │   │   │                        #   graph wiring: loads/saves belief_graph.json
@@ -413,11 +414,11 @@ Persistence lives *outside* the repo at `~/.mesmer/`:
 │   │                             # (source=LEADER) so the tree always ends on
 │   │                             # the executive's decision, not on whichever
 │   │                             # sub-module was last delegated to.
-│   ├── artifacts/*.md             # shared markdown whiteboard —
-│   │                             # written by update_artifact (full replace
-│   │                             # or patch ops) AND by the operator via the
-│   │                             # web UI. Seeded into ctx.artifacts.content
-│   │                             # at run start.
+│   ├── artifacts/*.md             # durable Markdown artifacts —
+│   │                             # scenario-declared docs written by
+│   │                             # update_artifact (full replace or patch ops)
+│   │                             # and inspected by list/read/search tools.
+│   │                             # Seeded into the Artifact Brief at run start.
 │   │                             # Migrated automatically from the old plan.md
 │   │                             # on first init of an existing target.
 │   ├── chat.jsonl                # append-only operator <> executive chat log.
@@ -425,7 +426,10 @@ Persistence lives *outside* the repo at `~/.mesmer/`:
 │   │                             # role is "user" (operator) or "assistant"
 │   │                             # (executive). The web UI reads load_chat()
 │   │                             # for history; talk_to_operator + the WS push
-│   │                             # path both append.
+│   │                             # path both append. New runs load a recent
+│   │                             # tail into ctx.operator_history unless
+│   │                             # --fresh; this is steering context, not proof
+│   │                             # that a promised action already happened.
 │   ├── profile.md                # optional free-form human notes (no writer in
 │   │                             # the runtime; hand-edited or shown by web UI)
 │   ├── conversation.json         # CONTINUOUS-mode rolling turns
@@ -447,13 +451,14 @@ Persistence lives *outside* the repo at `~/.mesmer/`:
 └── global/techniques.json        # cross-target technique success/fail counts
 ```
 
-`--fresh` bypasses loading the existing graph. There is no `profile.json` /
+`--fresh` bypasses loading the existing graph and ignores the chat tail for
+that run. It does not delete `chat.jsonl` or `artifacts/*.md`. There is no `profile.json` /
 `TargetProfile` / `experience.json` / `plan.json` — profile is a module
 output that lives in the graph (authoritative) and the run-scoped
 module_outputs cache (for phase gates / handoff checks). The old
 free-standing `plan.md` is gone; its file has been renamed in place to
-`artifacts/*.md` and is now the shared markdown whiteboard
-(rewritten or patched via `update_artifact`, not hand-authored). Core has no typed
+`artifacts/*.md`; artifact documents are rewritten or patched via
+`update_artifact`. Core has no typed
 dossier abstraction; the framework doesn't know what a "profile" is.
 
 ## Architecture
@@ -924,7 +929,7 @@ Test your manager's sub-module entries are dataclass-correct (not bare strings e
 
 ### Shared state between modules: two layers, no typed dossiers
 
-Core has three shared-state surfaces. None is a typed "profile" or "plan"
+Core has four shared-state surfaces. None is a typed "profile" or "plan"
 abstraction — the framework doesn't know what a profile is. Profilers and
 planners are modules that happen to produce text.
 
@@ -932,30 +937,35 @@ planners are modules that happen to produce text.
 |---|---|---|---|
 | **Attack graph** (`core/graph.py::AttackGraph`) | Cross-run — `graph.json` per target | `~/.mesmer/targets/{hash}/graph.json` | Every module execution is an `AttackNode`; each node's `module_output` is the raw `conclude()` text. Parent/child edges are delegation edges: the executive node is created at run start, manager modules attach under it, and nested module calls attach under the module that dispatched them. Authoritative record of "what did this target ever see, and how did we judge it?" |
 | **Module outputs** (`ctx.artifacts.module_outputs`) | Run-local cache, seeded from graph history | `ctx.artifacts.module_output(name)` / `.set_module_output(name, output)` | Latest raw `conclude()` text by module name. Used for ordered phase gates and marker checks. Not rendered as the prompt artifacts. |
-| **Artifacts whiteboard** (`ctx.artifacts.content`) | Cross-run markdown file | `~/.mesmer/targets/{hash}/artifacts/*.md` | One shared markdown whiteboard rendered into prompts as `## Artifacts`. Updated by `update_artifact` with either full `content` replacement or structured `operations`. |
+| **Artifacts** (`ctx.artifacts`) | Cross-run Markdown files | `~/.mesmer/targets/{hash}/artifacts/*.md` | Scenario-declared durable documents rendered into prompts as the Artifact Brief. Updated by `update_artifact` with either full `content` replacement or structured `operations`. |
+| **Operator chat tail** (`ctx.operator_history`) | Cross-run append-only log, prompt tail only | `~/.mesmer/targets/{hash}/chat.jsonl` | Recent human/executive chat loaded into new runs as steering context. It is not target evidence and does not prove that prior leader promises were executed. |
 
 A module's "output" is whatever string it returns from `conclude()`. The
 framework appends that text to the graph and caches the latest value in
-`module_outputs`. The artifacts whiteboard is separate: it should be concise
-shared working state, not a dump of every report.
+`module_outputs`. Artifacts are separate: they should be concise shared
+working state, not a dump of every report. `operator_notes` is the
+standard scratchpad artifact for durable human/executive takeaways; raw chat
+still lives in `chat.jsonl`.
 
 **Cross-run warm-start**:
 
 1. `runner.py` walks `graph.conversation_history()` oldest→newest and seeds
    `module_outputs` via `ctx.artifacts.set_module_output(node.module, node.module_output)`.
    Leader-verdict nodes are excluded at source.
-2. `runner.py` reads `memory.load_artifacts()` and writes the contents into
-   `ctx.artifacts.content` via `ctx.artifacts.update(artifacts_md)`.
+2. `runner.py` reads `memory.load_artifacts()` and seeds the declared
+   artifact store rendered in the Artifact Brief.
+3. `runner.py` reads `memory.load_chat(limit=12)` and seeds
+   `ctx.operator_history`, unless `RunConfig.fresh` is set.
 
 This gives later phases precise handoff checks via `module_outputs` while the
-model prompt sees one compact shared whiteboard.
+model prompt sees compact durable artifacts plus recent operator steering.
 
 **Conversation history** is a *derived view* over the graph, not a third
 primitive: `AttackGraph.conversation_history()` returns the ordered list
 of completed module `AttackNode`s across runs for this target, excluding
 the root and leader-verdict nodes. `render_conversation_history()` formats
 that timeline for injection into the engine's user prompt (separate from
-the artifacts whiteboard).
+the Artifact Brief).
 
 **Learned experience** is another derived prompt view over the graph, but it
 is role-scoped because it is planning advice:
@@ -1039,6 +1049,14 @@ the objective as context for judging relevance, so procedural text in
 `objective:` leaks into their prompts and makes them reason about parent
 or sibling work they cannot run.
 
+Declare durable outputs in `artifacts:` instead of overloading the
+objective. Public scenarios should include `operator_notes` so human /
+executive discussions can be summarized with `update_artifact`. If a
+scenario supplies a custom `leader_prompt:`, it replaces the default
+executive prompt, so restate the artifact contract there: prior chat is
+steering context, while completed work and durable decisions must be written
+to declared artifacts.
+
 ### The executive is a synthesised module (recorded like any other)
 
 Every module execution produces exactly **one** `AttackNode` in the
@@ -1116,7 +1134,7 @@ def build_tool_list(actor: ReactActorSpec, ctx: Context) -> list[dict]:
 The default executive policy grants operator tools and manager dispatch, but
 not `send_message`. Manager policies are authored in YAML. The current
 research-demo managers grant `update_artifact` so they can maintain the
-shared whiteboard; leaf techniques usually only get `send_message` and
+declared artifacts; leaf techniques usually only get `send_message` and
 `conclude`.
 
 The operator channel remains executive-only: do not grant
@@ -1131,13 +1149,19 @@ from `send_message`-ing the target. Override per-scenario with
 
 **Operator messages** flow the other direction via
 `ctx.operator_messages`, a list shared by reference between parent and
-child contexts. The web backend's WS handler appends operator messages
-onto the running ctx; the executive's iteration in `engine.py` drains
-that list at the top of each ReAct cycle and renders the messages into
+child contexts. The web backend appends operator messages onto the
+running ctx; the executive's loop in `engine.py` drains that list at
+startup and at the top of each ReAct cycle, then renders the messages into
 its user prompt as a chat history block. Sharing the list reference
 across `Context.child()` means the operator can push a message even
 while the executive is mid-delegation — the message lands and is read
 on the next executive iteration.
+
+`ctx.operator_history` is different: it is the recent `chat.jsonl` tail
+loaded at run start so the executive understands previous human discussion.
+Treat it as steering context only. If the conversation produces a durable
+next-run decision, the executive should summarize it to `operator_notes`
+with `update_artifact`.
 
 ### The ReAct loop (`core/agent/engine.py`)
 
@@ -1295,11 +1319,19 @@ agent:
 # order based on operator chat, judge feedback, and TAPER frontier.
 modules:
   - system-prompt-extraction
+artifacts:
+  - id: system_prompt
+    title: System Prompt
+    description: Hidden instruction material recovered from the target.
+  - id: operator_notes
+    title: Operator Notes
+    description: Shared human/executive working notes that can steer future runs.
 # Optional — string override for the executive system prompt. When omitted
 # the runner loads core/agent/prompts/executive.prompt.md. Use this when
 # the generic "orchestrate the listed modules" framing isn't enough — e.g.
-# a chained scenario that needs the executive to dispatch manager A
-# strictly before manager B and pivot framing in between.
+# a chained scenario that needs strict manager order. Custom prompts must
+# preserve artifact guidance: use update_artifact for durable deliverables
+# and operator_notes for persistent human/executive discussion takeaways.
 leader_prompt: null
 mode: trials                   # trials | continuous (Scenario.mode)
 ```
@@ -1362,10 +1394,11 @@ The bench `--verbose` CLI flag does two things: (1) writes every event to `event
   | GET | `/api/run/status` | is a run live? |
   | POST | `/api/run` | start a run |
   | POST | `/api/run/stop` | request graceful stop of the live run |
-  | GET | `/api/artifacts` | read the executive's artifacts/*.md for current target |
-  | PUT | `/api/artifacts` | overwrite artifacts/*.md from the operator UI |
+  | GET | `/api/targets/{hash}/artifacts` | list declared artifacts/*.md for a target |
+  | GET | `/api/targets/{hash}/artifacts/search` | search target artifacts |
+  | GET | `/api/targets/{hash}/artifacts/{artifact_id}` | read one target artifact |
   | GET | `/api/chat` | tail of operator ↔ executive chat.jsonl |
-  | POST | `/api/leader-chat` | operator pushes a message onto `ctx.operator_messages` |
+  | POST | `/api/leader-chat` | operator pushes live message onto `ctx.operator_messages` or, when idle, asks leader-chat with graph/belief/artifact context |
   | POST | `/api/debrief` | generate a per-target run debrief |
   | WS  | `/ws` | unified event stream — log + graph_update + key_status + chat |
 
@@ -1405,7 +1438,7 @@ Three operator-facing channels, each with a different latency / authority profil
 |---|---|---|---|---|
 | **Hints** (`NodeSource.HUMAN`) | operator → graph | no | persistent across runs | "next time, try X" execution notes. Set via `--hint`, `mesmer hint`, or the debrief command. The next run sees them through graph history. |
 | **`ask_human`** | executive → operator → executive | **yes** (awaits answer) | per-run | The executive needs an authoritative decision before continuing. Routed through `HumanQuestionBroker` in `core/agent/context.py`. The web UI implements a broker; the CLI without a broker bound has `ask_human` return `""` and the executive degrades gracefully. |
-| **`talk_to_operator`** + `ctx.operator_messages` | bidirectional, async | **no** | per-run + persisted to `chat.jsonl` | Status update, "I found X, I'm going to try Y" running commentary. The executive's `talk_to_operator` tool emits `LogEvent.OPERATOR_REPLY` and appends to `chat.jsonl`. The web backend's `POST /api/leader-chat` endpoint pushes operator messages onto `ctx.operator_messages`, which the executive drains at the top of each iteration. The list is shared by reference across `Context.child()` calls, so an operator message lands even while the executive is mid-delegation. |
+| **`talk_to_operator`** + `ctx.operator_messages` + `ctx.operator_history` | bidirectional, async | **no** | live queue + persisted `chat.jsonl` tail | Status update, "I found X, I'm going to try Y" running commentary. The executive's `talk_to_operator` tool emits `LogEvent.OPERATOR_REPLY` and appends to `chat.jsonl`. The web backend's `POST /api/leader-chat` endpoint pushes live operator messages onto `ctx.operator_messages`, which the executive drains at startup and the top of each iteration. The list is shared by reference across `Context.child()` calls, so an operator message lands even while the executive is mid-delegation. New runs load recent `chat.jsonl` into `ctx.operator_history` as steering context, not evidence of completed work. Durable takeaways should be written to `operator_notes` with `update_artifact`. |
 
 `ContextMode.AUTONOMOUS` / `ContextMode.CO_OP` no longer exist — that enum was removed. Whether the executive can engage the operator is determined by its `ToolPolicySpec`; whether `ask_human` can actually block for an answer depends on whether a `HumanQuestionBroker` is bound on the context. CLI runs without a broker still get `talk_to_operator` (it just emits the event with no listener and persists to `chat.jsonl`); only `ask_human` requires a broker.
 
@@ -1466,7 +1499,7 @@ Every callsite must pass an `event_name` that exists in `LogEvent`. The CLI rend
 
 - `OPERATOR_MESSAGE` — operator pushed a message onto `ctx.operator_messages` via `POST /api/leader-chat`. Detail = the operator's text. Web UI surfaces it as a "user" row.
 - `OPERATOR_REPLY` — executive called `talk_to_operator(text=…)`. Detail = the executive's text. Web UI surfaces it as an "assistant" row. Also persisted to `chat.jsonl`.
-- `ARTIFACT_UPDATED` — an actor called `update_artifact` with either `content` or `operations`. Detail = `"<n> chars"` (or `"persist_failed: …"` on disk error). The artifacts UI listens for this to refresh its read view.
+- `ARTIFACT_UPDATED` — an actor called `update_artifact` with either `content` or `operations`. Detail = the `artifact_id` (or `"persist_failed: …"` on disk error). The artifacts UI listens for this to refresh its read view.
 
 These are consumed by `bench/trace.py` to build per-trial telemetry + the `events/{trial_id}.jsonl` artifact (operator-chat events are no-ops in bench since runs are autonomous). Keep the JSON payloads flat, stringify tier-keyed maps at the JSON boundary, and `sort_keys=True` so downstream diffs are deterministic.
 
@@ -1582,7 +1615,7 @@ wins. Fix CLAUDE.md in the same change.
 - **`module: <name>` in scenario YAML hard-fails.** The legacy single-field schema was replaced by `modules: [<name>, ...]` and the runner now synthesises an executive at depth 0. `load_scenario` raises `ValueError` with a one-line migration hint when it sees the legacy field — fix the YAML, don't shim the loader. A YAML carrying both `module:` and `modules:` also fails (ambiguous).
 - **The executive can't `send_message`.** Its default `ToolPolicySpec` does not grant target I/O. If a scenario "stalls" because the executive seems unable to talk to the target, that's the architecture working as intended — the executive should be dispatching a manager. Check the executive's last completion: it's probably trying to call a tool that doesn't exist on its tool list, and the model is failing silently. Symptom: `LLM_COMPLETION` events without follow-up `DELEGATE` or tool dispatch.
 - **Tool access is policy, not role if/else.** Managers can use `update_artifact` only when their YAML grants it. Operator tools (`ask_human`, `talk_to_operator`) should remain executive-only unless the product model changes deliberately.
-- **Running the same scenario twice doesn't restart fresh.** The graph + shared `artifacts/*.md` persist per-target. Pass `--fresh` to wipe the graph; the runner also clears the CONTINUOUS conversation when `--fresh` is set, but the artifacts is left alone (it's "human-curated state" by intent). Delete `~/.mesmer/targets/{hash}/artifacts/*.md` manually if you want a truly clean run.
+- **Running the same scenario twice doesn't restart fresh.** The graph + `artifacts/*.md` + `chat.jsonl` persist per-target. Pass `--fresh` to wipe the graph; the runner also clears the CONTINUOUS conversation and ignores the chat tail for that run, but artifacts and the chat file are left alone. Delete `~/.mesmer/targets/{hash}/artifacts/*.md` and/or `chat.jsonl` manually if you want a truly clean run.
 
 ## Debugging / triage cookbook
 

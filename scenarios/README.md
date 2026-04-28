@@ -16,6 +16,11 @@ The `.yaml` files in this directory are example scenarios shipped with mesmer. T
 For a pattern library with source links and copy-paste scenario guidance,
 see `docs/content/docs/recipes/research-grounded-scenarios.mdx`.
 
+Public scenarios declare their durable artifacts explicitly. Keep
+`operator_notes` in each scenario so the executive can preserve concise
+human/operator discussion takeaways with `update_artifact` instead of
+treating transient chat as the long-term plan.
+
 ## Private scenarios
 
 Put your real target scenarios in `scenarios/private/`. This directory is **gitignored** — nothing inside it will ever be committed or pushed.

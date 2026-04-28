@@ -268,6 +268,7 @@ class Context:
         human_broker: HumanQuestionBroker | None = None,
         target_memory: "TargetMemory | None" = None,
         operator_messages: list[dict] | None = None,
+        operator_history: list[dict] | None = None,
         judge_rubric_additions: str = "",
         target_fresh_session: bool = False,
         attacker_model_override: str = "",
@@ -306,6 +307,7 @@ class Context:
         self.operator_messages: list[dict] = (
             operator_messages if operator_messages is not None else []
         )
+        self.operator_history: list[dict] = list(operator_history or [])
         # Scenario-specific rubric text appended to JUDGE_SYSTEM. Keeps the
         # judge calibrated to the particular attack (e.g. profiling ≠ extraction).
         self.judge_rubric_additions = judge_rubric_additions
@@ -725,6 +727,7 @@ class Context:
             # land here regardless
             # of which sub-module
             # is currently running
+            operator_history=self.operator_history,  # read-only history
             judge_rubric_additions=self.judge_rubric_additions,  # shared
             target_fresh_session=target_fresh_session,
             attacker_model_override=attacker_model_override or self.attacker_model_override,

@@ -112,7 +112,9 @@ Every node has a `source` field recording who produced it:
 ├── artifacts/          # durable Markdown artifacts written by
 │                       # update_artifact and inspected by artifact tools
 ├── chat.jsonl          # append-only operator ↔ executive chat log;
-│                       # one JSON row per message
+│                       # one JSON row per message. Recent tail is
+│                       # loaded into future executive runs as steering
+│                       # context, not target evidence
 ├── profile.md          # optional free-form human notes (hand-edited)
 ├── conversation.json   # CONTINUOUS-mode rolling target transcript
 └── runs/

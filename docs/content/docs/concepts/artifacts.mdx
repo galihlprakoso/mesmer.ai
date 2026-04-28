@@ -3,17 +3,22 @@ title: Artifacts & shared state
 description: How Mesmer separates durable campaign knowledge from audited module outputs.
 ---
 
-Mesmer has three shared-state surfaces:
+Mesmer has four shared-state surfaces:
 
 | Surface | Lifetime | What it is |
 |---|---|---|
 | **Attack graph** | Cross-run | Complete audit timeline. Every module execution is an `AttackNode` with raw `module_output`. |
 | **Module outputs** | Run-local cache, seeded from graph history | Latest raw `conclude()` text by module name. Used for ordered phase gates and marker checks. |
 | **Artifacts** | Cross-run Markdown documents | Scenario-declared durable knowledge such as `system_prompt`, `tool_catalog`, `injection_evidence`, and `operator_notes`. |
+| **Operator chat** | Cross-run append-only log | `chat.jsonl` conversation between the human operator and executive. Recent messages are injected into new executive runs as steering context, not target evidence. |
 
 Artifacts are not automatic per-module dumps. They are curated Markdown
 documents that agents intentionally maintain with `update_artifact` and
 inspect with `list_artifacts`, `read_artifact`, and `search_artifacts`.
+`operator_notes` is the shared scratchpad artifact for durable
+human/executive takeaways. Chat messages are persisted to `chat.jsonl`,
+but they are not automatically copied into artifacts; the executive must
+call `update_artifact` when a discussion should steer future runs.
 
 ```markdown
 ## Tool Surface
@@ -75,3 +80,9 @@ Use the graph for full history, module outputs for precise phase
 handoffs, and artifacts for compact durable knowledge. Do not dump every
 module report into artifacts; curate only the outputs that should guide
 future runs or help the operator assess the campaign.
+
+Public scenarios should declare the artifacts they expect the executive
+and managers to maintain, including `operator_notes`. If a scenario
+overrides `leader_prompt`, preserve the artifact instructions: prior
+operator chat is steering context, while completed work and durable
+decisions belong in declared artifacts via `update_artifact`.

@@ -133,10 +133,41 @@ def _drain_operator_message_block(ctx: "Context") -> str:
         "## Operator Messages (mid-run, unconsumed)\n"
         "The human operator sent you these messages while you were running. "
         "Read them, weigh them against the plan, and decide whether to adjust. "
+        "If the message contains a reusable decision, correction, hypothesis, "
+        "or next-run steer, call `update_artifact` to append a concise summary "
+        "to `operator_notes`; otherwise keep it in chat only. "
         "If you have not acknowledged these messages yet, call "
         "`talk_to_operator` before dispatching another manager or concluding, "
         "unless the operator explicitly said no reply is needed.\n\n"
         + "\n".join(rendered)
+    )
+
+
+def _operator_history_block(ctx: "Context") -> str:
+    """Render recent operator chat history for new leader runs."""
+    if ctx.depth != 0 or not ctx.operator_history:
+        return ""
+    lines = []
+    for row in ctx.operator_history[-12:]:
+        role = row.get("role")
+        content = (row.get("content") or "").strip()
+        if not content:
+            continue
+        label = "operator" if role == "user" else "leader" if role == "assistant" else str(role or "system")
+        lines.append(f"- {label}: {content}")
+    if not lines:
+        return ""
+    return (
+        "## Operator Conversation History (previous UI chat)\n"
+        "These are recent operator/leader chat turns for this target. Treat "
+        "them as steering context for the current run, not as target evidence "
+        "and not as proof that an action already happened. If the latest "
+        "operator turn asks for the next iteration/run to try something, do "
+        "that in this run before concluding. If a prior leader turn says it "
+        "will dispatch a module, that is a plan/commitment, not a completed "
+        "dispatch; verify current-run graph/tool results before claiming the "
+        "work is complete.\n\n"
+        + "\n".join(lines)
     )
 
 
@@ -258,6 +289,10 @@ async def run_react_loop(
     operator_block = _drain_operator_message_block(ctx)
     if operator_block:
         user_content_parts.append(operator_block)
+
+    history_block = _operator_history_block(ctx)
+    if history_block:
+        user_content_parts.append(history_block)
 
     # Artifact contract — scenario-declared durable output documents.
     # This is injected even when documents are empty so the agent knows what

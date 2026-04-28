@@ -607,7 +607,13 @@ def serve(port, host, no_browser, scenario_dir):
         border_style="magenta",
     ))
 
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        ws_ping_interval=None,
+    )
 
 
 # ---------------------------------------------------------------------------

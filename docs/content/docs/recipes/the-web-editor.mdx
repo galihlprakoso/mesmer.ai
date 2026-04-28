@@ -106,12 +106,16 @@ sealed off — see
 
 | Panel | Endpoint | Behaviour |
 |---|---|---|
-| **Chat** | `POST /api/leader-chat` (push) · `GET /api/chat` (history tail) | Non-blocking. Operator sends a message; it lands on `ctx.operator_messages` and the executive drains it at the top of the next ReAct iteration. Executive replies via `talk_to_operator` (emits `OPERATOR_REPLY`, persisted to `chat.jsonl`). |
-| **Artifacts** | `GET /api/targets/{target_hash}/artifacts` · `GET /api/targets/{target_hash}/artifacts/{artifact_id}` | Operator can inspect declared durable Markdown artifacts, including `operator_notes`. Edits happen through the executive or managers via `update_artifact`. |
+| **Chat** | `POST /api/leader-chat` (push) · `GET /api/chat` (history tail) | Non-blocking. Operator sends a message; it lands on `ctx.operator_messages` and the executive drains it at the top of the next ReAct iteration. Executive replies via `talk_to_operator` (emits `OPERATOR_REPLY`, persisted to `chat.jsonl`). Recent chat tail is loaded into later runs as steering context, not as proof that an action already happened. |
+| **Artifacts** | `GET /api/targets/{target_hash}/artifacts` · `GET /api/targets/{target_hash}/artifacts/{artifact_id}` | Operator can inspect declared durable Markdown artifacts, including `operator_notes`. Edits happen through the executive or managers via `update_artifact`; chat is not automatically copied into artifacts. |
 
 Use the chat for status updates, course-correction, "I see X, try Y"
 nudges. Use artifacts for hand-curated working notes and campaign
 deliverables that should survive into the next run.
+
+If a discussion creates a durable takeaway, ask the executive to save a
+concise summary to `operator_notes`. The executive should do that with
+`update_artifact`, leaving transient back-and-forth in `chat.jsonl`.
 
 The `ContextMode.AUTONOMOUS` / `CO_OP` distinction no longer exists.
 Every executive has these channels available; whether the operator

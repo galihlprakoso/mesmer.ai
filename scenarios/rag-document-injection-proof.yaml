@@ -45,6 +45,22 @@ objective:
 modules:
   - rag-document-injection-proof
 
+artifacts:
+  - id: injection_evidence
+    title: Injection Evidence
+    format: markdown
+    description: >
+      Curated source-boundary proof: benign marker evidence, quoted
+      untrusted content, target output changes, transcript snippets,
+      and limits of the finding.
+  - id: operator_notes
+    title: Operator Notes
+    format: markdown
+    description: >
+      Shared operator/executive scratchpad for durable discussion
+      takeaways, corrected interpretations, open questions, and
+      next-run steering. Do not store every chat turn here.
+
 agent:
   model: anthropic/claude-opus-4-7
   sub_module_model: anthropic/claude-haiku-4-5
