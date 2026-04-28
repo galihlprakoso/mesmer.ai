@@ -108,7 +108,10 @@ class ToolName(str, Enum):
     SEND_MESSAGE = "send_message"
     ASK_HUMAN = "ask_human"
     CONCLUDE = "conclude"
-    UPDATE_SCRATCHPAD = "update_scratchpad"
+    LIST_ARTIFACTS = "list_artifacts"
+    READ_ARTIFACT = "read_artifact"
+    SEARCH_ARTIFACTS = "search_artifacts"
+    UPDATE_ARTIFACT = "update_artifact"
     TALK_TO_OPERATOR = "talk_to_operator"
 
 
@@ -194,7 +197,7 @@ class LogEvent(str, Enum):
     # chat panel as conversation rows.
     OPERATOR_MESSAGE = "operator_message"
     OPERATOR_REPLY = "operator_reply"
-    SCRATCHPAD_UPDATED = "scratchpad_updated"
+    ARTIFACT_UPDATED = "artifact_updated"
 
     # Judge + reflection
     JUDGE = "judge"
@@ -308,7 +311,10 @@ class AttemptOutcome(str, Enum):
     ``PARTIAL`` — target partially complied without disclosing the
     objective fragment.
     ``REFUSAL`` — target declined explicitly.
-    ``DEAD`` — pipeline error / target unreachable / judge marked dead.
+    ``DEAD`` — target behavior made the line unproductive.
+    ``INFRA_ERROR`` — runtime/transport failure; not target behavior.
+    ``NO_OBSERVATION`` — module produced no target transcript to score
+    as behavioral evidence.
     ``OBJECTIVE_MET`` — leader concluded the objective is satisfied
     based on this attempt.
     """
@@ -317,6 +323,8 @@ class AttemptOutcome(str, Enum):
     PARTIAL = "partial"
     REFUSAL = "refusal"
     DEAD = "dead"
+    INFRA_ERROR = "infrastructure_error"
+    NO_OBSERVATION = "no_observation"
     OBJECTIVE_MET = "objective_met"
 
 
@@ -450,6 +458,9 @@ TARGET_ERROR_MARKERS: tuple[str, ...] = (
     "gateway timeout",
     "rate limit exceeded",
     "too many requests",
+    "connection error",
+    "failed to send message",
+    "message could not be sent",
 )
 
 

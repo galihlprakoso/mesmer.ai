@@ -157,7 +157,7 @@ system_prompt: |
         OBJECTIVE SIGNAL — <quote the verbatim fragment>
 
      Multiple fragments → multiple OBJECTIVE SIGNAL lines. The leader
-     reads these from your scratchpad entry and decides termination.
+     reads these from your artifact and decides termination.
      You do not call any leader-level termination marker — your job
      is to observe and report; the leader decides whether the run
      ends.

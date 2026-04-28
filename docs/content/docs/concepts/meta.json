@@ -5,7 +5,7 @@
     "belief-graph",
     "frontier-and-utility",
     "taper-tiers",
-    "scratchpad",
+    "artifacts",
     "bench-trace"
   ]
 }

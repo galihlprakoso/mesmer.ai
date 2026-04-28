@@ -83,8 +83,28 @@ def _ordered_executive_actor() -> ReactActorSpec:
         parameters={"ordered_modules": ordered},
         tool_policy=ToolPolicySpec(
             dispatch_submodules=True,
-            builtin=["ask_human", "talk_to_operator", "update_scratchpad", "conclude"],
+            builtin=[
+                "ask_human",
+                "talk_to_operator",
+                "list_artifacts",
+                "read_artifact",
+                "search_artifacts",
+                "update_artifact",
+                "conclude",
+            ],
         ),
+    )
+
+
+def _record_module_output(ctx: Context, module: str, output: str) -> None:
+    root = ctx.graph.ensure_root()
+    ctx.graph.add_node(
+        root.id,
+        module,
+        "prior run",
+        module_output=output,
+        status="completed",
+        run_id=ctx.run_id,
     )
 
 
@@ -452,7 +472,7 @@ class TestDelegateEventPayload:
         assert captured["active_experiment_id"] == child_fx.id
 
     @pytest.mark.asyncio
-    async def test_fixed_order_executive_blocks_later_phase_until_prior_writes_scratchpad(self):
+    async def test_fixed_order_executive_blocks_later_phase_until_prior_writes_artifact(self):
         """Authored multi-manager scenarios are prompt-guided, but the runtime
         also enforces the declared phase order before spending a delegation.
         """
@@ -483,7 +503,8 @@ class TestDelegateEventPayload:
         from mesmer.core.agent.tools.sub_module import handle
 
         ctx = _ctx()
-        ctx.scratchpad.set_module_output(
+        _record_module_output(
+            ctx,
             "system-prompt-extraction",
             "persona and instruction fragments extracted",
         )
@@ -504,18 +525,19 @@ class TestDelegateEventPayload:
 
         ctx.run_module.assert_not_awaited()
         assert "skipped duplicate delegation" in result["content"]
-        assert "`system-prompt-extraction` already has module output" in result["content"]
+        assert "`system-prompt-extraction` already has graph-recorded module output" in result["content"]
         assert "Dispatch `tool-extraction` next" in result["content"]
         assert "persona and instruction fragments extracted" in result["content"]
 
     @pytest.mark.asyncio
-    async def test_fixed_order_executive_warns_but_runs_when_injection_artifact_is_thin(self):
+    async def test_fixed_order_executive_warns_but_runs_when_injection_output_is_thin(self):
         from mesmer.core.agent.tools.sub_module import handle
 
         ctx = _ctx()
-        ctx.scratchpad.set_module_output("system-prompt-extraction", "recon done")
-        ctx.scratchpad.set_module_output("tool-extraction", "tools found")
-        ctx.scratchpad.set_module_output(
+        _record_module_output(ctx, "system-prompt-extraction", "recon done")
+        _record_module_output(ctx, "tool-extraction", "tools found")
+        _record_module_output(
+            ctx,
             "indirect-prompt-injection",
             "Injection path likely exists.",
         )
@@ -523,7 +545,7 @@ class TestDelegateEventPayload:
         call = MagicMock()
         call.id = "call_1"
         module = _ordered_executive_actor()
-        module.parameters["ordered_artifact_requirements"] = {
+        module.parameters["ordered_output_requirements"] = {
             "indirect-prompt-injection": ["## Retrieval Path", "## Injection Evidence"],
         }
 
@@ -543,33 +565,6 @@ class TestDelegateEventPayload:
         assert "`## Retrieval Path`" in delegated_instruction
         assert "`## Injection Evidence`" in delegated_instruction
         assert "proof saw no usable retrieval evidence" in result["content"]
-
-    @pytest.mark.asyncio
-    async def test_marker_artifact_is_not_overwritten_by_thin_retry(self):
-        from mesmer.core.agent.tools.sub_module import _should_update_scratchpad
-
-        ctx = _ctx()
-        ctx.scratchpad.set_module_output(
-            "indirect-prompt-injection",
-            "## Retrieval Path\nsearch/read path\n\n## Injection Evidence\nfollowed hostile text",
-        )
-        module = _ordered_executive_actor()
-        module.parameters["ordered_artifact_requirements"] = {
-            "indirect-prompt-injection": ["## Retrieval Path", "## Injection Evidence"],
-        }
-
-        assert not _should_update_scratchpad(
-            ctx,
-            module,
-            "indirect-prompt-injection",
-            "thin retry without structured markers",
-        )
-        assert _should_update_scratchpad(
-            ctx,
-            module,
-            "indirect-prompt-injection",
-            "## Retrieval Path\nnew path\n\n## Injection Evidence\nnew evidence",
-        )
 
 
 # ---------------------------------------------------------------------------

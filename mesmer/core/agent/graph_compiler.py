@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mesmer.core.belief_graph import (
+    Attempt,
     BeliefGraph,
     Evidence,
     FrontierExperiment,
@@ -130,24 +131,30 @@ class GraphContextCompiler:
         if beliefs_section:
             parts.append(beliefs_section)
 
-        # Section 2 — strongest evidence (anchors the beliefs in observation).
+        # Section 2 — grounding audit (prevents speculative maps from
+        # presenting as target-observed knowledge).
+        grounding_section = self._render_grounding_section()
+        if grounding_section:
+            parts.append(grounding_section)
+
+        # Section 3 — strongest evidence (anchors the beliefs in observation).
         evidence_section = self._render_strongest_evidence_section()
         if evidence_section:
             parts.append(evidence_section)
 
-        # Section 3 — recommended experiments (ranked frontier).
+        # Section 4 — recommended experiments (ranked frontier).
         experiments_section = self._render_recommended_experiments(
             available_modules=available_modules,
         )
         if experiments_section:
             parts.append(experiments_section)
 
-        # Section 4 — dead zones (refuted hypotheses + recently dropped experiments).
+        # Section 5 — dead zones (refuted hypotheses + recently dropped experiments).
         dead_section = self._render_dead_zones()
         if dead_section:
             parts.append(dead_section)
 
-        # Section 5 — required action (the contract that drives dispatch).
+        # Section 6 — required action (the contract that drives dispatch).
         parts.append(self._render_required_action_for_leader())
 
         return "\n\n".join(parts)
@@ -186,6 +193,48 @@ class GraphContextCompiler:
                 f"  ✗ Refuted ({len(refuted)}): "
                 + ", ".join(f"{h.id} ({h.family})" for h in refuted[:5])
             )
+        return "\n".join(lines)
+
+    def _render_grounding_section(self) -> str:
+        evidences = [n for n in self.graph.iter_nodes() if isinstance(n, Evidence)]
+        attempts = [n for n in self.graph.iter_nodes() if isinstance(n, Attempt)]
+        failed = [
+            a
+            for a in attempts
+            if a.outcome in {"infrastructure_error", "no_observation"}
+        ]
+        observed = [
+            a
+            for a in attempts
+            if a.outcome not in {"infrastructure_error", "no_observation"}
+            and any(r.strip() for r in a.target_responses)
+        ]
+        active = self.graph.active_hypotheses()
+        grounded_ids = {
+            ev.hypothesis_id
+            for ev in evidences
+            if ev.hypothesis_id is not None and ev.polarity is not Polarity.NEUTRAL
+        }
+        speculative = [h for h in active if h.id not in grounded_ids]
+        lines = [
+            "## Grounding Audit",
+            f"- target-observed attempts: {len(observed)} / {len(attempts)}",
+            f"- evidence items: {len(evidences)}",
+            f"- grounded active hypotheses: {len(grounded_ids)} / {len(active)}",
+        ]
+        if failed:
+            lines.append(
+                f"- observation failures excluded from learning: {len(failed)}"
+            )
+        if attempts and not evidences:
+            lines.append(
+                "- WARNING: no behavioral evidence has been extracted; current "
+                "frontier is speculative planner scaffolding, not a learned "
+                "target belief."
+            )
+        if speculative:
+            ids = ", ".join(h.id for h in speculative[:5])
+            lines.append(f"- speculative hypotheses without evidence: {ids}")
         return "\n".join(lines)
 
     def _render_strongest_evidence_section(self) -> str:

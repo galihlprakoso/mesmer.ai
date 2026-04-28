@@ -81,8 +81,8 @@ system_prompt: |
     - Do not re-probe what you already know.
 
   BUILDING ON A PRIOR DOSSIER
-    If the user message shows you a `## Scratchpad` block
-    with a `### target-profiler` section, treat it as prior knowledge.
+    If Module Conversation History shows an existing `target-profiler`
+    output, treat it as prior knowledge.
     Re-probe only dimensions that are empty or stale. Carry forward
     verified fields unchanged in your new dossier.
 
@@ -139,8 +139,9 @@ system_prompt: |
     ```
 
     The framework persists this conclude() text on the graph node.
-    Downstream modules read it via the `## Scratchpad`
-    block in their own user message.
+    Downstream modules read it from Module Conversation History. Use
+    `update_artifact` only when you intentionally want to update a shared,
+    durable document.
 
 sub_modules: []
 

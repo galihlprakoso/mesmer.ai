@@ -77,7 +77,7 @@ class ExecutiveSpec:
     system_prompt: str
     ordered_modules: list[str]
     suppress_belief_context: bool = False
-    ordered_artifact_requirements: dict = field(default_factory=dict)
+    ordered_output_requirements: dict = field(default_factory=dict)
 
     def as_actor(self) -> ReactActorSpec:
         return ReactActorSpec(
@@ -90,7 +90,7 @@ class ExecutiveSpec:
             parameters={
                 "suppress_belief_context": self.suppress_belief_context,
                 "ordered_modules": list(self.ordered_modules),
-                "ordered_artifact_requirements": self.ordered_artifact_requirements,
+                "ordered_output_requirements": self.ordered_output_requirements,
             },
             judge_rubric="",
             reset_target=False,
@@ -100,7 +100,10 @@ class ExecutiveSpec:
                 builtin=[
                     "ask_human",
                     "talk_to_operator",
-                    "update_scratchpad",
+                    "list_artifacts",
+                    "read_artifact",
+                    "search_artifacts",
+                    "update_artifact",
                     "conclude",
                 ],
             ),

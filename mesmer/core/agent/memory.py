@@ -8,11 +8,7 @@ Storage layout:
     │       │                    # AND canonical source of module outputs —
     │       │                    # every AttackNode carries module_output)
     │       ├── profile.md       # optional free-form human notes
-    │       ├── scratchpad.md    # shared markdown whiteboard —
-    │       │                    # seeded into ctx.scratchpad.content
-    │       │                    # at run start; agents can rewrite or patch it
-    │       │                    # via the update_scratchpad tool. Migrated
-    │       │                    # from the old plan.md on first init.
+    │       ├── artifacts/       # durable Markdown artifact documents
     │       ├── chat.jsonl       # append-only operator <> leader chat log
     │       ├── conversation.json  # CONTINUOUS-mode rolling transcript
     │       └── runs/
@@ -31,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mesmer.core.agent.context import Turn
+from mesmer.core.artifacts import ArtifactStore
 from mesmer.core.belief_graph import BeliefGraph
 from mesmer.core.constants import TurnKind
 from mesmer.core.graph import AttackGraph, hash_target
@@ -81,22 +78,6 @@ class TargetMemory:
             model=target_config.model,
         )
         self.base_dir = MESMER_HOME / "targets" / self.target_hash
-        self._migrate_legacy_plan_to_scratchpad()
-
-    def _migrate_legacy_plan_to_scratchpad(self) -> None:
-        """One-shot rename of the old `plan.md` to `scratchpad.md`.
-
-        The persistent doc was renamed when we collapsed plan / hints / ideas
-        into a single leader-scratchpad concept. Existing targets keep their
-        notes — no special migration tooling needed beyond this rename.
-        """
-        legacy = self.base_dir / "plan.md"
-        new = self.base_dir / "scratchpad.md"
-        if legacy.exists() and not new.exists():
-            try:
-                legacy.rename(new)
-            except OSError:
-                pass  # leave both in place; next save_scratchpad cleans up
 
     @property
     def graph_path(self) -> Path:
@@ -107,14 +88,9 @@ class TargetMemory:
         return self.base_dir / "profile.md"
 
     @property
-    def scratchpad_path(self) -> Path:
-        """Persisted shared scratchpad whiteboard.
-
-        Loaded into ``ctx.scratchpad.content`` at run start; rewritten by
-        ``update_scratchpad`` and by the operator via the web UI's
-        leader-chat.
-        """
-        return self.base_dir / "scratchpad.md"
+    def artifacts_dir(self) -> Path:
+        """Directory of durable Markdown artifact documents."""
+        return self.base_dir / "artifacts"
 
     @property
     def chat_path(self) -> Path:
@@ -228,20 +204,12 @@ class TargetMemory:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.profile_path, profile)
 
-    def load_scratchpad(self) -> str | None:
-        """Load scratchpad.md for this target, if any."""
-        if self.scratchpad_path.exists():
-            return self.scratchpad_path.read_text()
-        return None
+    def load_artifacts(self) -> ArtifactStore:
+        return ArtifactStore.from_files(self.artifacts_dir)
 
-    def save_scratchpad(self, content: str) -> None:
-        """Save scratchpad.md. Pass empty string to clear."""
+    def save_artifacts(self, artifacts: ArtifactStore) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.scratchpad_path.write_text(content)
-
-    def delete_scratchpad(self) -> None:
-        if self.scratchpad_path.exists():
-            self.scratchpad_path.unlink()
+        artifacts.to_files(self.artifacts_dir)
 
     # --- Chat log (operator <> leader) -----------------------------------
 

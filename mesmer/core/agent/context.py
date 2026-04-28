@@ -294,7 +294,7 @@ class Context:
         self._last_key_used: str = ""
         self.human_broker = human_broker
         # TargetMemory handle — bound on the top-level context only, propagated
-        # via child() so update_scratchpad can persist without re-deriving the
+        # via child() so artifact tools can persist without re-deriving the
         # target hash. ``None`` for tests / direct invocations that don't go
         # through execute_run.
         self.target_memory = target_memory
@@ -388,15 +388,12 @@ class Context:
         self.objective_met: bool = False
         self.objective_met_fragment: str = ""
 
-        # Shared whiteboard plus latest module-output cache. The whiteboard is
-        # rendered into prompts; the module-output cache supports ordered phase
-        # gates and handoff checks without cluttering the whiteboard.
-        #
-        # Late-imported to keep core/context-layer import order legible:
-        # scratchpad.py lives at core/ top level, context.py sits mid-way.
-        from mesmer.core.scratchpad import Scratchpad as _Scratchpad
+        # Durable Markdown artifacts. These are the run's materialized
+        # knowledge state; graph nodes remain the raw execution audit.
+        from mesmer.core.artifacts import ArtifactStore as _ArtifactStore
 
-        self.scratchpad: _Scratchpad = _Scratchpad()
+        self.artifacts: _ArtifactStore = _ArtifactStore()
+        self.artifact_specs = []
 
     def record_agent_trace(
         self,
@@ -733,10 +730,10 @@ class Context:
         # completion/delegate/judge events land in the same stream as the
         # leader's. Otherwise only the leader's iteration would be traced.
         child.log = self.log
-        # Scratchpad is run-scoped — SAME reference so whiteboard edits and
-        # latest module-output writes are immediately visible when control
-        # returns to the parent.
-        child.scratchpad = self.scratchpad
+        # Artifacts are run-scoped — SAME reference so updates are immediately
+        # visible when control returns to the parent.
+        child.artifacts = self.artifacts
+        child.artifact_specs = self.artifact_specs
         return child
 
     async def ask_human(

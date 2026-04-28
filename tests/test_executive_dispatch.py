@@ -9,9 +9,8 @@ make that work:
   raises a migration-pointing error.
 - A registry-loaded manager module adapts to ``ActorRole.MODULE``.
 - ``build_tool_list`` swaps the toolset based on actor role: the
-  executive gets ``ask_human`` / ``talk_to_operator`` /
-  ``update_scratchpad`` (and NO ``send_message``); managers get
-  ``send_message`` (and NONE of the operator tools).
+  executive gets operator and artifact tools (and NO ``send_message``);
+  managers get ``send_message`` (and NONE of the operator tools).
 """
 
 from __future__ import annotations
@@ -137,7 +136,10 @@ class TestBuildToolListGating:
                 builtin=[
                     ToolName.ASK_HUMAN.value,
                     ToolName.TALK_TO_OPERATOR.value,
-                    ToolName.UPDATE_SCRATCHPAD.value,
+                    ToolName.LIST_ARTIFACTS.value,
+                    ToolName.READ_ARTIFACT.value,
+                    ToolName.SEARCH_ARTIFACTS.value,
+                    ToolName.UPDATE_ARTIFACT.value,
                     ToolName.CONCLUDE.value,
                 ],
             ),
@@ -164,7 +166,10 @@ class TestBuildToolListGating:
         }
         assert ToolName.ASK_HUMAN.value in names
         assert ToolName.TALK_TO_OPERATOR.value in names
-        assert ToolName.UPDATE_SCRATCHPAD.value in names
+        assert ToolName.LIST_ARTIFACTS.value in names
+        assert ToolName.READ_ARTIFACT.value in names
+        assert ToolName.SEARCH_ARTIFACTS.value in names
+        assert ToolName.UPDATE_ARTIFACT.value in names
         assert ToolName.CONCLUDE.value in names
         assert ToolName.SEND_MESSAGE.value not in names
         policy = resolve_tool_policy(self._executive())
@@ -172,7 +177,10 @@ class TestBuildToolListGating:
         assert policy.builtin == [
             ToolName.ASK_HUMAN.value,
             ToolName.TALK_TO_OPERATOR.value,
-            ToolName.UPDATE_SCRATCHPAD.value,
+            ToolName.LIST_ARTIFACTS.value,
+            ToolName.READ_ARTIFACT.value,
+            ToolName.SEARCH_ARTIFACTS.value,
+            ToolName.UPDATE_ARTIFACT.value,
             ToolName.CONCLUDE.value,
         ]
 
@@ -185,7 +193,7 @@ class TestBuildToolListGating:
         assert ToolName.CONCLUDE.value in names
         assert ToolName.ASK_HUMAN.value not in names
         assert ToolName.TALK_TO_OPERATOR.value not in names
-        assert ToolName.UPDATE_SCRATCHPAD.value not in names
+        assert ToolName.UPDATE_ARTIFACT.value not in names
         policy = resolve_tool_policy(self._manager())
         assert policy.dispatch_submodules is True
         assert policy.builtin == [

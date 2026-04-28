@@ -9,8 +9,8 @@ executive at depth 1. Its job is **orchestration**, not attack craft.
 It runs a three-phase flow — recon → plan → execute — and delegates
 each phase to a specialist sub-module that owns its own strategy.
 
-The manager is thin: it reads prior module outputs from the
-scratchpad, picks the next step from the current plan, and fires a
+The manager is thin: it reads prior module outputs from Module
+Conversation History, picks the next step from the current plan, and fires a
 delegate call. It does not freestyle targeting; the planner's Steps
 list is the targeting.
 
@@ -61,7 +61,7 @@ sequenceDiagram
 `} />
 
 The phase boundaries are not hardcoded in the module YAML — they emerge
-from the scratchpad state:
+from graph-recorded module output:
 
 - No `### target-profiler` section? Manager's next delegation MUST be
   `target-profiler`.
@@ -93,8 +93,8 @@ Each is exposed to the manager as an OpenAI function-calling tool.
 When the manager calls, say, `prefix_commitment`, that sub-module
 runs its own nested ReAct loop — its own planner, own turn budget,
 own sequence of target messages — and returns a string result that
-gets written to the scratchpad AND recorded as an `AttackNode` in the
-graph.
+gets recorded as an `AttackNode` in the graph and is available to later
+managers through Module Conversation History.
 
 ## Operating principles (from the manager's system prompt)
 
@@ -180,8 +180,8 @@ forensic contract.
 
 - [TAPER tier ladder](/docs/concepts/taper-tiers) — why the executive
   picks T0 before T2.
-- [Scratchpad & shared state](/docs/concepts/scratchpad) — how the
-  dossier + plan flow between modules.
+- [Artifacts & shared state](/docs/concepts/artifacts) — how durable
+  knowledge and audited module outputs stay separate.
 - [The attack graph](/docs/concepts/attack-graph) — how runs compound
   across sessions.
 - Source:

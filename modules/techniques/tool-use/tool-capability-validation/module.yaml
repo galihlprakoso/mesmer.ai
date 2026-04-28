@@ -20,7 +20,7 @@ system_prompt: |
   previously extracted capability/tool list and test whether each item is
   a real workflow, a generic self-description, or a guarded side effect.
 
-  Use prior recon from the Scratchpad, Module Conversation History, and
+  Use prior recon from artifacts, Module Conversation History, and
   Learned Experience. Prefer any catalog that lists action names,
   parameter names, parameter types, purposes, or side effects.
 

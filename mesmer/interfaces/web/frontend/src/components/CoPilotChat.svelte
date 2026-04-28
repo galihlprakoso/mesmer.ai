@@ -3,10 +3,9 @@
   import {
     chatMessages, selectedScenario,
     isRunning, pendingQuestion,
-    chatHistory, scratchpadDoc, scratchpadExists,
-    scratchpadDrawerOpen,
+    chatHistory,
   } from '../lib/stores.js'
-  import { fetchChat, fetchScratchpad, sendLeaderChat } from '../lib/scratchpad-client.js'
+  import { fetchChat, sendLeaderChat } from '../lib/chat-client.js'
   import ChatMessage from './ChatMessage.svelte'
   import HumanQuestion from './HumanQuestion.svelte'
 
@@ -20,24 +19,17 @@
 
   $: inputEnabled = !!$selectedScenario
 
-  // Warm-load chat + scratchpad when the scenario changes.
+  // Warm-load chat when the scenario changes.
   async function loadForScenario() {
     if (!$selectedScenario) {
       chatHistory.set([])
-      scratchpadDoc.set('')
-      scratchpadExists.set(false)
       return
     }
     try {
-      const [chat, sp] = await Promise.all([
-        fetchChat($selectedScenario, 20),
-        fetchScratchpad($selectedScenario),
-      ])
+      const chat = await fetchChat($selectedScenario, 20)
       chatHistory.set(chat.items || [])
-      scratchpadDoc.set(sp.content || '')
-      scratchpadExists.set(!!sp.exists)
     } catch (e) {
-      console.error('Failed to warm-load chat/scratchpad:', e)
+      console.error('Failed to warm-load chat:', e)
     }
   }
   $: if ($selectedScenario) { loadForScenario() }
@@ -85,10 +77,8 @@
           role: 'assistant', content: res.reply, timestamp: Date.now() / 1000,
         }])
         toolTrace = res.tool_trace || []
-        if (res.updated_scratchpad !== undefined && res.updated_scratchpad !== null) {
-          scratchpadDoc.set(res.updated_scratchpad)
-          scratchpadExists.set(true)
-          showFeedback('ok', 'Scratchpad updated')
+        if (res.updated_artifact) {
+          showFeedback('ok', `Artifact updated: ${res.updated_artifact.artifact_id}`)
         }
       }
     } catch (e) {
@@ -112,16 +102,6 @@
       <span class="ico">💬</span>
       <span>Talk to the leader</span>
     </div>
-    <button
-      class="scratchpad-btn"
-      class:has-content={$scratchpadExists}
-      on:click={() => $scratchpadDrawerOpen = true}
-      title="Open scratchpad"
-      aria-label="Open scratchpad"
-    >
-      <span class="ico">📝</span>
-      <span class="lbl">Scratchpad</span>
-    </button>
   </div>
 
   <div class="messages" bind:this={scrollEl} on:scroll={onScroll}>
@@ -131,7 +111,7 @@
           Select a scenario to begin.
         {:else}
           No messages yet. Ask the leader anything — it can search the graph,
-          past runs, leaked info, and rewrite the scratchpad.
+          past runs, leaked info, and update artifacts.
         {/if}
       </div>
     {:else}
@@ -215,26 +195,6 @@
     letter-spacing: 0.06em;
   }
   .title .ico { font-size: 0.85rem; }
-
-  .scratchpad-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-muted);
-    font-size: 0.72rem;
-    font-weight: 600;
-    cursor: pointer;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    transition: color 100ms, border-color 100ms;
-  }
-  .scratchpad-btn:hover { color: var(--accent); border-color: var(--accent); }
-  .scratchpad-btn.has-content { color: var(--text); }
-  .scratchpad-btn .ico { font-size: 0.85rem; }
 
   .messages {
     flex: 1;

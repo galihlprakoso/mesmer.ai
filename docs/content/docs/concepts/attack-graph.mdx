@@ -109,10 +109,8 @@ Every node has a `source` field recording who produced it:
 ```
 ~/.mesmer/targets/{hash}/
 ├── graph.json          # full node tree — the authoritative record
-├── scratchpad.md       # the executive's persistent working notes —
-│                       # written by the update_scratchpad tool AND by
-│                       # the operator chat; seeded into the executive's
-│                       # scratchpad slot at run start
+├── artifacts/          # durable Markdown artifacts written by
+│                       # update_artifact and inspected by artifact tools
 ├── chat.jsonl          # append-only operator ↔ executive chat log;
 │                       # one JSON row per message
 ├── profile.md          # optional free-form human notes (hand-edited)
@@ -126,15 +124,10 @@ Different model strings hash differently, so upgrading your target
 branches into a fresh graph rather than corrupting old state.
 
 Pass `--fresh` to any `mesmer run` invocation to bypass loading the
-existing graph and to clear the CONTINUOUS conversation. **`--fresh`
-does NOT delete `scratchpad.md`** — the executive's curated notes are
-treated as durable human-curated state. Delete it manually if you want
-a truly clean run. Use `mesmer graph reset <scenario>` to delete the
-graph file entirely (asks for confirmation first).
-
-The legacy `plan.md` file is gone; `TargetMemory.__init__` performs a
-one-shot rename of `plan.md` → `scratchpad.md` on first init of an
-existing target so old persistence directories migrate automatically.
+existing graph and to clear the CONTINUOUS conversation. Durable
+artifacts are loaded separately as curated target knowledge. Use
+`mesmer graph reset <scenario>` to delete the graph file entirely
+(asks for confirmation first).
 
 Cross-target technique stats live separately at
 `~/.mesmer/global/techniques.json` (`mesmer stats` surfaces these).

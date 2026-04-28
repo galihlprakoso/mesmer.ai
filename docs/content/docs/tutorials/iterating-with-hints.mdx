@@ -39,7 +39,7 @@ uv run mesmer debrief scenarios/extract-system-prompt.yaml
 ```
 
 Use this to spot patterns the planner missed, then capture the useful
-parts as hints or write them into the shared scratchpad.
+parts as hints or write them into a durable artifact.
 
 ## A two-run iterate loop
 
@@ -59,4 +59,4 @@ uv run mesmer run scenarios/extract-system-prompt.yaml --verbose
 ```
 
 Use `--fresh` when you want to ignore prior graph and conversation state.
-The scratchpad is intentionally not deleted by `--fresh`.
+Durable artifacts remain available as curated target knowledge.

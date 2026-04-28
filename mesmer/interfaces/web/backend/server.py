@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from mesmer.core.agent.context import Context, HumanQuestionBroker
 from mesmer.core.agent.parsing import parse_llm_json
+from mesmer.core.artifacts import ArtifactError, ArtifactStore, artifact_title, validate_artifact_id
 from mesmer.core.constants import LogEvent, ScenarioMode
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.memory import TargetMemory, GlobalMemory
@@ -58,11 +59,6 @@ class RunRequest(BaseModel):
 
 class DebriefRequest(BaseModel):
     scenario_path: str
-
-
-class SaveScratchpadRequest(BaseModel):
-    scenario_path: str
-    content: str
 
 
 class LeaderChatRequest(BaseModel):
@@ -246,6 +242,22 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         """Called by the broker when the agent asks the human something."""
         bus.emit_status("human_question", **question)
 
+    def _load_artifacts_for_target(target_hash: str) -> ArtifactStore:
+        live_hash = (
+            current_ctx.target_memory.target_hash
+            if current_ctx is not None and current_ctx.target_memory is not None
+            else None
+        )
+        if current_ctx is not None and live_hash == target_hash:
+            return current_ctx.artifacts
+        artifacts_dir = Path.home() / ".mesmer" / "targets" / target_hash / "artifacts"
+        return ArtifactStore.from_files(artifacts_dir)
+
+    def _legacy_module_artifact_ids() -> set[str]:
+        registry = Registry()
+        registry.auto_discover(BUILTIN_MODULES)
+        return set(registry.modules)
+
     # ----- Static files (Svelte SPA) -----
 
     @app.get("/")
@@ -318,6 +330,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                     "max_turns": s.objective.max_turns,
                 },
                 "modules": list(s.modules),
+                "artifacts": [artifact.to_dict() for artifact in s.artifacts],
                 "leader_prompt": s.leader_prompt,
                 "agent": {
                     "model": s.agent.model,
@@ -616,6 +629,49 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
         except Exception as e:  # noqa: BLE001 — surface load errors to UI
             return JSONResponse({"error": str(e)}, status_code=400)
 
+    @app.get("/api/targets/{target_hash}/artifacts")
+    async def get_target_artifacts(target_hash: str):
+        """List durable Markdown artifacts for a target."""
+        artifacts = _load_artifacts_for_target(target_hash)
+        legacy_module_ids = _legacy_module_artifact_ids()
+        return {
+            "items": [
+                summary.to_dict()
+                for summary in artifacts.summaries()
+                if summary.id not in legacy_module_ids
+            ]
+        }
+
+    @app.get("/api/targets/{target_hash}/artifacts/search")
+    async def search_target_artifacts(target_hash: str, query: str = "", limit: int = 20):
+        """Search durable Markdown artifacts for a target."""
+        artifacts = _load_artifacts_for_target(target_hash)
+        legacy_module_ids = _legacy_module_artifact_ids()
+        return {
+            "items": [
+                hit.to_dict()
+                for hit in artifacts.search(query, limit=max(1, min(int(limit or 20), 50)))
+                if hit.artifact_id not in legacy_module_ids
+            ]
+        }
+
+    @app.get("/api/targets/{target_hash}/artifacts/{artifact_id}")
+    async def get_target_artifact(target_hash: str, artifact_id: str):
+        """Read one durable Markdown artifact for a target."""
+        try:
+            artifact_id = validate_artifact_id(artifact_id)
+        except ArtifactError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        artifacts = _load_artifacts_for_target(target_hash)
+        content = artifacts.get(artifact_id)
+        if not content.strip():
+            return JSONResponse({"error": f"Artifact not found: {artifact_id}"}, status_code=404)
+        return {
+            "artifact_id": artifact_id,
+            "title": artifact_title(artifact_id),
+            "content": content,
+        }
+
     # ----- API: Stats -----
 
     @app.get("/api/stats")
@@ -724,26 +780,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             return {"status": "stopping"}
         return {"status": "no_run_active"}
 
-    # ----- API: Scratchpad + Chat (replaces the old /api/plan + /api/hint) -----
-
-    @app.get("/api/scratchpad")
-    async def get_scratchpad(scenario_path: str):
-        """Return the persistent scratchpad.md for this scenario's target."""
-        scenario = load_scenario(scenario_path)
-        memory = TargetMemory(scenario.target)
-        content = memory.load_scratchpad()
-        return {"content": content or "", "exists": content is not None}
-
-    @app.put("/api/scratchpad")
-    async def save_scratchpad_endpoint(req: SaveScratchpadRequest):
-        """Manual edit of scratchpad.md (operator UI). Empty content deletes."""
-        scenario = load_scenario(req.scenario_path)
-        memory = TargetMemory(scenario.target)
-        if req.content.strip():
-            memory.save_scratchpad(req.content)
-        else:
-            memory.delete_scratchpad()
-        return {"status": "saved"}
+    # ----- API: Chat -----
 
     @app.get("/api/chat")
     async def get_chat(scenario_path: str, limit: int = 20):
@@ -788,7 +825,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
                 }
             )
             bus.log_fn(LogEvent.OPERATOR_MESSAGE.value, message)
-            return {"queued": True, "reply": None, "tool_trace": [], "updated_scratchpad": None}
+            return {"queued": True, "reply": None, "tool_trace": [], "updated_artifact": None}
 
         def _broadcast_tool_call(name: str, args: dict):
             bus.log_fn(
@@ -812,7 +849,7 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
             "queued": False,
             "reply": result.reply,
             "tool_trace": result.tool_trace,
-            "updated_scratchpad": result.updated_scratchpad,
+            "updated_artifact": result.updated_artifact,
         }
 
     # ----- API: Debrief -----

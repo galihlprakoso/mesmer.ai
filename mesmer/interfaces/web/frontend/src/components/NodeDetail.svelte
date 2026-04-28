@@ -81,39 +81,8 @@
     `node_id=${node.id || ''}`,
   ].join('\n') : ''
 
-  function plainText(markdown) {
-    return (markdown || '')
-      .replace(/```[\s\S]*?```/g, ' ')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/^#{1,6}\s+/gm, '')
-      .replace(/[*_~>#-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-  }
-
-  function firstLine(text) {
-    return (text || '').split('\n').map(s => s.trim()).find(Boolean) || ''
-  }
-
-  function truncate(text, max = 180) {
-    const clean = plainText(text)
-    if (clean.length <= max) return clean
-    return clean.slice(0, max - 1).trimEnd() + '…'
-  }
-
-  function outcomeTitle(n) {
-    if (!n) return ''
-    if (isSyntheticManager(n)) return 'Manager is running'
-    const heading = firstLine(n.module_output || '')
-    if (heading) return truncate(heading, 120)
-    if (n.leaked_info) return truncate(n.leaked_info, 120)
-    return truncate(n.approach, 120) || 'Attempt recorded'
-  }
-
-  function isArtifactOutput(n) {
+  function isStandaloneModuleOutput(n) {
     if (!n || n._isLeaderOrchestrator) return false
-    if (n.status === 'completed') return true
     const hasOutput = !!(n.module_output || '').trim()
     const hasMessages = (n.messages_sent?.length ?? 0) || (n.target_responses?.length ?? 0)
     return hasOutput && !hasMessages && !n.leaked_info && !n.reflection
@@ -122,19 +91,18 @@
   function displayStatus(n) {
     if (!n?.status) return ''
     if (isSyntheticManager(n)) return 'running'
-    if (isArtifactOutput(n)) return 'output'
     return n.status
   }
 
   function scoreLabel(n) {
     if (!n || n._isLeaderOrchestrator || isSyntheticManager(n)) return ''
-    if (isArtifactOutput(n)) return ''
+    if (isStandaloneModuleOutput(n)) return ''
     return Number.isFinite(n.score) ? `Score ${n.score}/10` : ''
   }
 
   function outputLabel(n) {
     if (n?.module === 'attack-planner') return 'Plan'
-    return 'Output'
+    return 'Report'
   }
 
   function traceLabel(event) {
@@ -235,62 +203,38 @@
 {#if node}
   <aside class="right-sidebar">
     <div class="header">
-      {#if node._isLeaderOrchestrator}
-        <h2 class="title leader">{node.module || 'leader'} <span class="leader-tag">· leader</span></h2>
-      {:else}
-        <h2 class="title">{node.module || node.id}</h2>
-        {#if typeof node._seqNum === 'number'}
-          <span class="seq-pill">#{node._seqNum}</span>
+      <div class="identity">
+        {#if node._isLeaderOrchestrator}
+          <h2 class="title leader">{node.module || 'leader'} <span class="leader-tag">· leader</span></h2>
+        {:else}
+          <h2 class="title">{node.module || node.id}</h2>
         {/if}
-      {/if}
+        <div class="meta-row">
+          {#if typeof node._seqNum === 'number'}
+            <span class="seq-pill">#{node._seqNum}</span>
+          {/if}
+          {#if !node._isLeaderOrchestrator && node.status}
+            <span class="status-badge {displayStatus(node)}">{displayStatus(node)}</span>
+          {/if}
+          {#if scoreLabel(node)}
+            <span class="score-pill">{scoreLabel(node)}</span>
+          {/if}
+        </div>
+      </div>
       <button class="close-btn" on:click={close} aria-label="Close">&times;</button>
     </div>
 
-    <!-- Always-visible context: banners + status badge live above the
-         expandable detail sections
-         because they're frame-of-reference, not content. -->
-    <div class="banners">
-      {#if node._isLeaderOrchestrator}
+    {#if node._isLeaderOrchestrator}
+      <div class="banners">
         <div class="leader-banner" class:running={$isRunning}>
           <b>{$isRunning ? 'LEADER · RUNNING' : 'LEADER · IDLE'}</b>
           The orchestrator module that picks which sub-module to delegate to
           and decides when the objective is met.
         </div>
-      {/if}
-
-      {#if !node._isLeaderOrchestrator && node.status}
-        <div class="status-row">
-          <span class="status-badge {displayStatus(node)}">{displayStatus(node)}</span>
-          {#if scoreLabel(node)}
-            <span class="score-pill">{scoreLabel(node)}</span>
-          {/if}
-        </div>
-      {/if}
-      {#if debugRef}
-        <div class="debug-ref">
-          <div class="debug-line">
-            <span class="debug-key">Run</span>
-            <span class="debug-value" title={node.run_id || ''}>{node.run_id || 'none'}</span>
-            <button on:click={copyDebugRef} title="Copy scenario, target hash, run ID, and node ID">
-              Copy Debug Ref
-            </button>
-          </div>
-          <div class="debug-line">
-            <span class="debug-key">Node</span>
-            <span class="debug-value" title={node.id || ''}>{node.id || 'none'}</span>
-          </div>
-        </div>
-      {/if}
-    </div>
+      </div>
+    {/if}
 
     <div class="detail-content">
-      {#if !node._isLeaderOrchestrator}
-        <section class="summary-card">
-          <div class="summary-label">At a glance</div>
-          <div class="summary-title">{outcomeTitle(node)}</div>
-        </section>
-      {/if}
-
       {#if node._isLeaderOrchestrator}
         {#if node._scenarioObjective}
           <details class="detail-section" open>
@@ -300,206 +244,222 @@
         {/if}
       {/if}
 
-      {#if agentTrace.length}
-        <details class="detail-section" open>
-          <summary>Agent Trace</summary>
-          <div class="agent-trace">
-            {#each agentTrace as item}
-              <div class="trace-row {item.event}">
-                <div class="trace-head">
-                  <span class="trace-event">{traceLabel(item.event)}</span>
-                  {#if item.iteration}
-                    <span class="trace-meta">iter {item.iteration}</span>
-                  {/if}
-                  {#if item.actor}
-                    <span class="trace-meta">{item.actor}</span>
-                  {/if}
-                  {#if traceTime(item.timestamp)}
-                    <span class="trace-meta">{traceTime(item.timestamp)}</span>
-                  {/if}
-                </div>
-                {#if item.event === 'llm_call'}
-                  <div class="trace-summary">
-                    {#if traceModel(item)}<span>{traceModel(item)}</span>{/if}
-                    {#if traceElapsed(item)}<span>{traceElapsed(item)}</span>{/if}
-                    {#if traceUsage(item).total_tokens !== undefined}
-                      <span>{traceUsage(item).total_tokens} tok</span>
-                    {/if}
-                  </div>
-                  <div class="trace-subtitle">Request messages</div>
-                  {#each traceMessages(item) as message, i}
-                    <div class="trace-message {message.role || 'message'}">
-                      <div class="trace-message-head">
-                        <span>{message.role || 'message'}</span>
-                        <span>#{i + 1}</span>
-                      </div>
-                      <pre class="trace-prose">{messageContent(message)}</pre>
-                      <details class="trace-raw">
-                        <summary>Raw JSON</summary>
-                        <pre class="trace-detail">{rawJson(message)}</pre>
-                      </details>
-                    </div>
-                  {/each}
-                  {#if traceTools(item).length}
-                    <details class="trace-nested">
-                      <summary>Tools exposed · {traceTools(item).length}</summary>
-                      {#each traceTools(item) as tool}
-                        <details class="trace-tool">
-                          <summary>{toolName(tool)}</summary>
-                          {#if toolDescription(tool)}
-                            <div class="trace-tool-desc">{toolDescription(tool)}</div>
-                          {/if}
-                          {#if toolParameters(tool)}
-                            <details class="trace-raw">
-                              <summary>Parameters</summary>
-                              <pre class="trace-detail">{pretty(toolParameters(tool))}</pre>
-                            </details>
-                          {/if}
-                          <details class="trace-raw">
-                            <summary>Raw JSON</summary>
-                            <pre class="trace-detail">{rawJson(tool)}</pre>
-                          </details>
-                        </details>
-                      {/each}
-                    </details>
-                  {/if}
-                  <div class="trace-subtitle">Assistant response</div>
-                  {#if traceResponse(item).content}
-                    <div class="trace-message assistant">
-                      <div class="trace-message-head"><span>assistant</span></div>
-                      <pre class="trace-prose">{traceResponse(item).content}</pre>
-                    </div>
-                  {/if}
-                  {#if traceResponse(item).tool_calls?.length}
-                    {#each traceResponse(item).tool_calls as call}
-                      <div class="trace-call-card">
-                        <div class="trace-call-name">{call.function?.name || 'tool_call'}</div>
-                        <pre class="trace-prose">{callArgs(call)}</pre>
-                        <details class="trace-raw">
-                          <summary>Raw JSON</summary>
-                          <pre class="trace-detail">{rawJson(call)}</pre>
-                        </details>
-                      </div>
-                    {/each}
-                  {/if}
-                  {#if item.payload?.usage}
-                    <div class="trace-usage">
-                      <span>prompt {traceUsage(item).prompt_tokens ?? 0}</span>
-                      <span>completion {traceUsage(item).completion_tokens ?? 0}</span>
-                      <span>total {traceUsage(item).total_tokens ?? 0}</span>
-                    </div>
-                    <details class="trace-raw">
-                      <summary>Raw JSON</summary>
-                      <pre class="trace-detail">{rawJson(item.payload)}</pre>
-                    </details>
-                  {/if}
-                {:else if item.event === 'tool_call'}
-                  <div class="trace-call-name">{item.payload?.name || item.detail}</div>
-                  <div class="trace-subtitle">Arguments</div>
-                  <pre class="trace-prose">{pretty(item.payload?.args)}</pre>
-                  <div class="trace-subtitle">Result</div>
-                  <pre class="trace-prose">{pretty(item.payload?.result)}</pre>
-                  <details class="trace-raw">
-                    <summary>Raw JSON</summary>
-                    <pre class="trace-detail">{rawJson(item.payload)}</pre>
-                  </details>
-                {:else if tracePreview(item)}
-                  <pre class="trace-detail">{tracePreview(item)}</pre>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        </details>
-      {/if}
-
       {#if !node._isLeaderOrchestrator}
         {#if node.module_output}
-          <details class="detail-section" open>
+          <details class="detail-section primary-section" open>
             <summary>{outputLabel(node)}</summary>
             <!-- module_output is the manager's / sub-module's concluded
                  write-up. Render structured markdown, but keep raw HTML
                  disabled because this content is LLM-generated. -->
             <div class="md-render">{@html marked.parse(node.module_output || '')}</div>
           </details>
-        {/if}
-
-        {#if node.leaked_info || node.reflection}
-          <details class="detail-section">
-            <summary>Judge Review</summary>
-            {#if node.leaked_info}
-              <div class="field-block">
-                <span class="field-label">Extracted signal</span>
-                <div class="leaked">{node.leaked_info}</div>
-              </div>
-            {/if}
-            {#if node.reflection}
-              <div class="field-block">
-                <span class="field-label">Score rationale</span>
-                <pre>{node.reflection}</pre>
-              </div>
-            {/if}
+        {:else if node.leaked_info}
+          <details class="detail-section primary-section" open>
+            <summary>Judge Finding</summary>
+            <pre>{node.leaked_info}</pre>
           </details>
         {/if}
 
-        {#if node.approach || pairs.length}
-          <details class="detail-section">
-            <summary>Execution Trace</summary>
-            {#if node.approach}
-              <div class="field-block">
-                <span class="field-label">Instruction</span>
-                <pre>{node.approach}</pre>
-              </div>
-            {/if}
-            {#if pairs.length}
-              <div class="field-block">
-                <span class="field-label">Target exchange</span>
-                {#each pairs as p, i}
-                  {#if p.sent}
-                    <div class="msg me">
-                      <span class="lbl">attacker → target · turn {i + 1}</span>
-                      {p.sent}
-                    </div>
-                  {/if}
-                  {#if p.got}
-                    <div class="msg them">
-                      <span class="lbl">target → attacker</span>
-                      {p.got}
-                    </div>
-                  {/if}
-                {/each}
-              </div>
-            {/if}
+        {#if node.reflection}
+          <details class="detail-section secondary-section">
+            <summary>Assessment</summary>
+            <div class="field-block">
+              <span class="field-label">Score rationale</span>
+              <pre>{node.reflection}</pre>
+            </div>
+          </details>
+        {/if}
+
+        {#if pairs.length}
+          <details class="detail-section secondary-section" open={!node.module_output}>
+            <summary>Target Conversation</summary>
+            <div class="field-block">
+              {#each pairs as p, i}
+                {#if p.sent}
+                  <div class="msg me">
+                    <span class="lbl">attacker → target · turn {i + 1}</span>
+                    {p.sent}
+                  </div>
+                {/if}
+                {#if p.got}
+                  <div class="msg them">
+                    <span class="lbl">target → attacker</span>
+                    {p.got}
+                  </div>
+                {/if}
+              {/each}
+            </div>
           </details>
         {/if}
       {/if}
 
-      {#if moduleConfig}
-        <details class="detail-section">
-          <summary>Module Definition</summary>
-          <div class="config-tag">
-            {moduleConfig.name} · T{moduleConfig.tier ?? tierOf(moduleConfig.name)}
-          </div>
-          <details open>
-            <summary>description</summary>
-            <pre>{moduleConfig.description}</pre>
-          </details>
-          {#if moduleConfig.theory}
-            <details>
-              <summary>theory</summary>
-              <pre>{moduleConfig.theory}</pre>
-            </details>
-          {/if}
-          {#if moduleConfig.system_prompt}
-            <details>
-              <summary>system_prompt ({moduleConfig.system_prompt.length} chars)</summary>
-              <pre>{moduleConfig.system_prompt}</pre>
-            </details>
-          {/if}
-          {#if moduleConfig.sub_modules?.length}
-            <div class="sub-modules-row">
-              <span class="sub-modules-key">sub_modules</span>
-              <span class="sub-modules-val">{moduleConfig.sub_modules.join(', ')}</span>
+      {#if debugRef || agentTrace.length || node.approach || moduleConfig}
+        <details class="diagnostics">
+          <summary>Diagnostics</summary>
+          {#if debugRef}
+            <div class="debug-ref">
+              <div class="debug-line">
+                <span class="debug-key">Run</span>
+                <span class="debug-value" title={node.run_id || ''}>{node.run_id || 'none'}</span>
+                <button on:click={copyDebugRef} title="Copy scenario, target hash, run ID, and node ID">
+                  Copy
+                </button>
+              </div>
+              <div class="debug-line">
+                <span class="debug-key">Node</span>
+                <span class="debug-value" title={node.id || ''}>{node.id || 'none'}</span>
+              </div>
             </div>
+          {/if}
+
+          {#if node.approach}
+            <details class="detail-section">
+              <summary>Instruction</summary>
+              <pre>{node.approach}</pre>
+            </details>
+          {/if}
+
+          {#if agentTrace.length}
+            <details class="detail-section">
+              <summary>Agent Trace</summary>
+              <div class="agent-trace">
+                {#each agentTrace as item}
+                  <div class="trace-row {item.event}">
+                    <div class="trace-head">
+                      <span class="trace-event">{traceLabel(item.event)}</span>
+                      {#if item.iteration}
+                        <span class="trace-meta">iter {item.iteration}</span>
+                      {/if}
+                      {#if item.actor}
+                        <span class="trace-meta">{item.actor}</span>
+                      {/if}
+                      {#if traceTime(item.timestamp)}
+                        <span class="trace-meta">{traceTime(item.timestamp)}</span>
+                      {/if}
+                    </div>
+                    {#if item.event === 'llm_call'}
+                      <div class="trace-summary">
+                        {#if traceModel(item)}<span>{traceModel(item)}</span>{/if}
+                        {#if traceElapsed(item)}<span>{traceElapsed(item)}</span>{/if}
+                        {#if traceUsage(item).total_tokens !== undefined}
+                          <span>{traceUsage(item).total_tokens} tok</span>
+                        {/if}
+                      </div>
+                      <div class="trace-subtitle">Request messages</div>
+                      {#each traceMessages(item) as message, i}
+                        <div class="trace-message {message.role || 'message'}">
+                          <div class="trace-message-head">
+                            <span>{message.role || 'message'}</span>
+                            <span>#{i + 1}</span>
+                          </div>
+                          <pre class="trace-prose">{messageContent(message)}</pre>
+                          <details class="trace-raw">
+                            <summary>Raw JSON</summary>
+                            <pre class="trace-detail">{rawJson(message)}</pre>
+                          </details>
+                        </div>
+                      {/each}
+                      {#if traceTools(item).length}
+                        <details class="trace-nested">
+                          <summary>Tools exposed · {traceTools(item).length}</summary>
+                          {#each traceTools(item) as tool}
+                            <details class="trace-tool">
+                              <summary>{toolName(tool)}</summary>
+                              {#if toolDescription(tool)}
+                                <div class="trace-tool-desc">{toolDescription(tool)}</div>
+                              {/if}
+                              {#if toolParameters(tool)}
+                                <details class="trace-raw">
+                                  <summary>Parameters</summary>
+                                  <pre class="trace-detail">{pretty(toolParameters(tool))}</pre>
+                                </details>
+                              {/if}
+                              <details class="trace-raw">
+                                <summary>Raw JSON</summary>
+                                <pre class="trace-detail">{rawJson(tool)}</pre>
+                              </details>
+                            </details>
+                          {/each}
+                        </details>
+                      {/if}
+                      <div class="trace-subtitle">Assistant response</div>
+                      {#if traceResponse(item).content}
+                        <div class="trace-message assistant">
+                          <div class="trace-message-head"><span>assistant</span></div>
+                          <pre class="trace-prose">{traceResponse(item).content}</pre>
+                        </div>
+                      {/if}
+                      {#if traceResponse(item).tool_calls?.length}
+                        {#each traceResponse(item).tool_calls as call}
+                          <div class="trace-call-card">
+                            <div class="trace-call-name">{call.function?.name || 'tool_call'}</div>
+                            <pre class="trace-prose">{callArgs(call)}</pre>
+                            <details class="trace-raw">
+                              <summary>Raw JSON</summary>
+                              <pre class="trace-detail">{rawJson(call)}</pre>
+                            </details>
+                          </div>
+                        {/each}
+                      {/if}
+                      {#if item.payload?.usage}
+                        <div class="trace-usage">
+                          <span>prompt {traceUsage(item).prompt_tokens ?? 0}</span>
+                          <span>completion {traceUsage(item).completion_tokens ?? 0}</span>
+                          <span>total {traceUsage(item).total_tokens ?? 0}</span>
+                        </div>
+                        <details class="trace-raw">
+                          <summary>Raw JSON</summary>
+                          <pre class="trace-detail">{rawJson(item.payload)}</pre>
+                        </details>
+                      {/if}
+                    {:else if item.event === 'tool_call'}
+                      <div class="trace-call-name">{item.payload?.name || item.detail}</div>
+                      <div class="trace-subtitle">Arguments</div>
+                      <pre class="trace-prose">{pretty(item.payload?.args)}</pre>
+                      <div class="trace-subtitle">Result</div>
+                      <pre class="trace-prose">{pretty(item.payload?.result)}</pre>
+                      <details class="trace-raw">
+                        <summary>Raw JSON</summary>
+                        <pre class="trace-detail">{rawJson(item.payload)}</pre>
+                      </details>
+                    {:else if tracePreview(item)}
+                      <pre class="trace-detail">{tracePreview(item)}</pre>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </details>
+          {/if}
+
+          {#if moduleConfig}
+            <details class="detail-section">
+              <summary>Module Definition</summary>
+              <div class="config-tag">
+                {moduleConfig.name} · T{moduleConfig.tier ?? tierOf(moduleConfig.name)}
+              </div>
+              <details open>
+                <summary>description</summary>
+                <pre>{moduleConfig.description}</pre>
+              </details>
+              {#if moduleConfig.theory}
+                <details>
+                  <summary>theory</summary>
+                  <pre>{moduleConfig.theory}</pre>
+                </details>
+              {/if}
+              {#if moduleConfig.system_prompt}
+                <details>
+                  <summary>system_prompt ({moduleConfig.system_prompt.length} chars)</summary>
+                  <pre>{moduleConfig.system_prompt}</pre>
+                </details>
+              {/if}
+              {#if moduleConfig.sub_modules?.length}
+                <div class="sub-modules-row">
+                  <span class="sub-modules-key">sub_modules</span>
+                  <span class="sub-modules-val">{moduleConfig.sub_modules.join(', ')}</span>
+                </div>
+              {/if}
+            </details>
           {/if}
         </details>
       {/if}
@@ -524,10 +484,14 @@
 
   .header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
-    padding: 14px 16px 8px;
+    padding: 14px 16px 12px;
     border-bottom: 1px solid var(--border);
+  }
+  .identity {
+    flex: 1;
+    min-width: 0;
   }
   .title {
     margin: 0;
@@ -539,6 +503,13 @@
     word-break: break-word;
   }
   .title.leader { color: var(--phosphor); font-style: italic; }
+  .meta-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
   .seq-pill {
     background: var(--bg-tertiary);
     color: var(--text-muted);
@@ -566,20 +537,13 @@
     padding: 10px 16px 0;
     flex-shrink: 0;
   }
-  .status-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 4px 0 0 0;
-    flex-wrap: wrap;
-  }
   .status-badge {
     display: inline-flex;
     align-items: center;
-    padding: 4px 11px;
+    padding: 3px 8px;
     border-radius: 3px;
     font-family: var(--font-pixel);
-    font-size: 0.625rem;
+    font-size: 0.5625rem;
     font-weight: 400;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -599,11 +563,10 @@
     border-color: var(--text-muted);
     color: var(--text);
   }
-  .status-badge.completed,
-  .status-badge.output {
-    background: rgba(59, 130, 246, 0.12);
-    border-color: var(--blue);
-    color: var(--blue);
+  .status-badge.completed {
+    background: hsla(155 100% 42% / 0.08);
+    border-color: hsla(155 100% 42% / 0.42);
+    color: var(--phosphor);
   }
   .status-badge.running {
     background: color-mix(in srgb, var(--amber) 14%, transparent);
@@ -613,10 +576,10 @@
   .score-pill {
     display: inline-flex;
     align-items: center;
-    padding: 4px 8px;
+    padding: 3px 8px;
     border-radius: 3px;
     font-family: var(--font-pixel);
-    font-size: 0.625rem;
+    font-size: 0.5625rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     border: 1px solid var(--border);
@@ -683,27 +646,6 @@
     font-size: 12px;
   }
 
-  .summary-card {
-    background: hsla(155 100% 42% / 0.06);
-    border: 1px solid hsla(155 100% 42% / 0.28);
-    border-radius: 5px;
-    padding: 9px 10px;
-    margin-bottom: 10px;
-  }
-  .summary-label {
-    font-family: var(--font-pixel);
-    font-size: 0.625rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    margin-bottom: 5px;
-  }
-  .summary-title {
-    color: var(--text);
-    font-size: 12px;
-    line-height: 1.45;
-    word-break: break-word;
-  }
   .field-block {
     margin-bottom: 10px;
   }
@@ -901,6 +843,14 @@
   .detail-section {
     margin-bottom: 8px;
   }
+  .primary-section {
+    background: rgba(255, 255, 255, 0.028);
+    border-color: hsla(155 100% 42% / 0.24);
+    padding: 7px 10px 10px;
+  }
+  .secondary-section {
+    background: rgba(255, 255, 255, 0.016);
+  }
   .detail-section > summary {
     font-family: var(--font-pixel);
     font-size: 0.6875rem;
@@ -912,6 +862,27 @@
   .detail-section[open] > summary {
     color: var(--phosphor);
     text-shadow: var(--phosphor-glow);
+    margin-bottom: 8px;
+  }
+  .secondary-section[open] > summary {
+    color: var(--text);
+    text-shadow: none;
+  }
+  .diagnostics {
+    margin-top: 14px;
+    background: transparent;
+    border-color: rgba(255, 255, 255, 0.08);
+    padding: 5px 8px;
+  }
+  .diagnostics > summary {
+    color: var(--text-muted);
+    font-family: var(--font-pixel);
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .diagnostics[open] > summary {
+    color: var(--text);
     margin-bottom: 8px;
   }
 
@@ -1131,22 +1102,6 @@
     letter-spacing: 0.05em;
     text-transform: uppercase;
     margin-bottom: 4px;
-  }
-
-  /* ---------- leaked highlight ---------- */
-  .leaked {
-    background: hsla(155 100% 42% / 0.08);
-    border: 1px solid var(--phosphor);
-    color: var(--phosphor);
-    text-shadow: var(--phosphor-glow);
-    padding: 8px 10px;
-    border-radius: 4px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    word-break: break-word;
-    white-space: pre-wrap;
-    line-height: 1.55;
-    box-shadow: var(--phosphor-glow-tight);
   }
 
   /* ---------- banners ---------- */

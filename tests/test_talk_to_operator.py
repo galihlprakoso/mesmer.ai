@@ -17,10 +17,8 @@ class _Call:
 
 
 def _make_ctx(*, depth=0, target_memory=None):
-    from mesmer.core.scratchpad import Scratchpad
     ctx = MagicMock()
     ctx.depth = depth
-    ctx.scratchpad = Scratchpad()
     ctx.target_memory = target_memory
     ctx.human_broker = None
     ctx.registry = MagicMock()
@@ -33,7 +31,10 @@ def _make_actor(name="my-leader", *, role=ActorRole.MODULE):
         builtin = [
             ToolName.ASK_HUMAN.value,
             ToolName.TALK_TO_OPERATOR.value,
-            ToolName.UPDATE_SCRATCHPAD.value,
+            ToolName.LIST_ARTIFACTS.value,
+            ToolName.READ_ARTIFACT.value,
+            ToolName.SEARCH_ARTIFACTS.value,
+            ToolName.UPDATE_ARTIFACT.value,
             ToolName.CONCLUDE.value,
         ]
     return ReactActorSpec(

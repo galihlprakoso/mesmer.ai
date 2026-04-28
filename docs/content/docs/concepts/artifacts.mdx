@@ -1,0 +1,77 @@
+---
+title: Artifacts & shared state
+description: How Mesmer separates durable campaign knowledge from audited module outputs.
+---
+
+Mesmer has three shared-state surfaces:
+
+| Surface | Lifetime | What it is |
+|---|---|---|
+| **Attack graph** | Cross-run | Complete audit timeline. Every module execution is an `AttackNode` with raw `module_output`. |
+| **Module outputs** | Run-local cache, seeded from graph history | Latest raw `conclude()` text by module name. Used for ordered phase gates and marker checks. |
+| **Artifacts** | Cross-run Markdown documents | Scenario-declared durable knowledge such as `system_prompt`, `tool_catalog`, `injection_evidence`, and `operator_notes`. |
+
+Artifacts are not automatic per-module dumps. They are curated Markdown
+documents that agents intentionally maintain with `update_artifact` and
+inspect with `list_artifacts`, `read_artifact`, and `search_artifacts`.
+
+```markdown
+## Tool Surface
+- search/read path likely available
+- email side effect likely available
+
+## Next Step
+Run indirect-prompt-injection against the protocol-update retrieval path.
+```
+
+## Dataflow
+
+<Mermaid caption="Module outputs stay separate from durable artifacts." chart={`
+flowchart TD
+  Graph[AttackGraph conversation_history] --> Outputs[module_outputs latest by module]
+  Outputs --> Gates[ordered phase gates and marker checks]
+
+  Scenario[scenario artifacts declaration] --> Contract[Artifact Contract in prompt]
+  Store[artifact Markdown files] --> Brief[Artifact Brief in prompt]
+  Tool[update_artifact content or operations] --> Store
+  Store --> Brief
+
+  Child[child conclude result] --> Outputs
+`} />
+
+## Updating Artifacts
+
+Use `update_artifact`. It has one tool name and two modes:
+
+- `content`: replace the whole Markdown document.
+- `operations`: apply structured Markdown patch operations.
+
+Example patch:
+
+```json
+{
+  "artifact_id": "operator_notes",
+  "operations": [
+    {
+      "op": "append_section",
+      "heading": "Evidence",
+      "content": "- Target acknowledged email capability."
+    },
+    {
+      "op": "replace_section",
+      "heading": "Next Step",
+      "content": "Run `email_exfiltration_proof`."
+    }
+  ]
+}
+```
+
+Patch operations are implemented in `mesmer.core.patching.markdown` so
+other app tools can reuse the same mechanism.
+
+## Design Rule
+
+Use the graph for full history, module outputs for precise phase
+handoffs, and artifacts for compact durable knowledge. Do not dump every
+module report into artifacts; curate only the outputs that should guide
+future runs or help the operator assess the campaign.

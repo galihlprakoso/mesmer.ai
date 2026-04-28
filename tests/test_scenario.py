@@ -73,6 +73,43 @@ class TestScenarioJudgeConfig:
         assert s.judge_rubric_additions == ""
 
 
+class TestScenarioArtifacts:
+    def test_artifacts_parse_from_top_level_list(self, tmp_path):
+        p = _write(
+            tmp_path,
+            MINIMAL_SCENARIO
+            + "artifacts:\n"
+            + "  - id: system_prompt\n"
+            + "    title: System Prompt\n"
+            + "    format: markdown\n"
+            + "    description: Consolidated prompt recon.\n",
+        )
+
+        s = load_scenario(p)
+
+        assert len(s.artifacts) == 1
+        assert s.artifacts[0].id == "system_prompt"
+        assert s.artifacts[0].title == "System Prompt"
+        assert s.artifacts[0].format == "markdown"
+        assert "prompt recon" in s.artifacts[0].description
+
+    def test_artifacts_reject_duplicate_ids(self, tmp_path):
+        p = _write(
+            tmp_path,
+            MINIMAL_SCENARIO
+            + "artifacts:\n"
+            + "  - operator_notes\n"
+            + "  - id: operator_notes\n",
+        )
+
+        try:
+            load_scenario(p)
+        except ValueError as e:
+            assert "Duplicate scenario artifact id" in str(e)
+        else:
+            raise AssertionError("expected duplicate artifact id to fail")
+
+
 class TestShippedScenarioPromptContracts:
     def test_orchestrated_scenarios_keep_procedure_out_of_shared_objective(self):
         scenario_files = [

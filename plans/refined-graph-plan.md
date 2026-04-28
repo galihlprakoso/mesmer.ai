@@ -25,7 +25,7 @@
 
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-• I have enough of the code path now: the graph is not just visualization. It is used as persistent memory, prompt input, scratchpad bootstrap, deterministic frontier generation, anti-repetition, and
+• I have enough of the code path now: the graph is not just visualization. It is used as persistent memory, prompt input, artifacts bootstrap, deterministic frontier generation, anti-repetition, and
   UI/benchmark trace data. The important caveat is that it still represents attempts/modules more than an explicit “hypothesis search over target weaknesses.”
 
 • Explored
@@ -62,7 +62,7 @@
      After a successful/non-dead attempt, the graph deterministically proposes next modules to try. The LLM does not choose the module list; it only refines selected modules into approach text. See
      mesmer/core/agent/evaluation.py:270.
   3. Cross-run memory
-     At run start, previous graph nodes seed the scratchpad with latest module outputs, so a second run already sees prior profiler/planner/technique conclusions. See mesmer/core/runner.py:241.
+     At run start, previous graph nodes seed the artifacts with latest module outputs, so a second run already sees prior profiler/planner/technique conclusions. See mesmer/core/runner.py:241.
   4. Anti-repetition and tier gating
      Dead approaches are rendered into prompts as “do not retry,” similar approaches can be marked dead if they do not improve, and module choice follows a simple-before-complex tier ladder. See mesmer/
      core/graph.py:1.
@@ -757,7 +757,7 @@
   direction is still right, but I’d tighten it.
 
   Verified In Mesmer
-  Current Mesmer already injects graph-derived context into every ReAct run: scratchpad, module timeline, learned experience, frontier/dead-end summary, and budget hints are assembled in mesmer/core/
+  Current Mesmer already injects graph-derived context into every ReAct run: artifacts, module timeline, learned experience, frontier/dead-end summary, and budget hints are assembled in mesmer/core/
   agent/engine.py:96. The graph is loaded/saved per target and seeds future runs in mesmer/core/runner.py:186. The web UI currently visualizes an execution tree/timeline, not a belief map, in mesmer/
   interfaces/web/frontend/src/components/AttackGraph.svelte:1.
 

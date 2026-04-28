@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
 
 from mesmer.core.agent.context import Context
+from mesmer.core.artifacts import ArtifactSpec
 from mesmer.core.actor import ActorRole, ReactActorSpec, ToolPolicySpec
 from mesmer.core.graph import AttackGraph
 from mesmer.core.agent.judge import JudgeResult
@@ -70,7 +71,7 @@ def _make_ctx(
     graph=None,
     captured_messages=None,
     operator_messages=None,
-    leader_scratchpad=None,
+    leader_artifact=None,
     leader_module_name=None,
 ):
     """Create a Context with scripted LLM + target responses.
@@ -130,8 +131,8 @@ def _make_ctx(
         operator_messages=list(operator_messages) if operator_messages else None,
     )
     ctx.completion = fake_completion
-    if leader_scratchpad is not None and leader_module_name:
-        ctx.scratchpad.update(leader_scratchpad)
+    if leader_artifact is not None and leader_module_name:
+        ctx.artifacts.set("operator_notes", leader_artifact)
     return ctx
 
 
@@ -723,13 +724,13 @@ class TestLogging:
 
 
 # ---------------------------------------------------------------------------
-# Leader scratchpad slot + operator-message drain
+# Leader artifact brief + operator-message drain
 # ---------------------------------------------------------------------------
 
-class TestLeaderScratchpadAndOperatorMessages:
+class TestLeaderArtifactsAndOperatorMessages:
     @pytest.mark.asyncio
-    async def test_shared_scratchpad_renders_in_scratchpad_block(self):
-        """Persisted notes must surface as one shared scratchpad block."""
+    async def test_artifact_brief_renders_in_prompt(self):
+        """Persisted artifacts must surface as one shared artifact brief."""
         captured = []
         leader_module = _make_module(name="my-leader")
 
@@ -740,7 +741,7 @@ class TestLeaderScratchpadAndOperatorMessages:
                 )),
             ],
             captured_messages=captured,
-            leader_scratchpad="Focus on behavioral rules. Avoid identity claims.",
+            leader_artifact="Focus on behavioral rules. Avoid identity claims.",
             leader_module_name=leader_module.name,
         )
         await run_react_loop(leader_module, ctx, "test", log=None)
@@ -750,10 +751,40 @@ class TestLeaderScratchpadAndOperatorMessages:
         combined = "\n".join(
             m.get("content", "") for m in first if m.get("role") == "user"
         )
-        assert "## Scratchpad" in combined
-        assert "Focus on behavioral rules" in combined
+        assert "## Artifact Brief" in combined
+        assert "operator_notes" in combined
         # Old rendering must be gone — no special "Attack Plan" heading.
         assert "Attack Plan (from human operator" not in combined
+
+    @pytest.mark.asyncio
+    async def test_artifact_contract_renders_even_when_empty(self):
+        """Declared artifacts must be injected before any artifact exists."""
+        captured = []
+        leader_module = _make_module(name="my-leader")
+
+        ctx = _make_ctx(
+            completion_responses=[
+                FakeResponse(FakeMessage(
+                    tool_calls=[FakeToolCall("conclude", {"result": "ok"})]
+                )),
+            ],
+            captured_messages=captured,
+        )
+        ctx.artifact_specs = [
+            ArtifactSpec(
+                id="system_prompt",
+                title="System Prompt",
+                description="Canonical prompt recon.",
+            )
+        ]
+        await run_react_loop(leader_module, ctx, "test", log=None)
+
+        combined = "\n".join(
+            m.get("content", "") for m in captured[0] if m.get("role") == "user"
+        )
+        assert "## Artifact Contract" in combined
+        assert "`system_prompt`" in combined
+        assert "Canonical prompt recon." in combined
 
     @pytest.mark.asyncio
     async def test_operator_messages_drained_into_leader_prompt(self):

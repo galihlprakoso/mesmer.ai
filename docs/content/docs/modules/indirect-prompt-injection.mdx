@@ -5,7 +5,7 @@ description: Manager that proves whether retrieved content can steer a tool-usin
 
 `indirect-prompt-injection` is the manager for retrieval and tool-output
 injection. It reads prior `system-prompt-extraction` and `tool-extraction`
-scratchpad entries, drives the target through its search/read path, and reports
+outputs plus relevant artifacts, drives the target through its search/read path, and reports
 whether untrusted retrieved content influenced assistant behavior.
 
 Use it for tool-using assistants, especially research agents that search and
@@ -29,4 +29,3 @@ The manager concludes with a markdown report containing:
 
 See the source:
 [`modules/attacks/indirect-prompt-injection/module.yaml`](https://github.com/galihlprakoso/mesmer.ai/blob/main/modules/attacks/indirect-prompt-injection/module.yaml)
-

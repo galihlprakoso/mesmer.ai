@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 
+from mesmer.core.artifacts import ArtifactError, ArtifactSpec
 from mesmer.core.constants import ScenarioMode
 from mesmer.core.keys import ThrottleConfig
 
@@ -280,6 +281,9 @@ class Scenario:
     # in its tool list) but not a contract — the executive picks dispatch
     # order based on conversation, judge feedback, and TAPER frontier.
     modules: list[str] = field(default_factory=list)
+    # Declarative durable documents the scenario expects. These are not
+    # graph outputs; agents update them intentionally via update_artifact.
+    artifacts: list[ArtifactSpec] = field(default_factory=list)
     # Optional override for the synthesized executive's system prompt.
     # When None, the runner loads the default
     # ``mesmer/core/agent/prompts/executive.prompt.md``. Use this when the
@@ -344,6 +348,41 @@ def _parse_throttle(raw: dict | None) -> ThrottleConfig | None:
         max_concurrent=raw.get("max_concurrent"),
         max_wait_seconds=raw.get("max_wait_seconds", 0.0) or 0.0,
     )
+
+
+def _parse_artifacts(raw: object) -> list[ArtifactSpec]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"Scenario 'artifacts' must be a list, got {type(raw).__name__}."
+        )
+    specs: list[ArtifactSpec] = []
+    seen: set[str] = set()
+    for idx, item in enumerate(raw, start=1):
+        if isinstance(item, str):
+            data = {"id": item}
+        elif isinstance(item, dict):
+            data = item
+        else:
+            raise ValueError(
+                f"Scenario artifact entry #{idx} must be a string or mapping, "
+                f"got {type(item).__name__}."
+            )
+        try:
+            spec = ArtifactSpec(
+                id=str(data.get("id", "")).strip(),
+                title=str(data.get("title", "") or "").strip(),
+                format=str(data.get("format", "markdown") or "markdown").strip(),
+                description=str(data.get("description", "") or "").strip(),
+            )
+        except (ArtifactError, ValueError) as e:
+            raise ValueError(f"Invalid scenario artifact entry #{idx}: {e}") from e
+        if spec.id in seen:
+            raise ValueError(f"Duplicate scenario artifact id: {spec.id}")
+        seen.add(spec.id)
+        specs.append(spec)
+    return specs
 
 
 def load_scenario(path: str | Path) -> Scenario:
@@ -474,6 +513,7 @@ def load_scenario(path: str | Path) -> Scenario:
         target=target,
         objective=objective,
         modules=modules,
+        artifacts=_parse_artifacts(data.get("artifacts")),
         leader_prompt=leader_prompt,
         agent=agent,
         module_paths=data.get("module_paths", []),

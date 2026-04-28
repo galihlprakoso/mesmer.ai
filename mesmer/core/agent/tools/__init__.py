@@ -22,11 +22,11 @@ from typing import TYPE_CHECKING
 
 from mesmer.core.agent.tools import (
     ask_human,
+    artifacts,
     conclude,
     send_message,
     sub_module,
     talk_to_operator,
-    update_scratchpad,
 )
 from mesmer.core.agent.tools.base import tool_result
 from mesmer.core.actor import ReactActorSpec, ToolPolicySpec, ensure_actor
@@ -44,16 +44,16 @@ if TYPE_CHECKING:
 _BUILTIN_HANDLERS = {
     ToolName.SEND_MESSAGE: send_message.handle,
     ToolName.ASK_HUMAN: ask_human.handle,
-    ToolName.UPDATE_SCRATCHPAD: update_scratchpad.handle,
     ToolName.TALK_TO_OPERATOR: talk_to_operator.handle,
+    **artifacts.HANDLERS,
 }
 
 _BUILTIN_SCHEMAS = {
     ToolName.SEND_MESSAGE.value: send_message.SCHEMA,
     ToolName.ASK_HUMAN.value: ask_human.SCHEMA,
-    ToolName.UPDATE_SCRATCHPAD.value: update_scratchpad.SCHEMA,
     ToolName.TALK_TO_OPERATOR.value: talk_to_operator.SCHEMA,
     ToolName.CONCLUDE.value: conclude.SCHEMA,
+    **artifacts.SCHEMAS,
 }
 
 

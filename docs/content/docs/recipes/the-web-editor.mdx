@@ -107,11 +107,11 @@ sealed off — see
 | Panel | Endpoint | Behaviour |
 |---|---|---|
 | **Chat** | `POST /api/leader-chat` (push) · `GET /api/chat` (history tail) | Non-blocking. Operator sends a message; it lands on `ctx.operator_messages` and the executive drains it at the top of the next ReAct iteration. Executive replies via `talk_to_operator` (emits `OPERATOR_REPLY`, persisted to `chat.jsonl`). |
-| **Scratchpad** | `GET /api/scratchpad` · `PUT /api/scratchpad` | Operator can read or rewrite the executive's persistent working notes (`scratchpad.md`). Edits via the executive's `update_scratchpad` tool emit `SCRATCHPAD_UPDATED`. |
+| **Artifacts** | `GET /api/targets/{target_hash}/artifacts` · `GET /api/targets/{target_hash}/artifacts/{artifact_id}` | Operator can inspect declared durable Markdown artifacts, including `operator_notes`. Edits happen through the executive or managers via `update_artifact`. |
 
 Use the chat for status updates, course-correction, "I see X, try Y"
-nudges. Use the scratchpad for hand-curated working notes that should
-survive into the next run (`--fresh` does not delete the scratchpad).
+nudges. Use artifacts for hand-curated working notes and campaign
+deliverables that should survive into the next run.
 
 The `ContextMode.AUTONOMOUS` / `CO_OP` distinction no longer exists.
 Every executive has these channels available; whether the operator

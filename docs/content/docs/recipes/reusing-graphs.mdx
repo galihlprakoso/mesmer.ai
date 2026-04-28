@@ -12,7 +12,7 @@ meaningfully better than run #1.
 
 | Action | What it does | Reversible |
 |---|---|---|
-| (default) | Append to existing graph; warm-start scratchpad from prior outputs. | n/a — non-destructive |
+| (default) | Append to existing graph; warm-start Module Conversation History and artifact brief from prior state. | n/a — non-destructive |
 | `--fresh` | Bypass loading the existing graph for this run. The file on disk is left untouched; future runs without `--fresh` see the original graph again. | ✓ |
 | `mesmer graph reset <scenario>` | Delete `graph.json` for this target. Asks for confirmation. | ✗ — destructive |
 

@@ -76,10 +76,10 @@ def _auto_bind_experiment_id(ctx: "Context", fn_name: str, experiment_id: str | 
     return candidates[0].id
 
 
-def _missing_artifact_markers(ctx: "Context", actor: "ReactActorSpec", fn_name: str) -> list[tuple[str, list[str]]]:
-    """Return prior ordered phases whose advisory markers are absent.
+def _missing_output_markers(ctx: "Context", actor: "ReactActorSpec", fn_name: str) -> list[tuple[str, list[str]]]:
+    """Return prior ordered phases whose advisory output markers are absent.
 
-    Ordered scenario managers can declare artifact markers to help later
+    Ordered scenario managers can declare output markers to help later
     phases reason about handoff quality. Missing markers should not block the
     next manager: downstream phases are responsible for handling thin or
     malformed inputs honestly. This helper only computes the warning.
@@ -89,13 +89,13 @@ def _missing_artifact_markers(ctx: "Context", actor: "ReactActorSpec", fn_name: 
         return []
 
     current_idx = ordered_modules.index(fn_name)
-    requirements = actor.parameters.get("ordered_artifact_requirements") or {}
+    requirements = actor.parameters.get("ordered_output_requirements") or {}
     missing: list[tuple[str, list[str]]] = []
     for prior in ordered_modules[:current_idx]:
         markers = requirements.get(prior) or []
         if not markers:
             continue
-        content = ctx.scratchpad.module_output(prior)
+        content = _latest_module_output(ctx, prior)
         absent = [marker for marker in markers if marker not in content]
         if absent:
             missing.append((prior, absent))
@@ -112,10 +112,10 @@ def _with_handoff_warnings(
     lines = [
         "## Framework Handoff Warning",
         "A prior ordered phase completed, but its module output is missing "
-        "one or more expected artifact markers. Do not rerun earlier phases "
+        "one or more expected handoff markers. Do not rerun earlier phases "
         "just to satisfy formatting. Proceed with the current phase, inspect "
-        "the scratchpad honestly, and conclude with a thin/no-findings result "
-        "if the artifact is not usable.",
+        "the prior manager outputs honestly, and conclude with a thin/no-findings result "
+        "if the handoff is not usable.",
         "",
         "Missing markers:",
     ]
@@ -125,26 +125,19 @@ def _with_handoff_warnings(
     return instruction.rstrip() + "\n\n" + "\n".join(lines)
 
 
-def _should_update_scratchpad(
-    ctx: "Context",
-    actor: "ReactActorSpec",
-    fn_name: str,
-    result: str,
-) -> bool:
-    """Avoid replacing a valid phase artifact with a weaker retry summary."""
-    markers = (actor.parameters.get("ordered_artifact_requirements") or {}).get(fn_name) or []
-    if not markers:
-        return True
-
-    prior = ctx.scratchpad.module_output(fn_name)
-    prior_has_artifact = all(marker in prior for marker in markers)
-    result_has_artifact = all(marker in result for marker in markers)
-    return not (prior_has_artifact and not result_has_artifact)
+def _latest_module_output(ctx: "Context", module_name: str) -> str:
+    """Return latest graph-recorded conclude text for a module."""
+    if ctx.graph is None:
+        return ""
+    for node in reversed(ctx.graph.conversation_history()):
+        if node.module == module_name and (node.module_output or "").strip():
+            return node.module_output.strip()
+    return ""
 
 
 def _next_incomplete_ordered_module(ctx: "Context", ordered_modules: list[str]) -> str | None:
     for name in ordered_modules:
-        if not ctx.scratchpad.module_output(name).strip():
+        if not _latest_module_output(ctx, name):
             return name
     return None
 
@@ -176,7 +169,7 @@ async def handle(
         missing = [
             name
             for name in ordered_modules[:current_idx]
-            if not ctx.scratchpad.module_output(name).strip()
+            if not _latest_module_output(ctx, name)
         ]
         if missing:
             required = missing[0]
@@ -188,7 +181,7 @@ async def handle(
                 f"`{required}` first, wait for its tool result, then continue "
                 "the declared scenario order.",
             )
-        prior_output = ctx.scratchpad.module_output(fn_name).strip()
+        prior_output = _latest_module_output(ctx, fn_name)
         if prior_output:
             next_missing = _next_incomplete_ordered_module(ctx, ordered_modules)
             if next_missing is None:
@@ -200,13 +193,13 @@ async def handle(
             return tool_result(
                 call.id,
                 f"Fixed scenario phase order skipped duplicate delegation. "
-                f"`{fn_name}` already has module output in the run context. "
+                f"`{fn_name}` already has graph-recorded module output. "
                 "Do not rerun completed ordered phases just to refresh context. "
                 f"{next_step}\n\nExisting `{fn_name}` output:\n{prior_output}",
             )
         sub_instruction = _with_handoff_warnings(
             sub_instruction,
-            _missing_artifact_markers(ctx, actor, fn_name),
+            _missing_output_markers(ctx, actor, fn_name),
         )
 
     # The leader may pass experiment_id (`fx_…`) to tie the attempt to a
@@ -308,20 +301,6 @@ async def handle(
 
     result = await ctx.run_module(fn_name, sub_instruction, sub_max_turns, **run_kwargs)
     log(LogEvent.DELEGATE_DONE.value, f"← {fn_name}: {result}")
-
-    # Auto-write the sub-module's conclude() text into the module-output
-    # cache under its own name. This stays separate from the shared
-    # whiteboard; the cache is for ordered phase gates and precise handoff
-    # checks. Latest wins; the graph carries the full history.
-    if result and result.strip():
-        if _should_update_scratchpad(ctx, actor, fn_name, result):
-            ctx.scratchpad.set_module_output(fn_name, result)
-        else:
-            log(
-                LogEvent.DELEGATE_DONE.value,
-                f"preserved existing `{fn_name}` module-output artifact; "
-                "retry output missed required marker(s)",
-            )
 
     # Collect messages from turns added during this delegation
     # (turns list is shared between parent and child). Track

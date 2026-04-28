@@ -28,11 +28,13 @@ from mesmer.core.agent.context import Turn
 from mesmer.core.belief_graph import (
     AttemptCreateDelta,
     EvidenceCreateDelta,
+    FrontierUpdateStateDelta,
     StrategyUpdateStatsDelta,
     make_attempt,
 )
 from mesmer.core.constants import (
     AttemptOutcome,
+    ExperimentState,
     LogEvent,
     NodeStatus,
     ScenarioMode,
@@ -66,6 +68,40 @@ def _outcome_for(ctx: "Context", judge_result, judge_score: int) -> str:
     if judge_score <= 3:
         return AttemptOutcome.DEAD.value
     return AttemptOutcome.REFUSAL.value
+
+
+def _observable_target_responses(responses: list[str] | None) -> list[str]:
+    """Return responses that can legitimately update target beliefs."""
+    if not responses:
+        return []
+    from mesmer.core.agent.context import is_target_error
+
+    return [r for r in responses if r.strip() and not is_target_error(r)]
+
+
+def _observation_failure_outcome(
+    *,
+    messages_sent: list[str] | None,
+    target_responses: list[str] | None,
+    module_output: str,
+) -> str:
+    """Classify an attempt with no observable target response.
+
+    Infrastructure failures must not be taught back to the planner as
+    target refusals or dead attack strategies. When no message/response
+    exists and no error marker is present, the module simply produced no
+    behavioral observation.
+    """
+    from mesmer.core.agent.context import is_target_error
+
+    blobs = list(target_responses or [])
+    if module_output:
+        blobs.append(module_output)
+    if any(is_target_error(blob) for blob in blobs):
+        return AttemptOutcome.INFRA_ERROR.value
+    if messages_sent or target_responses:
+        return AttemptOutcome.NO_OBSERVATION.value
+    return AttemptOutcome.NO_OBSERVATION.value
 
 
 def _format_prior_turns_for_judge(prior_turns: list[Turn], last_n: int = 6) -> str:
@@ -191,7 +227,7 @@ async def _judge_module_result(
         )
         # NOTE: ctx.objective_met is intentionally NOT set here.
         # Termination authority lives at the LEADER level — the leader reads
-        # OBJECTIVE SIGNAL flags from sub-module scratchpad entries and raw
+        # OBJECTIVE SIGNAL flags from sub-module conclude text and raw
         # target evidence in tool results, then decides by calling conclude()
         # with `objective_met=true`. The judge's objective_met field still
         # surfaces in JUDGE_VERDICT telemetry and in the tool_result summary
@@ -366,6 +402,56 @@ async def _update_belief_graph(
     # so it can tag NEUTRAL evidence against hypotheses the target
     # touched on incidentally.
     active = bg.active_hypotheses()
+
+    observable_responses = _observable_target_responses(
+        extractor_target_responses if extractor_target_responses is not None else target_responses
+    )
+
+    if not observable_responses:
+        outcome = _observation_failure_outcome(
+            messages_sent=messages_sent,
+            target_responses=target_responses,
+            module_output=module_output,
+        )
+        attempt = make_attempt(
+            module=module_name,
+            approach=approach,
+            experiment_id=None,
+            messages_sent=list(messages_sent or []),
+            target_responses=list(target_responses or []),
+            module_output=module_output,
+            judge_score=0,
+            objective_progress=0.0,
+            outcome=outcome,
+            reflection=(
+                "No target behavior observed; excluded from confidence, "
+                "strategy, and frontier learning."
+            ),
+            tested_hypothesis_ids=[],
+            used_strategy_id=None,
+            run_id=ctx.run_id,
+        )
+        try:
+            bg.apply(AttemptCreateDelta(attempt=attempt, run_id=ctx.run_id))
+        except InvalidDelta as e:
+            log(LogEvent.BELIEF_DELTA.value, f"attempt-create rejected: {e}")
+            return None
+        if resolved_experiment is not None:
+            try:
+                bg.apply(
+                    FrontierUpdateStateDelta(
+                        experiment_id=resolved_experiment.id,
+                        state=ExperimentState.PROPOSED,
+                        run_id=ctx.run_id,
+                    )
+                )
+            except InvalidDelta as e:
+                log(LogEvent.BELIEF_DELTA.value, f"frontier-reopen rejected: {e}")
+        log(
+            LogEvent.BELIEF_DELTA.value,
+            f"{module_name}: {outcome}; no belief or frontier learning applied",
+        )
+        return attempt
 
     if resolved_experiment is not None:
         tested_ids = [resolved_experiment.hypothesis_id]

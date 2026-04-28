@@ -96,7 +96,10 @@ sub_modules:
 tool_policy:
   dispatch_submodules: true
   builtin:
-    - update_scratchpad
+    - list_artifacts
+    - read_artifact
+    - search_artifacts
+    - update_artifact
     - conclude
 
 judge_rubric: |

@@ -2,8 +2,16 @@
 
 from mesmer.core.patching.markdown import (
     MarkdownPatchError,
+    MarkdownPatchOperation,
+    MarkdownPatchOperationPayload,
     MarkdownPatchResult,
     apply_markdown_patch,
 )
 
-__all__ = ["MarkdownPatchError", "MarkdownPatchResult", "apply_markdown_patch"]
+__all__ = [
+    "MarkdownPatchError",
+    "MarkdownPatchOperation",
+    "MarkdownPatchOperationPayload",
+    "MarkdownPatchResult",
+    "apply_markdown_patch",
+]

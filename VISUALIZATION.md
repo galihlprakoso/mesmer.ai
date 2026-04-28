@@ -8,7 +8,7 @@ The important distinction:
 - The **executive** is the scenario-level coordinator. It talks to the operator
   and dispatches managers.
 - **Managers and employee modules** do the target-facing work.
-- The **scratchpad** is one shared working whiteboard rendered into prompts.
+- The **artifacts** is one shared working whiteboard rendered into prompts.
 - `module_outputs` is a separate latest-output cache used for phase gates and
   precise handoff checks.
 - The **AttackGraph** is the audit log and visualization source.
@@ -29,11 +29,11 @@ sections.
 flowchart LR
   Scenario["Scenario YAML<br/>target + objective + manager list"]
   Executive["Synthesized executive<br/>scenario-stem:executive"]
-  Context["Shared Context<br/>target, turns, scratchpad,<br/>AttackGraph, BeliefGraph"]
+  Context["Shared Context<br/>target, turns, artifacts,<br/>AttackGraph, BeliefGraph"]
   Manager["Manager / employee ReAct loops"]
   Target["Target adapter<br/>send_message"]
   Judge["Judge + evidence extractors"]
-  Stores["Persistent stores<br/>graph.json, belief_graph.json,<br/>scratchpad.md, chat logs"]
+  Stores["Persistent stores<br/>graph.json, belief_graph.json,<br/>artifacts/*.md, chat logs"]
   UI["Web UI<br/>Attack Graph + Belief Map + details"]
 
   Scenario --> Executive
@@ -60,7 +60,7 @@ reference, but each role sees a different tool list.
 | Scenario | Declares target, objective, optional leader prompt, and manager list. | `scenarios/*.yaml` |
 | Executive | Runtime-only scenario coordinator. Dispatches managers and talks to the operator. | Synthesized in `mesmer/core/runner.py` |
 | Runtime actor | The shared interface consumed by the ReAct loop. Both modules and the executive adapt into this. | `mesmer/core/actor.py` |
-| Context | Shared run state: target, turns, scratchpad, graphs, telemetry, operator queue. | `mesmer/core/agent/context.py` |
+| Context | Shared run state: target, turns, artifacts, graphs, telemetry, operator queue. | `mesmer/core/agent/context.py` |
 | Modules | Registry-loaded managers, planners, profilers, and attack techniques. | `modules/**/module.yaml` |
 | AttackGraph | Persistent execution audit and UI tree source. | `mesmer/core/graph.py` |
 | BeliefGraph | Typed planner state. | `mesmer/core/belief_graph.py` |
@@ -114,7 +114,7 @@ flowchart TD
   External --> Done
 ```
 
-| Actor | Dispatch modules | Talk to target | Talk to operator | Update persistent scratchpad |
+| Actor | Dispatch modules | Talk to target | Talk to operator | Update persistent artifacts |
 |---|---:|---:|---:|---:|
 | Executive | Yes, scenario managers | No | Yes | Yes |
 | Manager | Yes, if it declares sub-modules | Usually yes | No | No direct tool |
@@ -145,7 +145,7 @@ tool_policy:
     - conclude
 ```
 
-Use this for pure reasoning/planning modules that should only read scratchpad,
+Use this for pure reasoning/planning modules that should only read artifacts,
 history, graph context, or child outputs. Example: `attack-planner` should
 produce a strategy, not improvise target messages directly, so its policy omits
 `send_message`.
@@ -166,12 +166,12 @@ flowchart TD
   Actor --> Target["Create target adapter"]
   Target --> AG["Load/create AttackGraph<br/>ensure_root<br/>run_counter += 1"]
   AG --> BG["Load/create BeliefGraph<br/>--fresh clears prior graph state"]
-  BG --> ScratchSeed["Seed scratchpad from graph history<br/>latest module_output per module"]
-  ScratchSeed --> ExecPad["Load scratchpad.md<br/>into executive slot"]
+  BG --> ScratchSeed["Seed artifacts from graph history<br/>latest module_output per module"]
+  ScratchSeed --> ExecPad["Load artifacts/*.md<br/>into executive slot"]
   ExecPad --> Context["Create shared Context"]
   Context --> Loop["run_react_loop(executive)"]
   Loop --> Verdict["Write leader verdict node<br/>source = leader"]
-  Verdict --> Save["Save graph, belief graph,<br/>conversation, scratchpad.md"]
+  Verdict --> Save["Save graph, belief graph,<br/>conversation, artifacts/*.md"]
 ```
 
 Important details:
@@ -179,8 +179,8 @@ Important details:
 - `scenario.modules` becomes the executive's dispatchable manager list.
 - When a scenario has a leader prompt, that list also becomes
   `ordered_modules`.
-- The executive's persistent notes live in `scratchpad.md`.
-- Module slots in the in-memory scratchpad are rebuilt from graph history at run
+- The executive's persistent notes live in `artifacts/*.md`.
+- Module slots in the in-memory artifacts are rebuilt from graph history at run
   start and updated as managers conclude.
 
 ## 6. Prompt Construction
@@ -195,7 +195,7 @@ flowchart TD
   Prompt --> User["User content"]
   User --> Objective["Current instruction + overall objective"]
   User --> Operator["Operator messages<br/>executive only"]
-  User --> Scratch["Scratchpad<br/>shared whiteboard"]
+  User --> Scratch["Artifacts<br/>shared whiteboard"]
   User --> History["Module conversation history<br/>cross-run timeline"]
   User --> Experience["Learned experience<br/>role-scoped graph signals"]
   User --> Belief["Belief brief<br/>role-scoped hypotheses + experiments"]
@@ -208,7 +208,7 @@ Channels have different meanings:
 
 | Channel | Meaning |
 |---|---|
-| Scratchpad | Shared markdown whiteboard for concise working state. |
+| Artifacts | Shared markdown whiteboard for concise working state. |
 | Module outputs | Latest raw `conclude()` text by module name. |
 | Module history | Ordered record of what ran. |
 | Target transcript | Raw target exchanges in the current target session. |
@@ -222,7 +222,7 @@ Context blocks are scoped by actor:
 |---|---:|---:|---:|
 | Overall objective | Yes | Yes | Yes |
 | Operator messages | Yes | No | No |
-| Scratchpad whiteboard | Yes | Yes | Yes |
+| Artifacts whiteboard | Yes | Yes | Yes |
 | Module conversation history | Yes | Yes | Yes |
 | Learned module outcomes | Dispatchable managers only | Dispatchable children only | No |
 | Learned reusable evidence | Yes | Yes | Yes |
@@ -238,13 +238,13 @@ success/low-yield summaries for modules it can actually dispatch.
 When debugging, first ask: "Which channel was supposed to carry this
 information?"
 
-## 7. Scratchpad Contract
+## 7. Artifacts Contract
 
-The scratchpad is one shared markdown whiteboard rendered into prompts. It is
+The artifacts is one shared markdown whiteboard rendered into prompts. It is
 not the per-module output cache.
 
 ```markdown
-## Scratchpad — shared whiteboard
+## Artifacts — shared whiteboard
 
 ## Target
 research-l1, Acme Corp research assistant
@@ -275,8 +275,8 @@ flowchart TD
   GraphHistory["graph conversation_history()"] --> ModuleCache["Seed module_outputs<br/>latest raw output by module"]
   ModuleCache --> PhaseGate["Ordered phase gates<br/>marker checks"]
 
-  PersistedPad["scratchpad.md"] --> Whiteboard["Shared scratchpad whiteboard"]
-  PatchTool["update_scratchpad<br/>content or operations"] --> Whiteboard
+  PersistedPad["artifacts/*.md"] --> Whiteboard["Shared artifacts whiteboard"]
+  PatchTool["update_artifact<br/>content or operations"] --> Whiteboard
   Whiteboard --> Prompt["Rendered into every prompt"]
 
   ChildResult["child conclude(result)"] --> AutoWrite["sub_module.handle writes<br/>module_outputs[child_name] = result"]
@@ -287,7 +287,7 @@ Rules:
 
 - A module's `conclude()` text is auto-written to `module_outputs[module_name]`.
 - Latest output wins in `module_outputs`.
-- `update_scratchpad` updates the shared whiteboard. It accepts either full
+- `update_artifact` updates the shared whiteboard. It accepts either full
   replacement `content` or patch `operations`.
 - The graph remains the complete timeline.
 - Structured artifacts can declare required marker strings. If a retry output
@@ -365,7 +365,7 @@ Parent actors do not see a child's private LLM scratch messages. They see:
 - the child's `conclude()` text,
 - judge digest,
 - recent raw target evidence included in the tool result,
-- later scratchpad and graph history.
+- later artifacts and graph history.
 
 ## 10. AttackGraph Contract
 
@@ -555,12 +555,12 @@ When a graph looks wrong:
 | Tool policy materialization | `mesmer/core/agent/tools/__init__.py` |
 | ReAct loop and prompt construction | `mesmer/core/agent/engine.py` |
 | Shared context and child contexts | `mesmer/core/agent/context.py` |
-| Sub-module delegation and scratchpad writes | `mesmer/core/agent/tools/sub_module.py` |
+| Sub-module delegation and artifacts writes | `mesmer/core/agent/tools/sub_module.py` |
 | Target I/O | `mesmer/core/agent/tools/send_message.py` |
-| Executive operator tools | `ask_human.py`, `talk_to_operator.py`, `update_scratchpad.py` |
+| Executive operator tools | `ask_human.py`, `talk_to_operator.py`, `artifacts/update_artifact.py` |
 | Judge and graph/belief updates | `mesmer/core/agent/evaluation.py` |
 | AttackGraph model | `mesmer/core/graph.py` |
-| Scratchpad model | `mesmer/core/scratchpad.py` |
+| Artifacts model | `mesmer/core/artifacts.py` |
 | BeliefGraph model | `mesmer/core/belief_graph.py` |
 | Attack graph UI projection | `mesmer/interfaces/web/frontend/src/lib/leader-timeline.js` |
 | Attack graph canvas | `mesmer/interfaces/web/frontend/src/components/AttackGraph.svelte` |

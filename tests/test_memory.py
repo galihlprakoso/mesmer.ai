@@ -97,44 +97,14 @@ class TestTargetMemory:
                      if p.name.startswith("profile.md.")]
         assert leftovers == []
 
-    def test_save_and_load_scratchpad(self, memory):
-        notes = "# Working notes\n\nFocus on behavioral rules. Avoid identity claims."
-        memory.save_scratchpad(notes)
-        assert memory.load_scratchpad() == notes
+    def test_save_and_load_artifacts(self, memory):
+        from mesmer.core.artifacts import ArtifactStore
 
-    def test_load_scratchpad_no_file(self, memory):
-        assert memory.load_scratchpad() is None
+        artifacts = ArtifactStore({"operator_notes": "# Working notes\n"})
+        memory.save_artifacts(artifacts)
 
-    def test_delete_scratchpad(self, memory):
-        memory.save_scratchpad("# temp")
-        assert memory.scratchpad_path.exists()
-        memory.delete_scratchpad()
-        assert not memory.scratchpad_path.exists()
-        assert memory.load_scratchpad() is None
-
-    def test_delete_scratchpad_idempotent(self, memory):
-        # Deleting a non-existent scratchpad should not raise.
-        memory.delete_scratchpad()
-        assert memory.load_scratchpad() is None
-
-    def test_legacy_plan_md_migrates_to_scratchpad_md(self, target_config, tmp_path):
-        """Old plan.md files should auto-rename to scratchpad.md on init."""
-        with patch("mesmer.core.agent.memory.MESMER_HOME", tmp_path / ".mesmer"):
-            # Plant a legacy plan.md (manually, bypassing init's migration).
-            m1 = TargetMemory(target_config)
-            m1.base_dir = tmp_path / ".mesmer" / "targets" / m1.target_hash
-            m1.base_dir.mkdir(parents=True, exist_ok=True)
-            legacy = m1.base_dir / "plan.md"
-            legacy.write_text("# legacy plan content")
-            # Rebuild — __init__ should perform the rename.
-            m2 = TargetMemory(target_config)
-            m2.base_dir = tmp_path / ".mesmer" / "targets" / m2.target_hash
-            # Re-run migration on the rebuilt instance (its __init__ ran
-            # before we adjusted base_dir).
-            m2._migrate_legacy_plan_to_scratchpad()
-            assert not legacy.exists()
-            assert m2.scratchpad_path.exists()
-            assert m2.load_scratchpad() == "# legacy plan content"
+        loaded = memory.load_artifacts()
+        assert loaded.get("operator_notes") == "# Working notes\n"
 
     # --- Chat log -------------------------------------------------------
 

@@ -20,8 +20,8 @@ through manager `sub_modules:` lists.
 
 | Role | Authored? | Runs at | Tools |
 |---|---|---|---|
-| **Executive** | No — synthesised by the runner from `scenario.modules` | depth 0 | `talk_to_operator`, `update_scratchpad`, `ask_human`, manager-dispatch tools, `conclude` |
-| **Manager** | Yes — `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | depth 1 | Policy-defined; usually sub-module dispatch, `update_scratchpad`, `conclude` |
+| **Executive** | No — synthesised by the runner from `scenario.modules` | depth 0 | `talk_to_operator`, artifact tools, `ask_human`, manager-dispatch tools, `conclude` |
+| **Manager** | Yes — `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | depth 1 | Policy-defined; usually sub-module dispatch, artifact tools, `conclude` |
 | **Employee** | Yes — anywhere under `modules/`, referenced via a manager's `sub_modules:` | depth ≥ 2 | same as manager (recursive) |
 
 The executive never talks to the target — it dispatches managers.
@@ -263,8 +263,9 @@ target:
 ## Multiple managers — manager chains
 
 Because `modules:` is a list, the executive can dispatch several
-managers in sequence. Each populates the scratchpad with its findings;
-later managers read what the prior ones produced.
+managers in sequence. Each manager records concluded output in Module
+Conversation History and can update declared artifacts; later managers
+read what the prior ones produced.
 
 ```yaml
 modules:
@@ -297,11 +298,11 @@ A YAML carrying both `module:` and `modules:` also fails (ambiguous).
 ## Executive vs manager: the role split
 
 The executive owns the **operator channel** (chat, ask-human,
-scratchpad). Managers own the **target channel** (`send_message`).
+operator notes). Managers own the **target channel** (`send_message`).
 The split is enforced by `core/agent/tools/__init__.py::build_tool_list`
 — at runtime the executive's tool list excludes `send_message`
 entirely, and managers' tool lists exclude `talk_to_operator` /
-`update_scratchpad` / `ask_human`.
+`ask_human`.
 
 If you find yourself wanting the executive to query the target
 directly, you're trying to do a manager's job. Either author a manager

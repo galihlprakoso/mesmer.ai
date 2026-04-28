@@ -102,7 +102,7 @@ export const MODULES: Module[] = [
     tier: 0,
     status: "shipped",
     description:
-      "Layered blackbox recon — identity, defence shape, policy surface. Concludes with a dossier subsequent modules read from the scratchpad.",
+      "Layered blackbox recon — identity, defence shape, policy surface. Concludes with a dossier subsequent modules read from history and artifacts.",
     icon: Fingerprint,
   },
   {

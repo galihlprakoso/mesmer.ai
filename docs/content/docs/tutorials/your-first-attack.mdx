@@ -89,10 +89,10 @@ uv run mesmer run scenarios/extract-system-prompt.yaml
 ```
 
 Note `[ hydrate graph ]` now reports nodes from the previous run, and
-the planner's first step bypasses techniques marked DEAD last time. The
-scratchpad pre-loads with prior `target-profiler` and `attack-planner`
-outputs (latest wins per slot) — modules see them in their `## Scratchpad`
-block.
+the planner's first step bypasses techniques marked DEAD last time.
+Module Conversation History pre-loads prior `target-profiler` and
+`attack-planner` outputs (latest wins for ordered gates), and modules
+also see the artifact contract and artifact brief.
 
 To wipe state: `mesmer graph reset scenarios/extract-system-prompt.yaml`,
 or pass `--fresh` to bypass loading without deleting.

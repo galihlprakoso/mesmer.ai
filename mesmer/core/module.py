@@ -131,7 +131,14 @@ class ModuleConfig:
             if self.tool_policy is not None
             else ToolPolicySpec(
                 dispatch_submodules=bool(self.sub_modules),
-                builtin=["send_message", "conclude"],
+                builtin=[
+                    "send_message",
+                    "list_artifacts",
+                    "read_artifact",
+                    "search_artifacts",
+                    "update_artifact",
+                    "conclude",
+                ],
             )
         )
 

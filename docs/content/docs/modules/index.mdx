@@ -16,12 +16,12 @@ tree and by their `ReactActorSpec.role`:
 
 | Role | Authored? | Depth | Tools |
 |---|---|---|---|
-| **Executive** | No — synthesised by `runner.execute_run` | 0 | `talk_to_operator`, `update_scratchpad`, `ask_human`, manager dispatch, `conclude` |
-| **Manager** | YES — `modules/attacks/<name>/`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, `update_scratchpad`, `conclude` |
+| **Executive** | No — synthesised by `runner.execute_run` | 0 | `talk_to_operator`, artifact tools, `ask_human`, manager dispatch, `conclude` |
+| **Manager** | YES — `modules/attacks/<name>/`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, artifact tools, `conclude` |
 | **Employee** | YES — anywhere under `modules/`, referenced in a manager's `sub_modules:` | ≥ 2 | Policy-defined: usually `send_message`, `conclude` |
 
 The executive owns the **operator channel** (chat, ask-human,
-scratchpad). Managers and employees own the **target channel** when their
+operator notes). Managers and employees own the **target channel** when their
 `tool_policy` grants `send_message`. Tool gating is declarative in each
 actor's `ToolPolicySpec` and materialized by
 `core/agent/tools/__init__.py::build_tool_list`.
@@ -113,8 +113,8 @@ mean and how the frontier gate uses them.
 ## Managers vs sub-modules
 
 - **Manager modules** (`modules/attacks/*`) — orchestrate. They read
-  the attack graph, inspect the scratchpad (`## Scratchpad — current
-  state` block injected into every user message), and pick which
+  the attack graph, inspect the artifact contract and artifact brief
+  injected into prompts, and pick which
   sub-module to delegate to next. The manager's `conclude()` text
   becomes its `AttackNode.module_output` and is rendered into the
   executive's prompt for the executive to read on its next iteration.

@@ -14,6 +14,12 @@ import pytest
 
 from mesmer.core.agent.context import Turn
 from mesmer.core.agent.memory import TargetMemory
+from mesmer.core.artifacts import (
+    ArtifactSpec,
+    ArtifactStore,
+    ArtifactUpdateStatus,
+    StandardArtifactId,
+)
 from mesmer.core.constants import NodeSource, NodeStatus
 from mesmer.core.scenario import TargetConfig
 from mesmer.interfaces.web.backend import leader_chat
@@ -69,6 +75,13 @@ def _populate_graph(memory: TargetMemory):
         source=NodeSource.LEADER.value,
     )
     memory.save_graph(graph)
+    memory.save_artifacts(
+        ArtifactStore(
+            {
+                "format-shift": "WIN: format-shift extracted system prompt verbatim.",
+            }
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -154,20 +167,71 @@ class TestDispatchTool:
         # Three nodes carry non-empty leaked_info (the dead anchoring one is empty).
         assert len(out["items"]) == 3
 
-    def test_get_module_state_latest(self, memory):
+    def test_list_artifacts_includes_saved_artifacts(self, memory):
         _populate_graph(memory)
-        out = leader_chat.dispatch_tool(
-            "get_module_state", {"module_name": "format-shift"}, memory
-        )
-        assert out["module"] == "format-shift"
-        assert "extracted system prompt" in out["module_output"]
+        out = leader_chat.dispatch_tool("list_artifacts", {}, memory)
 
-    def test_get_module_state_unknown(self, memory):
+        assert out["items"][0]["id"] == "format-shift"
+        assert out["items"][0]["exists"] is True
+        assert out["items"][0]["declared"] is False
+
+    def test_list_artifacts_includes_empty_declared_artifacts(self, memory):
+        out = leader_chat.dispatch_tool(
+            "list_artifacts",
+            {},
+            memory,
+            artifact_specs=[
+                ArtifactSpec(
+                    id="system_prompt",
+                    title="System Prompt",
+                    description="Canonical prompt recon.",
+                )
+            ],
+        )
+
+        assert out["items"][0]["id"] == "system_prompt"
+        assert out["items"][0]["title"] == "System Prompt"
+        assert out["items"][0]["description"] == "Canonical prompt recon."
+        assert out["items"][0]["exists"] is False
+        assert out["items"][0]["declared"] is True
+        assert [item["id"] for item in out["items"]] == ["system_prompt"]
+
+    def test_read_artifact_returns_declared_metadata(self, memory):
         _populate_graph(memory)
         out = leader_chat.dispatch_tool(
-            "get_module_state", {"module_name": "nonexistent"}, memory
+            "read_artifact",
+            {"artifact_id": "system_prompt"},
+            memory,
+            artifact_specs=[ArtifactSpec(id="system_prompt", title="System Prompt")],
         )
-        assert out["module_output"] is None
+
+        assert out["artifact_id"] == "system_prompt"
+        assert out["declared"] is True
+        assert out["exists"] is False
+        assert out["title"] == "System Prompt"
+
+    def test_read_artifact_rejects_undeclared_id_when_contract_exists(self, memory):
+        _populate_graph(memory)
+        out = leader_chat.dispatch_tool(
+            "read_artifact",
+            {"artifact_id": "format-shift"},
+            memory,
+            artifact_specs=[ArtifactSpec(id="system_prompt")],
+        )
+
+        assert "error" in out
+        assert "system_prompt" in out["error"]
+
+    def test_search_artifacts_stays_inside_declared_contract(self, memory):
+        _populate_graph(memory)
+        out = leader_chat.dispatch_tool(
+            "search_artifacts",
+            {"query": "system prompt"},
+            memory,
+            artifact_specs=[ArtifactSpec(id="system_prompt")],
+        )
+
+        assert out["items"] == []
 
     def test_list_runs_includes_verdict(self, memory):
         _populate_graph(memory)
@@ -193,16 +257,40 @@ class TestDispatchTool:
         out = leader_chat.dispatch_tool("get_run_turns", {"run_id": "ghost"}, memory)
         assert out["items"] == []
 
-    def test_update_scratchpad_persists(self, memory):
+    def test_update_artifact_persists(self, memory):
         out = leader_chat.dispatch_tool(
-            "update_scratchpad", {"content": "lessons learned"}, memory
+            "update_artifact",
+            {
+                "artifact_id": StandardArtifactId.OPERATOR_NOTES.value,
+                "content": "lessons learned",
+            },
+            memory,
         )
-        assert out["status"] == "saved"
-        assert memory.load_scratchpad() == "lessons learned"
+        assert out["status"] == ArtifactUpdateStatus.SAVED.value
+        assert (
+            memory.load_artifacts().get(StandardArtifactId.OPERATOR_NOTES.value)
+            == "lessons learned"
+        )
 
-    def test_update_scratchpad_rejects_non_string(self, memory):
+    def test_update_artifact_rejects_undeclared_id_when_contract_exists(self, memory):
         out = leader_chat.dispatch_tool(
-            "update_scratchpad", {"content": ["not", "a", "string"]}, memory
+            "update_artifact",
+            {"artifact_id": "format-shift", "content": "undeclared document"},
+            memory,
+            artifact_specs=[ArtifactSpec(id="system_prompt")],
+        )
+
+        assert "error" in out
+        assert "system_prompt" in out["error"]
+
+    def test_update_artifact_rejects_non_string(self, memory):
+        out = leader_chat.dispatch_tool(
+            "update_artifact",
+            {
+                "artifact_id": StandardArtifactId.OPERATOR_NOTES.value,
+                "content": ["not", "a", "string"],
+            },
+            memory,
         )
         assert "error" in out
 
@@ -250,7 +338,7 @@ async def test_loop_no_tool_calls_returns_text(memory, target_config):
     scenario = _scenario(target_config)
 
     fake_completion = AsyncMock(side_effect=[
-        _mk_choice(content="Hi op — based on your scratchpad, let's try authority framing next."),
+        _mk_choice(content="Hi op — based on your artifacts, let's try authority framing next."),
     ])
     with patch("mesmer.interfaces.web.backend.leader_chat.litellm.acompletion", fake_completion):
         result = await leader_chat.run_leader_chat(
@@ -259,7 +347,7 @@ async def test_loop_no_tool_calls_returns_text(memory, target_config):
 
     assert "authority framing" in result.reply
     assert result.tool_trace == []
-    assert result.updated_scratchpad is None
+    assert result.updated_artifact is None
     fake_completion.assert_awaited_once()
     # Both user msg and assistant reply should now be in chat.jsonl.
     chat = memory.load_chat()
@@ -299,11 +387,19 @@ async def test_loop_dispatches_tool_then_replies(memory, target_config):
 
 
 @pytest.mark.asyncio
-async def test_loop_update_scratchpad_persisted_and_returned(memory, target_config):
+async def test_loop_update_artifact_persisted_and_returned(memory, target_config):
     scenario = _scenario(target_config)
 
     fake_completion = AsyncMock(side_effect=[
-        _mk_choice(tool_calls=[_mk_tool_call("update_scratchpad", {"content": "lesson: try Spanish"})]),
+        _mk_choice(tool_calls=[
+            _mk_tool_call(
+                "update_artifact",
+                {
+                    "artifact_id": StandardArtifactId.OPERATOR_NOTES.value,
+                    "content": "lesson: try Spanish",
+                },
+            )
+        ]),
         _mk_choice(content="Saved."),
     ])
     with patch("mesmer.interfaces.web.backend.leader_chat.litellm.acompletion", fake_completion):
@@ -311,8 +407,11 @@ async def test_loop_update_scratchpad_persisted_and_returned(memory, target_conf
             scenario, memory, "save this as a lesson"
         )
 
-    assert result.updated_scratchpad == "lesson: try Spanish"
-    assert memory.load_scratchpad() == "lesson: try Spanish"
+    assert result.updated_artifact == {
+        "artifact_id": StandardArtifactId.OPERATOR_NOTES.value,
+        "chars": 19,
+    }
+    assert memory.load_artifacts().get(StandardArtifactId.OPERATOR_NOTES.value) == "lesson: try Spanish"
 
 
 @pytest.mark.asyncio

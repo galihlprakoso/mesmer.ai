@@ -68,7 +68,7 @@ The goal is simple: every run should make the next run smarter.
 | **Cognitive techniques** | Modules use patterns like foot-in-door, anchoring, authority bias, narrative transport, delimiter probes, and format shifts. |
 | **Persistent memory** | Mesmer stores per-target attack graphs and belief graphs under `~/.mesmer/targets/{hash}/`. |
 | **Human steering** | Operator hints become high-priority graph nodes through `--hint`, `mesmer hint`, and `mesmer debrief`. |
-| **Live visualization** | The web UI shows attack timeline, active module state, node detail, scratchpad, and belief map. |
+| **Live visualization** | The web UI shows attack timeline, active module state, node detail, artifacts, and belief map. |
 | **Benchmarks** | Benchmark specs compare Mesmer against single-turn baselines with deterministic judges. |
 
 ## Why It Matters

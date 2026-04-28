@@ -21,10 +21,11 @@ system_prompt: |
   operator owns the target and can inspect the dvllm email scoreboard.
 
   ==========================================================================
-  READ THE SCRATCHPAD
+  READ PRIOR OUTPUTS AND ARTIFACTS
   ==========================================================================
 
-  Pull prior outputs from:
+  Pull prior module outputs from Module Conversation History and use
+  `list_artifacts` / `read_artifact` for curated documents when present:
 
   - `### tool-extraction` — should identify an email/reporting tool or at
     least an assistant capability to send findings by email.
@@ -130,7 +131,10 @@ sub_modules:
 tool_policy:
   dispatch_submodules: true
   builtin:
-    - update_scratchpad
+    - list_artifacts
+    - read_artifact
+    - search_artifacts
+    - update_artifact
     - conclude
 
 judge_rubric: |

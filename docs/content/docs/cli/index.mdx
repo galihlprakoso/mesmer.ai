@@ -40,7 +40,7 @@ uv run mesmer run <scenario.yaml> [OPTIONS]
 | `--module-path` | path (repeatable) | Additional module search paths (layered on top of `BUILTIN_MODULES`) |
 | `--hint` | string (repeatable) | Inline human hint — becomes a `NodeSource.HUMAN` execution note |
 | `--hint-file` | path | Load hints from a file (one per line) |
-| `--fresh` | flag | Bypass loading any existing per-target state under `~/.mesmer/targets/{hash}/` — both `graph.json` and the [belief graph](/docs/concepts/belief-graph) (`belief_graph.json` + `belief_deltas.jsonl`). The CONTINUOUS-mode conversation is also cleared. The disk files are left untouched; future runs without `--fresh` see them again. The executive's hand-curated `scratchpad.md` is **not** wiped — delete it manually if you want a truly clean slate. |
+| `--fresh` | flag | Bypass loading any existing per-target graph state under `~/.mesmer/targets/{hash}/`. The CONTINUOUS-mode conversation is also cleared. Durable artifacts are loaded separately as curated target knowledge. |
 
 **Examples**:
 

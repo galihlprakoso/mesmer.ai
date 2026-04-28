@@ -36,6 +36,7 @@ from mesmer.core.agent.retry import _completion_with_retry
 from mesmer.core.agent.tools import build_tool_list, dispatch_tool_call
 from mesmer.core.agent.tools.conclude import DEFAULT_RESULT as CONCLUDE_DEFAULT_RESULT
 from mesmer.core.actor import ReactActorSpec, ensure_actor
+from mesmer.core.artifacts import render_artifact_contract
 from mesmer.core.constants import (
     MAX_CONSECUTIVE_REASONING,
     LogEvent,
@@ -162,7 +163,7 @@ async def run_react_loop(
     #
     # Sub-module (ctx.depth > 0): flag potential signals in conclude text with
     # "OBJECTIVE SIGNAL —" and finish the full deliverable. The leader reads
-    # the scratchpad, evaluates the signal against the overall objective, and
+    # the artifact, evaluates the signal against the overall objective, and
     # is the ONLY one authorised to terminate the run.
     #
     # Leader (ctx.depth == 0): read OBJECTIVE SIGNAL flags from sub-modules
@@ -204,7 +205,7 @@ async def run_react_loop(
             "LEADER — only you decide whether the run terminates.\n"
             "\n"
             "Your sub-modules flag potential signals using the marker "
-            "`OBJECTIVE SIGNAL — <fragment>` in their Scratchpad entries. "
+            "`OBJECTIVE SIGNAL — <fragment>` in their artifact updates and conclude text. "
             "Also check the raw target evidence in each tool result.\n"
             "\n"
             "If the evidence UNAMBIGUOUSLY satisfies the overall objective, "
@@ -247,21 +248,24 @@ async def run_react_loop(
                 "tool if useful.\n\n" + "\n".join(rendered)
             )
 
-    # Scratchpad — shared whiteboard. This is intentionally not the
-    # per-module output cache; full reports are available through the graph
-    # history below. The scratchpad is concise working state that agents
-    # maintain with update_scratchpad.
-    scratchpad_block = ctx.scratchpad.render_for_prompt()
-    if scratchpad_block:
-        user_content_parts.append(
-            "## Scratchpad — shared whiteboard\n" + scratchpad_block
-        )
+    # Artifact contract — scenario-declared durable output documents.
+    # This is injected even when documents are empty so the agent knows what
+    # it is expected to create/update.
+    artifact_contract = render_artifact_contract(ctx.artifact_specs)
+    if artifact_contract:
+        user_content_parts.append(artifact_contract)
+
+    # Artifact brief — existing durable Markdown knowledge state. Agents get
+    # a compact inventory automatically and can call artifact tools for detail.
+    artifact_brief = ctx.artifacts.render_brief_for_prompt()
+    if artifact_brief:
+        user_content_parts.append(artifact_brief)
 
     # Module conversation history — TIMELINE. Ordered record of every
     # module execution (across all runs), oldest first, last N shown.
     # Answers "what HAPPENED, in what order?" and makes the chain of
-    # reasoning visible. Complements the scratchpad: scratchpad is the
-    # snapshot, history is the sequence.
+    # reasoning visible. Complements artifacts: artifacts are the current
+    # knowledge state, history is the execution sequence.
     if ctx.graph is not None:
         history_block = ctx.graph.render_conversation_history()
         if history_block:

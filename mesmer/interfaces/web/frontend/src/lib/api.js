@@ -81,3 +81,23 @@ export async function getBeliefGraph(targetHash) {
   const res = await fetch(`/api/targets/${encodeURIComponent(targetHash)}/belief-graph`)
   return unwrap(res)
 }
+
+export async function listArtifacts(targetHash) {
+  const res = await fetch(`/api/targets/${encodeURIComponent(targetHash)}/artifacts`)
+  return unwrap(res)
+}
+
+export async function readArtifact(targetHash, artifactId) {
+  const res = await fetch(
+    `/api/targets/${encodeURIComponent(targetHash)}/artifacts/${encodeURIComponent(artifactId)}`,
+  )
+  return unwrap(res)
+}
+
+export async function searchArtifacts(targetHash, query, limit = 20) {
+  const params = new URLSearchParams({ query: query || '', limit: String(limit) })
+  const res = await fetch(
+    `/api/targets/${encodeURIComponent(targetHash)}/artifacts/search?${params.toString()}`,
+  )
+  return unwrap(res)
+}

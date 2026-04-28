@@ -73,7 +73,7 @@ mesmer/                          # repo root
 │   │   │   │   │                    #   to dedupe with module-level extraction.
 │   │   │   │   ├── ask_human.py       # executive-only: blocking question
 │   │   │   │   ├── talk_to_operator.py # executive-only: non-blocking chat reply
-│   │   │   │   ├── update_scratchpad.py # shared whiteboard: full replace or patch ops
+│   │   │   │   ├── artifacts/update_artifact.py # shared whiteboard: full replace or patch ops
 │   │   │   │   ├── conclude.py  # no handler — engine short-circuits
 │   │   │   │   ├── sub_module.py # dynamic: executes sub-module + judge + graph.
 │   │   │   │   │                #   _auto_bind_experiment_id resolves the
@@ -159,7 +159,7 @@ mesmer/                          # repo root
 │   │   │                        #   AttackNode.is_leader_verdict distinguishes the
 │   │   │                        #   leader's own execution node (source=LEADER)
 │   │   │                        #   from sub-module attempts.
-│   │   ├── scratchpad.py        # Scratchpad dataclass — one shared markdown
+│   │   ├── artifacts.py        # Artifacts dataclass — one shared markdown
 │   │   │                        #   whiteboard plus a separate latest-output
 │   │   │                        #   cache keyed by module name. Only the
 │   │   │                        #   whiteboard renders into prompts; module
@@ -169,7 +169,7 @@ mesmer/                          # repo root
 │   │   │                        #   scoped ExecutiveSpec / ReactActorSpec in
 │   │   │                        #   memory (name "<stem>:executive"), seeds
 │   │   │                        #   module_outputs from graph history and the
-│   │   │                        #   shared whiteboard from scratchpad.md, and at
+│   │   │                        #   shared whiteboard from artifacts/*.md, and at
 │   │   │                        #   run end records the executive's own execution
 │   │   │                        #   as an AttackNode with source=LEADER. Belief-
 │   │   │                        #   graph wiring: loads/saves belief_graph.json
@@ -275,11 +275,14 @@ mesmer/                          # repo root
 │   │   ├── system-prompt-extraction/module.yaml  # leak system-prompt text
 │   │   ├── tool-extraction/module.yaml           # leak function-calling catalog
 │   │   ├── indirect-prompt-injection/module.yaml # prove retrieval/tool-output injection
+│   │   ├── rag-document-injection-proof/module.yaml # prove RAG/document source-boundary failure
 │   │   └── email-exfiltration-proof/module.yaml  # validate email side-effect proof
 │   ├── profilers/
-│   │   └── target-profiler/module.yaml         # tier 0; latest dossier cached in module_outputs["target-profiler"]
+│   │   ├── target-profiler/module.yaml         # tier 0; latest dossier cached in module_outputs["target-profiler"]
+│   │   └── tool-risk-profiler/module.yaml      # tier 0; maps tool permissions/autonomy/dry-run gates
 │   ├── planners/
-│   │   └── attack-planner/module.yaml          # tier 0; latest plan cached in module_outputs["attack-planner"]
+│   │   ├── attack-planner/module.yaml          # tier 0; latest plan cached in module_outputs["attack-planner"]
+│   │   └── risk-scenario-planner/module.yaml   # tier 0; converts risk evidence into scenario blueprint
 │   └── techniques/
 │       ├── cognitive-bias/                     # all tier 2 (default)
 │       │   ├── anchoring/module.yaml
@@ -300,6 +303,14 @@ mesmer/                          # repo root
 │           ├── role-impersonation/module.yaml     # tier 1
 │           ├── fake-function-injection/module.yaml # tier 1 — forge function schema
 │           └── hallucinated-tool-probing/module.yaml # tier 1 — tool-name enumeration
+│       └── tool-use/                            # agentic/tool and source-boundary techniques
+│           ├── source-boundary-contrast/module.yaml # tier 1 — trusted-task vs untrusted-content contrast
+│           ├── react-observation-spoofing/module.yaml # tier 1 — fake ReAct trace in untrusted data
+│           ├── conversation-context-injection/module.yaml # tier 2 — pasted brief/ticket injection
+│           ├── tool-capability-validation/module.yaml # tier 2 — validate extracted tool catalog
+│           ├── tool-parameter-fuzzing/module.yaml # tier 2 — probe parameters/allowed values
+│           ├── handoff-side-effect-proof/module.yaml # tier 2 — dry-run handoff side-effect proof
+│           └── cart-link-side-effect-proof/module.yaml # tier 2 — dry-run cart/link artifact proof
 │
 ├── scenarios/                   # YAML scenario files (target + attacker + modules)
 │   ├── extract-system-prompt.yaml          # baseline: openai-compat target
@@ -308,6 +319,7 @@ mesmer/                          # repo root
 │   ├── extract-dvllm-tools.yaml            # tool-extraction vs dvllm research-l1
 │   ├── extract-dvllm-support-tools.yaml    # negative control: support-l1 has no tools
 │   ├── extract-system-and-tools.yaml       # chained: system-prompt → tool-extraction
+│   ├── rag-document-injection-proof.yaml   # RAG/document/ticket source-boundary proof
 │   ├── full-redteam-report.yaml            # instruction/tool recon → injection proof
 │   ├── full-redteam-with-execution.yaml    # four-phase: prompt → tools →
 │   │                                       #   injection → email proof
@@ -337,7 +349,7 @@ mesmer/                          # repo root
 │   ├── test_registry_tier.py    # Registry.tier_of / tiers_for
 │   ├── test_prompt_tier_render.py   # _build_graph_context tier prefixes
 │   ├── test_field_modules_load.py   # tier-0/1 module YAMLs + banned-string scan
-│   ├── test_scratchpad.py       # Scratchpad dataclass + render_for_prompt
+│   ├── test_artifacts.py       # Artifacts dataclass + render_for_prompt
 │   ├── test_scenario.py         # Scenario YAML + ${ENV_VAR} + throttle parsing
 │   ├── test_keys.py             # KeyPool throttling
 │   ├── test_human_broker.py     # HumanQuestionBroker Future-based wait
@@ -355,7 +367,7 @@ mesmer/                          # repo root
 │   │                                 #   tools on, validates "modules" registry refs
 │   ├── test_leader_chat.py      # operator_messages queue drain + chat persistence
 │   ├── test_talk_to_operator.py # tool schema + OPERATOR_REPLY emission
-│   ├── test_update_scratchpad.py # tool schema + scratchpad.md persistence
+│   ├── test_artifacts/update_artifact.py # tool schema + artifacts/*.md persistence
 │   └── test_canary_judge.py     # bench.canary substring match
 │
 └── docs/                        # Fumadocs (Next.js 15 + MDX) site — landing + docs
@@ -397,10 +409,10 @@ Persistence lives *outside* the repo at `~/.mesmer/`:
 │   │                             # (source=LEADER) so the tree always ends on
 │   │                             # the executive's decision, not on whichever
 │   │                             # sub-module was last delegated to.
-│   ├── scratchpad.md             # shared markdown whiteboard —
-│   │                             # written by update_scratchpad (full replace
+│   ├── artifacts/*.md             # shared markdown whiteboard —
+│   │                             # written by update_artifact (full replace
 │   │                             # or patch ops) AND by the operator via the
-│   │                             # web UI. Seeded into ctx.scratchpad.content
+│   │                             # web UI. Seeded into ctx.artifacts.content
 │   │                             # at run start.
 │   │                             # Migrated automatically from the old plan.md
 │   │                             # on first init of an existing target.
@@ -437,8 +449,8 @@ Persistence lives *outside* the repo at `~/.mesmer/`:
 output that lives in the graph (authoritative) and the run-scoped
 module_outputs cache (for phase gates / handoff checks). The old
 free-standing `plan.md` is gone; its file has been renamed in place to
-`scratchpad.md` and is now the shared markdown whiteboard
-(rewritten or patched via `update_scratchpad`, not hand-authored). Core has no typed
+`artifacts/*.md` and is now the shared markdown whiteboard
+(rewritten or patched via `update_artifact`, not hand-authored). Core has no typed
 dossier abstraction; the framework doesn't know what a "profile" is.
 
 ## Architecture
@@ -784,8 +796,8 @@ Sub-modules are exposed to the parent agent as OpenAI-style function-calling too
 
 | Role | Authored? | Depth | Tools |
 |---|---|---|---|
-| **Executive** | No — synthesized by `runner.execute_run` | 0 | Policy-defined: operator tools, manager dispatch, `update_scratchpad`, `conclude` |
-| **Manager** | YES — in `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, `update_scratchpad`, `conclude` |
+| **Executive** | No — synthesized by `runner.execute_run` | 0 | Policy-defined: operator tools, manager dispatch, `update_artifact`, `conclude` |
+| **Manager** | YES — in `modules/attacks/<name>/module.yaml`, listed in `scenario.modules` | 1 | Policy-defined: usually sub-module dispatch, `update_artifact`, `conclude` |
 | **Employee** | YES — anywhere under `modules/`, referenced via a manager's `sub_modules:` | ≥ 2 | Policy-defined: usually `send_message`, `conclude` |
 
 The executive is the only role that talks to the operator. Managers and employees talk to the target only when their `ToolPolicySpec` grants `send_message`. Tool gating is declarative: `build_tool_list()` materializes `actor.tool_policy`.
@@ -816,21 +828,21 @@ planners are modules that happen to produce text.
 | Surface | Lifetime | Where it lives | What it is |
 |---|---|---|---|
 | **Attack graph** (`core/graph.py::AttackGraph`) | Cross-run — `graph.json` per target | `~/.mesmer/targets/{hash}/graph.json` | Every module execution is an `AttackNode`; each node's `module_output` is the raw `conclude()` text. Parent/child edges are delegation edges: the executive node is created at run start, manager modules attach under it, and nested module calls attach under the module that dispatched them. Authoritative record of "what did this target ever see, and how did we judge it?" |
-| **Module outputs** (`ctx.scratchpad.module_outputs`) | Run-local cache, seeded from graph history | `ctx.scratchpad.module_output(name)` / `.set_module_output(name, output)` | Latest raw `conclude()` text by module name. Used for ordered phase gates and marker checks. Not rendered as the prompt scratchpad. |
-| **Scratchpad whiteboard** (`ctx.scratchpad.content`) | Cross-run markdown file | `~/.mesmer/targets/{hash}/scratchpad.md` | One shared markdown whiteboard rendered into prompts as `## Scratchpad`. Updated by `update_scratchpad` with either full `content` replacement or structured `operations`. |
+| **Module outputs** (`ctx.artifacts.module_outputs`) | Run-local cache, seeded from graph history | `ctx.artifacts.module_output(name)` / `.set_module_output(name, output)` | Latest raw `conclude()` text by module name. Used for ordered phase gates and marker checks. Not rendered as the prompt artifacts. |
+| **Artifacts whiteboard** (`ctx.artifacts.content`) | Cross-run markdown file | `~/.mesmer/targets/{hash}/artifacts/*.md` | One shared markdown whiteboard rendered into prompts as `## Artifacts`. Updated by `update_artifact` with either full `content` replacement or structured `operations`. |
 
 A module's "output" is whatever string it returns from `conclude()`. The
 framework appends that text to the graph and caches the latest value in
-`module_outputs`. The scratchpad whiteboard is separate: it should be concise
+`module_outputs`. The artifacts whiteboard is separate: it should be concise
 shared working state, not a dump of every report.
 
 **Cross-run warm-start**:
 
 1. `runner.py` walks `graph.conversation_history()` oldest→newest and seeds
-   `module_outputs` via `ctx.scratchpad.set_module_output(node.module, node.module_output)`.
+   `module_outputs` via `ctx.artifacts.set_module_output(node.module, node.module_output)`.
    Leader-verdict nodes are excluded at source.
-2. `runner.py` reads `memory.load_scratchpad()` and writes the contents into
-   `ctx.scratchpad.content` via `ctx.scratchpad.update(scratchpad_md)`.
+2. `runner.py` reads `memory.load_artifacts()` and writes the contents into
+   `ctx.artifacts.content` via `ctx.artifacts.update(artifacts_md)`.
 
 This gives later phases precise handoff checks via `module_outputs` while the
 model prompt sees one compact shared whiteboard.
@@ -840,7 +852,7 @@ primitive: `AttackGraph.conversation_history()` returns the ordered list
 of completed module `AttackNode`s across runs for this target, excluding
 the root and leader-verdict nodes. `render_conversation_history()` formats
 that timeline for injection into the engine's user prompt (separate from
-the scratchpad whiteboard).
+the artifacts whiteboard).
 
 **Learned experience** is another derived prompt view over the graph, but it
 is role-scoped because it is planning advice:
@@ -1000,7 +1012,7 @@ def build_tool_list(actor: ReactActorSpec, ctx: Context) -> list[dict]:
 
 The default executive policy grants operator tools and manager dispatch, but
 not `send_message`. Manager policies are authored in YAML. The current
-research-demo managers grant `update_scratchpad` so they can maintain the
+research-demo managers grant `update_artifact` so they can maintain the
 shared whiteboard; leaf techniques usually only get `send_message` and
 `conclude`.
 
@@ -1028,7 +1040,7 @@ on the next executive iteration.
 
 `run_react_loop` is the universal execution engine. The cycle is **Plan → Execute → Judge → Update**:
 
-1. **Plan** — the running module sees BeliefGraph search context when available, plus AttackGraph execution history as audit context. The executive additionally sees the operator chat tail and scratchpad.
+1. **Plan** — the running module sees BeliefGraph search context when available, plus AttackGraph execution history as audit context. The executive additionally sees the operator chat tail and artifacts.
 2. **Execute** — agent emits a tool call: a manager dispatch (executive), a target message (manager / employee), an operator-chat tool (executive only), or `conclude`.
 3. **Judge** — `agent/judge.py::evaluate_attempt` scores the attempt 1-10 and extracts insights (separate LLM call via `CompletionRole.JUDGE`; uses a technique-specific `judge_rubric` composed from module + scenario).
 4. **Update** — results written to `AttackGraph` (`evaluation._update_graph`), BeliefGraph, and `TargetMemory`.
@@ -1245,8 +1257,8 @@ The bench `--verbose` CLI flag does two things: (1) writes every event to `event
   | GET | `/api/run/status` | is a run live? |
   | POST | `/api/run` | start a run |
   | POST | `/api/run/stop` | request graceful stop of the live run |
-  | GET | `/api/scratchpad` | read the executive's scratchpad.md for current target |
-  | PUT | `/api/scratchpad` | overwrite scratchpad.md from the operator UI |
+  | GET | `/api/artifacts` | read the executive's artifacts/*.md for current target |
+  | PUT | `/api/artifacts` | overwrite artifacts/*.md from the operator UI |
   | GET | `/api/chat` | tail of operator ↔ executive chat.jsonl |
   | POST | `/api/leader-chat` | operator pushes a message onto `ctx.operator_messages` |
   | POST | `/api/debrief` | generate a per-target run debrief |
@@ -1302,10 +1314,10 @@ Every branching string value in the codebase has an enum. **Never pass literals 
 | `NodeSource` | `AGENT, HUMAN, JUDGE, LEADER` | Who produced the node — `LEADER` marks the depth-0 executive's own execution node, created at run start and completed by `execute_run`. |
 | `ScenarioMode` | `TRIALS, CONTINUOUS` | Fresh trials vs one long conversation. Concerns target memory only — chat / operator access is keyed off actor `ToolPolicySpec` and broker presence. |
 | `CompletionRole` | `ATTACKER, JUDGE` | Which model to use for this `ctx.completion` |
-| `ToolName` | `SEND_MESSAGE, ASK_HUMAN, CONCLUDE, UPDATE_SCRATCHPAD, TALK_TO_OPERATOR` | Built-in tools (sub-module names are dynamic). Exposure is declared by `ToolPolicySpec`; role semantics come from policy, not enum names. |
+| `ToolName` | `SEND_MESSAGE, ASK_HUMAN, CONCLUDE, UPDATE_ARTIFACT, TALK_TO_OPERATOR` | Built-in tools (sub-module names are dynamic). Exposure is declared by `ToolPolicySpec`; role semantics come from policy, not enum names. |
 | `TurnKind` | `EXCHANGE, SUMMARY` | Real target round-trip vs compressor summary |
 | `BudgetMode` | `EXPLORE, EXPLOIT, CONCLUDE` | Budget phase → prompt framing |
-| `LogEvent` | values incl. `JUDGE_VERDICT`, `LLM_COMPLETION`, `OPERATOR_MESSAGE`, `OPERATOR_REPLY`, `SCRATCHPAD_UPDATED`, `FRONTIER_RANKED` | Every event emitted through `LogFn` |
+| `LogEvent` | values incl. `JUDGE_VERDICT`, `LLM_COMPLETION`, `OPERATOR_MESSAGE`, `OPERATOR_REPLY`, `ARTIFACT_UPDATED`, `FRONTIER_RANKED` | Every event emitted through `LogFn` |
 
 All are `str` subclasses so `enum_value == "string"` works and JSON serialisation emits plain strings.
 
@@ -1349,7 +1361,7 @@ Every callsite must pass an `event_name` that exists in `LogEvent`. The CLI rend
 
 - `OPERATOR_MESSAGE` — operator pushed a message onto `ctx.operator_messages` via `POST /api/leader-chat`. Detail = the operator's text. Web UI surfaces it as a "user" row.
 - `OPERATOR_REPLY` — executive called `talk_to_operator(text=…)`. Detail = the executive's text. Web UI surfaces it as an "assistant" row. Also persisted to `chat.jsonl`.
-- `SCRATCHPAD_UPDATED` — an actor called `update_scratchpad` with either `content` or `operations`. Detail = `"<n> chars"` (or `"persist_failed: …"` on disk error). The scratchpad UI listens for this to refresh its read view.
+- `ARTIFACT_UPDATED` — an actor called `update_artifact` with either `content` or `operations`. Detail = `"<n> chars"` (or `"persist_failed: …"` on disk error). The artifacts UI listens for this to refresh its read view.
 
 These are consumed by `bench/trace.py` to build per-trial telemetry + the `events/{trial_id}.jsonl` artifact (operator-chat events are no-ops in bench since runs are autonomous). Keep the JSON payloads flat, stringify tier-keyed maps at the JSON boundary, and `sort_keys=True` so downstream diffs are deterministic.
 
@@ -1392,7 +1404,7 @@ Authored modules become **managers** (depth 1, listed in `scenario.modules`) or 
 4. Reference it by `name` either as a manager (in a scenario's `modules:` list) or as an employee (in some manager's `sub_modules:` list).
 5. **Do not repeat the OBJECTIVE AWARENESS instruction** in your module's `system_prompt`. The engine appends a depth-aware stanza at runtime (`engine.py` ~line 120). Sub-modules (depth > 0 — your authored module) automatically get the `OBJECTIVE SIGNAL —` flag protocol. Keep the module prompt focused on HOW your module does its thing — the engine handles termination semantics. **Never** write `OBJECTIVE MET` or a `## Result\nOBJECTIVE MET — <fragment>` template into your module's `system_prompt` or into a scenario `objective:` block — sub-modules will pattern-match on it and call it themselves.
 6. **Do not name sibling modules in your prompt** (no hardcoded `direct-ask` / `foot-in-door` / etc. mentions). That's a known overfitting trap — target-profiler learned it the hard way (see `tests/test_field_modules_load.py::TestTargetProfilerDecoupling`). Describe TECHNIQUES ("direct asking", "authority framing") in plain English; the planner picks specific modules.
-7. **Only mention tools that the module's `tool_policy` grants.** Managers in the built-in red-team scenarios usually get sub-module dispatch, `update_scratchpad`, and `conclude`; employees usually get `send_message` and `conclude`; operator tools stay executive-only. If a prompt mentions a tool outside policy, the model will hallucinate an unknown tool call and waste an iteration.
+7. **Only mention tools that the module's `tool_policy` grants.** Managers in the built-in red-team scenarios usually get sub-module dispatch, `update_artifact`, and `conclude`; employees usually get `send_message` and `conclude`; operator tools stay executive-only. If a prompt mentions a tool outside policy, the model will hallucinate an unknown tool call and waste an iteration.
 
 ### Adding a new tool to the ReAct engine
 
@@ -1434,16 +1446,16 @@ rejected. If you reach for one of these, stop — it's a hallucination trap.
 |---|---|---|
 | `core/profile.py` · `TargetProfile` dataclass | Never shipped | The target-profiler module's `conclude()` text in the graph / `module_outputs["target-profiler"]`. |
 | `core/plan.py` · `AttackPlan` · `PlannedStep` | Never shipped | The attack-planner module's `conclude()` text in the graph / `module_outputs["attack-planner"]`. |
-| `core/experience.py` · `TargetExperience` | Never shipped ("Phase C" of an old plan) | The graph + shared scratchpad whiteboard cover the same ground. Don't add a typed sidecar. |
+| `core/experience.py` · `TargetExperience` | Never shipped ("Phase C" of an old plan) | The graph + shared artifacts whiteboard cover the same ground. Don't add a typed sidecar. |
 | `_maybe_synthesize_profile` · `LogEvent.PROFILE_SYNTH` · `prompts/synthesize_profile.prompt.md` | Never shipped ("Phase B.1/B.2" of an old plan) | There is no profile-synthesis pipeline. `profile.md` has load/save methods but **no caller writes it from a run** — it's a free-form human-notes file the web UI displays. |
 | `ModuleConfig.outputs_profile` · `outputs_plan` | Never added | Core has zero typed-output flags. A module's output is whatever text it returns from `conclude()`, stored in the graph and latest-output cache. |
 | `profile.json` | Never shipped | `profile.md` (human notes, hand-edited) + `graph.json` (authoritative module outputs). |
-| `plan.md` (free-standing file) | Renamed to `scratchpad.md` | The old plan file became the shared scratchpad whiteboard. `TargetMemory.__init__` performs a one-shot rename of `plan.md` → `scratchpad.md` on first init of an existing target so old persistence directories migrate automatically. |
+| `plan.md` (free-standing file) | Renamed to `artifacts/*.md` | The old plan file became the shared artifacts whiteboard. `TargetMemory.__init__` performs a one-shot rename of `plan.md` → `artifacts/*.md` on first init of an existing target so old persistence directories migrate automatically. |
 | `ContextMode.AUTONOMOUS` · `ContextMode.CO_OP` | Removed (executive/manager refactor) | Chat / autonomy is now driven by runtime actor role and broker presence. Don't import `ContextMode` — the enum is gone from `core/constants.py`. |
 | `module: <name>` (singular) in scenario YAML | Removed (replaced by `modules: [<name>, ...]`) | `load_scenario` raises `ValueError` if it sees the legacy field. Migrate by wrapping the single name in a list. The synthesised executive owns the depth-0 spot. |
 | `Scenario.module` (singular attribute) | Replaced by `Scenario.modules: list[str]` | Read `scenario.modules` for the list of manager names. There is no canonical "leader name" attribute — the executive is named at runtime as `f"{stem}:executive"`. |
 | Authored-module executive flags | Removed/pointless | The runtime executive is an `ExecutiveSpec` / `ReactActorSpec(role=EXECUTIVE)`, not a `ModuleConfig`. Authored YAML cannot make an executive. |
-| `modules/attacks/persona-break` · `safety-bypass` | Never created | Four managers ship today: `system-prompt-extraction`, `tool-extraction`, `indirect-prompt-injection`, `email-exfiltration-proof`. If you need another, author it from scratch; don't pretend a placeholder exists. |
+| `modules/attacks/persona-break` · `safety-bypass` | Never created | Five managers ship today: `system-prompt-extraction`, `tool-extraction`, `indirect-prompt-injection`, `rag-document-injection-proof`, `email-exfiltration-proof`. If you need another, author it from scratch; don't pretend a placeholder exists. |
 | `modules/techniques/ericksonian` · `architecture` | Never created | Same — no placeholder directories exist. Add a real module.yaml or don't. |
 | `OBJECTIVE MET — <fragment>` string marker in module / spec / scenario prompts | Removed in favour of typed `conclude(objective_met=true)` arg | Use the bool param. The string was an LLM pattern-match magnet — sub-modules copied it verbatim and called `OBJECTIVE MET — <wrong fragment>`. Never write that string into a module's `system_prompt` or a scenario `objective:` block. |
 | `JudgeResult.objective_met` propagation to `ctx.objective_met` in `evaluation.py` | Removed (judge is advisory only) | The executive's own `conclude(objective_met=true)` call sets ctx. Judge's verdict surfaces as a tool_result advisory; the termination decision lives at the executive. |
@@ -1464,8 +1476,8 @@ wins. Fix CLAUDE.md in the same change.
 - **`bench --verbose` ≠ trace capture.** The events file is written every run. `--verbose` only controls whether events are also teed to the terminal. If you're looking for the trace post-hoc, always check `benchmarks/results/{date}/events/` first.
 - **`module: <name>` in scenario YAML hard-fails.** The legacy single-field schema was replaced by `modules: [<name>, ...]` and the runner now synthesises an executive at depth 0. `load_scenario` raises `ValueError` with a one-line migration hint when it sees the legacy field — fix the YAML, don't shim the loader. A YAML carrying both `module:` and `modules:` also fails (ambiguous).
 - **The executive can't `send_message`.** Its default `ToolPolicySpec` does not grant target I/O. If a scenario "stalls" because the executive seems unable to talk to the target, that's the architecture working as intended — the executive should be dispatching a manager. Check the executive's last completion: it's probably trying to call a tool that doesn't exist on its tool list, and the model is failing silently. Symptom: `LLM_COMPLETION` events without follow-up `DELEGATE` or tool dispatch.
-- **Tool access is policy, not role if/else.** Managers can use `update_scratchpad` only when their YAML grants it. Operator tools (`ask_human`, `talk_to_operator`) should remain executive-only unless the product model changes deliberately.
-- **Running the same scenario twice doesn't restart fresh.** The graph + shared `scratchpad.md` persist per-target. Pass `--fresh` to wipe the graph; the runner also clears the CONTINUOUS conversation when `--fresh` is set, but the scratchpad is left alone (it's "human-curated state" by intent). Delete `~/.mesmer/targets/{hash}/scratchpad.md` manually if you want a truly clean run.
+- **Tool access is policy, not role if/else.** Managers can use `update_artifact` only when their YAML grants it. Operator tools (`ask_human`, `talk_to_operator`) should remain executive-only unless the product model changes deliberately.
+- **Running the same scenario twice doesn't restart fresh.** The graph + shared `artifacts/*.md` persist per-target. Pass `--fresh` to wipe the graph; the runner also clears the CONTINUOUS conversation when `--fresh` is set, but the artifacts is left alone (it's "human-curated state" by intent). Delete `~/.mesmer/targets/{hash}/artifacts/*.md` manually if you want a truly clean run.
 
 ## Debugging / triage cookbook
 

@@ -121,7 +121,7 @@ just authored to do something other than probe. The differences:
 |---|---|---|---|
 | Technique | `modules/techniques/<category>/<name>/` | Yes — multiple turns. | Attack write-up; the win, or what was learned. |
 | Profiler | `modules/profilers/<name>/` | Yes — recon-only, doesn't try to win. | Dossier — identity, defence shape, policy surface, exploitation hypothesis. |
-| Planner | `modules/planners/<name>/` | **No** — pure reasoning over the scratchpad. | Ordered plan: `(module, targeting sentence)` pairs the parent manager executes in order. |
+| Planner | `modules/planners/<name>/` | **No** — pure reasoning over module history and artifacts. | Ordered plan: `(module, targeting sentence)` pairs the parent manager executes in order. |
 
 **Authoring a profiler**: write it like a tier-0 technique that
 doesn't try to satisfy the objective. Its `system_prompt` instructs

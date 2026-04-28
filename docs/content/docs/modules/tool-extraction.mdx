@@ -84,8 +84,9 @@ uv run mesmer run scenarios/extract-dvllm-support-tools.yaml --verbose
 
 `scenarios/extract-system-and-tools.yaml` chains
 `system-prompt-extraction` then `tool-extraction` in one run — the
-executive dispatches both managers in order, and each populates the
-scratchpad with its findings:
+executive dispatches both managers in order. Each manager records its
+concluded output in Module Conversation History and may update declared
+artifacts with curated findings:
 
 ```yaml
 modules:

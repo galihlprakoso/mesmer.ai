@@ -9,8 +9,31 @@ unified diff.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import re
-from typing import Any
+from typing import Any, Callable, TypedDict
+
+
+class MarkdownPatchOperation(str, Enum):
+    """Supported structured edit operations for Markdown artifacts."""
+
+    APPEND_SECTION = "append_section"
+    REPLACE_SECTION = "replace_section"
+    DELETE_SECTION = "delete_section"
+    DELETE_MATCHING_LINE = "delete_matching_line"
+    REPLACE_MATCHING_LINE = "replace_matching_line"
+    INSERT_AFTER = "insert_after"
+    INSERT_BEFORE = "insert_before"
+
+
+class MarkdownPatchOperationPayload(TypedDict, total=False):
+    op: str
+    heading: str
+    level: int
+    content: str
+    match: str
+    replacement: str
+    all: bool
 
 
 class MarkdownPatchError(ValueError):
@@ -75,7 +98,10 @@ def _content_lines(content: Any) -> list[str]:
     return content.strip("\n").splitlines()
 
 
-def _append_section(lines: list[str], op: dict[str, Any]) -> str:
+PatchHandler = Callable[[list[str], MarkdownPatchOperationPayload], str]
+
+
+def _append_section(lines: list[str], op: MarkdownPatchOperationPayload) -> str:
     heading = _normalize_heading(op.get("heading"))
     content = _content_lines(op.get("content", ""))
     section = _find_section(lines, heading)
@@ -96,7 +122,7 @@ def _append_section(lines: list[str], op: dict[str, Any]) -> str:
     return f"appended to section {heading!r}"
 
 
-def _replace_section(lines: list[str], op: dict[str, Any]) -> str:
+def _replace_section(lines: list[str], op: MarkdownPatchOperationPayload) -> str:
     heading = _normalize_heading(op.get("heading"))
     content = _content_lines(op.get("content", ""))
     section = _find_section(lines, heading)
@@ -107,7 +133,7 @@ def _replace_section(lines: list[str], op: dict[str, Any]) -> str:
     return f"replaced section {heading!r}"
 
 
-def _delete_section(lines: list[str], op: dict[str, Any]) -> str:
+def _delete_section(lines: list[str], op: MarkdownPatchOperationPayload) -> str:
     heading = _normalize_heading(op.get("heading"))
     section = _find_section(lines, heading)
     if section is None:
@@ -125,11 +151,11 @@ def _matching_indexes(lines: list[str], match: Any) -> list[int]:
     return [idx for idx, line in enumerate(lines) if match in line]
 
 
-def _line_scope(op: dict[str, Any]) -> bool:
+def _line_scope(op: MarkdownPatchOperationPayload) -> bool:
     return bool(op.get("all", False))
 
 
-def _delete_matching_line(lines: list[str], op: dict[str, Any]) -> str:
+def _delete_matching_line(lines: list[str], op: MarkdownPatchOperationPayload) -> str:
     indexes = _matching_indexes(lines, op.get("match"))
     if not indexes:
         raise MarkdownPatchError(f"matching line not found: {op.get('match')!r}")
@@ -139,7 +165,7 @@ def _delete_matching_line(lines: list[str], op: dict[str, Any]) -> str:
     return f"deleted {len(targets)} matching line(s)"
 
 
-def _replace_matching_line(lines: list[str], op: dict[str, Any]) -> str:
+def _replace_matching_line(lines: list[str], op: MarkdownPatchOperationPayload) -> str:
     replacement = op.get("replacement")
     if not isinstance(replacement, str):
         raise MarkdownPatchError("replacement must be a string")
@@ -152,7 +178,12 @@ def _replace_matching_line(lines: list[str], op: dict[str, Any]) -> str:
     return f"replaced {len(targets)} matching line(s)"
 
 
-def _insert_relative(lines: list[str], op: dict[str, Any], *, after: bool) -> str:
+def _insert_relative(
+    lines: list[str],
+    op: MarkdownPatchOperationPayload,
+    *,
+    after: bool,
+) -> str:
     content = _content_lines(op.get("content", ""))
     indexes = _matching_indexes(lines, op.get("match"))
     if not indexes:
@@ -163,18 +194,38 @@ def _insert_relative(lines: list[str], op: dict[str, Any], *, after: bool) -> st
     return f"inserted {direction} matching line"
 
 
-_OP_HANDLERS = {
-    "append_section": _append_section,
-    "replace_section": _replace_section,
-    "delete_section": _delete_section,
-    "delete_matching_line": _delete_matching_line,
-    "replace_matching_line": _replace_matching_line,
-    "insert_after": lambda lines, op: _insert_relative(lines, op, after=True),
-    "insert_before": lambda lines, op: _insert_relative(lines, op, after=False),
+_OP_HANDLERS: dict[MarkdownPatchOperation, PatchHandler] = {
+    MarkdownPatchOperation.APPEND_SECTION: _append_section,
+    MarkdownPatchOperation.REPLACE_SECTION: _replace_section,
+    MarkdownPatchOperation.DELETE_SECTION: _delete_section,
+    MarkdownPatchOperation.DELETE_MATCHING_LINE: _delete_matching_line,
+    MarkdownPatchOperation.REPLACE_MATCHING_LINE: _replace_matching_line,
+    MarkdownPatchOperation.INSERT_AFTER: lambda lines, op: _insert_relative(lines, op, after=True),
+    MarkdownPatchOperation.INSERT_BEFORE: lambda lines, op: _insert_relative(
+        lines,
+        op,
+        after=False,
+    ),
 }
 
 
-def apply_markdown_patch(text: str, operations: list[dict[str, Any]]) -> MarkdownPatchResult:
+def _coerce_operation_name(name: object) -> MarkdownPatchOperation:
+    try:
+        return MarkdownPatchOperation(str(name))
+    except ValueError as e:
+        raise MarkdownPatchError(f"unsupported operation {name!r}") from e
+
+
+def _coerce_operation_payload(op: object, index: int) -> MarkdownPatchOperationPayload:
+    if not isinstance(op, dict):
+        raise MarkdownPatchError(f"operation {index} must be an object")
+    return MarkdownPatchOperationPayload(**op)
+
+
+def apply_markdown_patch(
+    text: str,
+    operations: list[MarkdownPatchOperationPayload],
+) -> MarkdownPatchResult:
     """Apply structured markdown operations and return patched content."""
 
     if not isinstance(operations, list) or not operations:
@@ -183,14 +234,16 @@ def apply_markdown_patch(text: str, operations: list[dict[str, Any]]) -> Markdow
     lines = _split_lines(text)
     summaries: list[str] = []
     for i, op in enumerate(operations, start=1):
-        if not isinstance(op, dict):
-            raise MarkdownPatchError(f"operation {i} must be an object")
-        name = op.get("op")
-        handler = _OP_HANDLERS.get(str(name))
-        if handler is None:
-            raise MarkdownPatchError(f"unsupported operation {name!r}")
-        summaries.append(handler(lines, op))
+        payload = _coerce_operation_payload(op, i)
+        handler = _OP_HANDLERS[_coerce_operation_name(payload.get("op"))]
+        summaries.append(handler(lines, payload))
     return MarkdownPatchResult(content=_join_lines(lines), summaries=summaries)
 
 
-__all__ = ["MarkdownPatchError", "MarkdownPatchResult", "apply_markdown_patch"]
+__all__ = [
+    "MarkdownPatchError",
+    "MarkdownPatchOperation",
+    "MarkdownPatchOperationPayload",
+    "MarkdownPatchResult",
+    "apply_markdown_patch",
+]

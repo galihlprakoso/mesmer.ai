@@ -122,6 +122,9 @@
       return br - ar
     })
     .slice(0, 12)
+  $: groundingScore = Math.max(0, Math.min(1, stats?.grounding_score ?? 0))
+  $: isSpeculativeMap = Boolean(graph && stats && (stats.attempt ?? 0) > 0 && (stats.evidence ?? 0) === 0)
+  $: hasObservationFailures = Boolean(stats && (stats.failed_observations ?? 0) > 0)
 
   async function load() {
     if (renderedTargetHash !== targetHash) {
@@ -532,6 +535,9 @@
             <span class="stat"><span class="stat-k">ev</span><span class="stat-v">{stats.evidence ?? 0}</span></span>
             <span class="stat"><span class="stat-k">fx</span><span class="stat-v">{stats.frontier ?? 0}<span class="dim">/{stats.proposed_frontier ?? 0}</span></span></span>
             <span class="stat"><span class="stat-k">at</span><span class="stat-v">{stats.attempt ?? 0}</span></span>
+            <span class="stat grounding" class:weak={groundingScore < 0.35}>
+              <span class="stat-k">ground</span><span class="stat-v">{Math.round(groundingScore * 100)}%</span>
+            </span>
           </div>
         {/if}
       </div>
@@ -544,6 +550,15 @@
           {inspectorOpen ? 'Hide rail' : 'Show rail'}
         </button>
       </div>
+      {#if isSpeculativeMap || hasObservationFailures}
+        <div class="grounding-banner" class:warning={isSpeculativeMap}>
+          {#if isSpeculativeMap}
+            No target evidence yet. This map is speculative frontier scaffolding.
+          {:else}
+            {stats.failed_observations} observation failure{stats.failed_observations === 1 ? '' : 's'} excluded from belief learning.
+          {/if}
+        </div>
+      {/if}
       {#if loading}
         <div class="overlay-status">Loading…</div>
       {:else if errorMsg}
@@ -774,6 +789,12 @@
   }
   .stat-v { color: var(--text); }
   .stat-v .dim { color: var(--text-muted); }
+  .stat.grounding {
+    border-color: color-mix(in srgb, var(--phosphor) 45%, var(--border));
+  }
+  .stat.grounding.weak {
+    border-color: color-mix(in srgb, var(--amber, #d4a017) 65%, var(--border));
+  }
 
   /* ---------- toolbar (matches AttackGraph.svelte:518-543) ---------- */
   .toolbar {
@@ -801,6 +822,25 @@
     border-color: var(--phosphor);
     color: var(--phosphor);
     box-shadow: var(--phosphor-glow-tight);
+  }
+  .grounding-banner {
+    position: absolute;
+    top: 72px;
+    left: 12px;
+    max-width: min(520px, calc(100% - 24px));
+    z-index: 9;
+    padding: 7px 10px;
+    border: 1px solid color-mix(in srgb, var(--amber, #d4a017) 55%, var(--border));
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--bg-secondary) 88%, black);
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.35;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+  }
+  .grounding-banner.warning {
+    color: var(--text);
   }
 
   /* ---------- body: canvas + inspector rail ---------- */

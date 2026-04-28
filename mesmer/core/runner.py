@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from mesmer.core.actor import ExecutiveSpec
+from mesmer.core.artifacts import ArtifactStore
 from mesmer.core.constants import LogEvent, NodeSource, NodeStatus, ScenarioMode
 from mesmer.core.agent.context import Context, HumanQuestionBroker, RunTelemetry
 from mesmer.core.belief_graph import NodeKind, Strategy, TargetTraitsUpdateDelta
@@ -175,13 +176,13 @@ async def execute_run(
     # against the same target.
     scenario_stem = Path(config.scenario_path).stem if config.scenario_path else "scenario"
     executive_name = f"{scenario_stem}:executive"
-    ordered_artifact_requirements = {}
+    ordered_output_requirements = {}
     if (
         scenario.leader_prompt
         and "indirect-prompt-injection" in scenario.modules
         and "email-exfiltration-proof" in scenario.modules
     ):
-        ordered_artifact_requirements["indirect-prompt-injection"] = [
+        ordered_output_requirements["indirect-prompt-injection"] = [
             "## Retrieval Path",
             "## Injection Evidence",
         ]
@@ -192,7 +193,7 @@ async def execute_run(
         system_prompt=scenario.leader_prompt or _DEFAULT_EXECUTIVE_PROMPT,
         ordered_modules=list(scenario.modules) if scenario.leader_prompt else list(scenario.modules),
         suppress_belief_context=bool(scenario.leader_prompt),
-        ordered_artifact_requirements=ordered_artifact_requirements,
+        ordered_output_requirements=ordered_output_requirements,
     )
     executive_actor = executive.as_actor()
 
@@ -289,36 +290,14 @@ async def execute_run(
     )
     ctx.graph_parent_id = executive_node.id
 
-    # Seed latest module outputs from the graph's conversation history. Walk
-    # oldest → newest so ordinary modules keep latest-wins semantics.
-    # Structured phase artifacts are slightly stricter: a later thin
-    # retry summary should not overwrite an earlier valid deliverable
-    # that carries the expected markers. Empty outputs are skipped so a
-    # module that only produced target messages (no authored conclude
-    # text) doesn't clutter the pad.
-    #
-    # This is how ordered phase gates and precise handoff warnings can inspect
-    # prior artifacts without rendering every module report into the shared
-    # scratchpad whiteboard.
-    # ``conversation_history()`` already excludes leader-verdict nodes
-    # at the source — this loop sees only real attempt outputs.
-    for node in graph.conversation_history():
-        output = (node.module_output or "").strip()
-        if output:
-            markers = ordered_artifact_requirements.get(node.module) or []
-            if markers:
-                prior = ctx.scratchpad.module_output(node.module)
-                prior_has_artifact = all(marker in prior for marker in markers)
-                output_has_artifact = all(marker in output for marker in markers)
-                if prior_has_artifact and not output_has_artifact:
-                    continue
-            ctx.scratchpad.set_module_output(node.module, output)
-
-    # Persistent shared scratchpad whiteboard. Edited via
-    # ``update_scratchpad`` and rendered as a single note into prompts.
-    scratchpad_md = None if config.fresh else memory.load_scratchpad()
-    if scratchpad_md is not None:
-        ctx.scratchpad.update(scratchpad_md)
+    ctx.artifacts = ArtifactStore() if config.fresh else memory.load_artifacts()
+    ctx.artifact_specs = list(scenario.artifacts)
+    # Older artifact builds materialized every module's conclude text as an
+    # artifact named after that module. That made artifacts indistinguishable
+    # from graph outputs. Keep graph outputs in graph.json and reserve
+    # artifacts for intentional shared documents updated with update_artifact.
+    for module_name in registry.modules:
+        ctx.artifacts.delete(module_name)
 
     # Fire ctx-ready hook AFTER seeding so the web backend's hold-onto-ctx
     # grab gets a fully populated context (operator_messages queue ready).
@@ -434,6 +413,7 @@ async def execute_run(
 
     # Save graph + memory
     memory.save_graph(graph)
+    memory.save_artifacts(ctx.artifacts)
     # Persist the belief graph's current snapshot + append unsaved deltas
     # to the JSONL log. ``save_belief_graph`` clears the in-memory delta
     # queue after writing, so a second save is a no-op for the JSONL file.

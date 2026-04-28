@@ -74,6 +74,7 @@ from mesmer.core.constants import (
     DEFAULT_UTILITY_WEIGHTS,
     HYPOTHESIS_CONFIRMED_THRESHOLD,
     HYPOTHESIS_REFUTED_THRESHOLD,
+    AttemptOutcome,
     CompletionRole,
     ExperimentState,
     HypothesisStatus,
@@ -742,13 +743,27 @@ def rank_frontier(
         return FrontierRankDelta(rankings={}, run_id=run_id)
 
     # Pull the comparison cohorts once.
-    all_attempts = sorted(
-        (n for n in graph.iter_nodes(NodeKind.ATTEMPT) if isinstance(n, Attempt)),
+    observational_attempts = sorted(
+        (
+            n
+            for n in graph.iter_nodes(NodeKind.ATTEMPT)
+            if isinstance(n, Attempt)
+            and n.outcome
+            not in {
+                AttemptOutcome.INFRA_ERROR.value,
+                AttemptOutcome.NO_OBSERVATION.value,
+            }
+            and any(r.strip() for r in n.target_responses)
+        ),
         key=lambda a: a.created_at,
     )
-    recent_attempts = all_attempts[-recent_attempt_window:]
+    recent_attempts = observational_attempts[-recent_attempt_window:]
 
-    dead_attempts = [a for a in all_attempts if a.outcome in ("dead", "refusal")]
+    dead_attempts = [
+        a
+        for a in observational_attempts
+        if a.outcome in (AttemptOutcome.DEAD.value, AttemptOutcome.REFUSAL.value)
+    ]
 
     fulfilled_recent = sorted(
         (

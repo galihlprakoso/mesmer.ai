@@ -376,6 +376,7 @@ class FrontierExperiment(BeliefNode):
     utility: float = 0.0
     expected_progress: float = 0.0
     information_gain: float = 0.0
+    hypothesis_confidence: float = 0.0
     novelty: float = 0.0
     strategy_prior: float = 0.0
     transfer_value: float = 0.0
@@ -397,6 +398,7 @@ class FrontierExperiment(BeliefNode):
             utility=self.utility,
             expected_progress=self.expected_progress,
             information_gain=self.information_gain,
+            hypothesis_confidence=self.hypothesis_confidence,
             novelty=self.novelty,
             strategy_prior=self.strategy_prior,
             transfer_value=self.transfer_value,
@@ -1122,6 +1124,7 @@ class BeliefGraph:
             for component in (
                 "expected_progress",
                 "information_gain",
+                "hypothesis_confidence",
                 "novelty",
                 "strategy_prior",
                 "transfer_value",
@@ -1371,9 +1374,9 @@ class BeliefGraph:
 
     # ---- summary ----
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, int | float]:
         """Counts by node kind plus edge total — surface for the web UI."""
-        out: dict[str, int] = {k.value: 0 for k in NodeKind}
+        out: dict[str, int | float] = {k.value: 0 for k in NodeKind}
         for n in self.nodes.values():
             out[n.kind.value] += 1
         out["edges"] = len(self.edges)
@@ -1386,6 +1389,33 @@ class BeliefGraph:
             1
             for n in self.nodes.values()
             if isinstance(n, FrontierExperiment) and n.state is ExperimentState.PROPOSED
+        )
+        observed_attempts = 0
+        failed_observations = 0
+        for n in self.nodes.values():
+            if not isinstance(n, Attempt):
+                continue
+            if n.outcome in {"infrastructure_error", "no_observation"}:
+                failed_observations += 1
+            elif n.target_responses:
+                observed_attempts += 1
+        grounded_hypotheses = {
+            n.hypothesis_id
+            for n in self.nodes.values()
+            if isinstance(n, Evidence)
+            and n.hypothesis_id
+            and n.polarity is not Polarity.NEUTRAL
+        }
+        active_hypotheses = int(out["active_hypotheses"])
+        evidence_count = int(out[NodeKind.EVIDENCE.value])
+        out["observed_attempts"] = observed_attempts
+        out["failed_observations"] = failed_observations
+        out["grounded_hypotheses"] = len(grounded_hypotheses)
+        out["speculative_hypotheses"] = max(0, active_hypotheses - len(grounded_hypotheses))
+        out["grounding_score"] = (
+            0.0
+            if active_hypotheses == 0
+            else min(1.0, (len(grounded_hypotheses) / active_hypotheses) * 0.7 + min(1.0, evidence_count / max(1, active_hypotheses)) * 0.3)
         )
         return out
 

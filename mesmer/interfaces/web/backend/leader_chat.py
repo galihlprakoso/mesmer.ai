@@ -1,12 +1,11 @@
 """Leader-chat — the operator <> leader conversation loop.
 
-Runs a short tool-calling LLM loop with read-only inspection tools over
-the persisted attack graph + run logs + scratchpad, plus a single write
-tool (``update_scratchpad``). Lets the operator have a substantive
-conversation with the leader about *this* target — "what did target
-profiler find?", "show me the attempts that scored above 7", "rewrite
-the scratchpad with these lessons" — grounded in real data instead of
-a static system-prompt dump.
+Runs a short tool-calling LLM loop with inspection tools over the persisted
+attack graph, run logs, and Markdown artifacts. Lets the operator have a
+substantive conversation with the leader about *this* target — "what did
+target profiler find?", "show me the attempts that scored above 7", "update
+operator_notes with these lessons" — grounded in real data instead of a static
+system-prompt dump.
 
 Distinct from ``core/agent/tools/`` (the *attack* runtime). Lives in the
 backend because:
@@ -15,7 +14,7 @@ backend because:
   - Its tools query persisted artifacts directly (graph.json, runs/*.jsonl)
     rather than threading through ``Context``.
   - It uses litellm directly with ``tool_choice='auto'`` — no Context
-    plumbing, no Scratchpad, no Registry.
+    plumbing and no Registry.
 """
 
 from __future__ import annotations
@@ -23,11 +22,24 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
 import litellm
 
 from mesmer.core.agent.parsing import parse_llm_json  # noqa: F401  (kept handy)
+from mesmer.core.artifacts import (
+    ARTIFACT_PROMPT_HEADING,
+    ArtifactPatchMode,
+    ArtifactSpec,
+    ArtifactUpdate,
+    ArtifactUpdateStatus,
+    StandardArtifactId,
+    artifact_list_items,
+    declared_artifact_ids,
+    render_artifact_contract,
+)
+from mesmer.core.constants import NodeSource, ToolName
 
 if TYPE_CHECKING:
     from mesmer.core.agent.memory import TargetMemory
@@ -44,6 +56,14 @@ LEAK_PREVIEW_CHARS = 200
 TURN_PREVIEW_CHARS = 1000
 
 
+class LeaderChatToolName(str, Enum):
+    LIST_ATTEMPTS = "list_attempts"
+    GET_ATTEMPT = "get_attempt"
+    SEARCH_LEAKS = "search_leaks"
+    LIST_RUNS = "list_runs"
+    GET_RUN_TURNS = "get_run_turns"
+
+
 # Optional callback fired before every tool dispatch so the WS bus can
 # surface "🔍 looked up <tool>" markers in the chat panel inline.
 ToolCallObserver = Callable[[str, dict], None]
@@ -57,7 +77,7 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "list_attempts",
+            "name": LeaderChatToolName.LIST_ATTEMPTS.value,
             "description": (
                 "List attack-graph execution nodes (excluding root). "
                 "Filter by status/module/source/score/run_id. Returns up to "
@@ -81,7 +101,7 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "get_attempt",
+            "name": LeaderChatToolName.GET_ATTEMPT.value,
             "description": (
                 "Fetch ONE attempt by node id, with full detail: every message "
                 "sent, every target response, the module's conclude text, the "
@@ -98,7 +118,7 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "search_leaks",
+            "name": LeaderChatToolName.SEARCH_LEAKS.value,
             "description": (
                 "Scan every node's leaked_info field for a substring "
                 "(case-insensitive). Returns up to "
@@ -118,23 +138,50 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "get_module_state",
-            "description": (
-                "Return the most recent conclude text written by a given "
-                "module across all runs (e.g. the latest target-profiler "
-                "dossier, the latest attack-planner plan)."
-            ),
+            "name": ToolName.LIST_ARTIFACTS.value,
+            "description": "List durable Markdown artifacts for this target.",
             "parameters": {
                 "type": "object",
-                "properties": {"module_name": {"type": "string"}},
-                "required": ["module_name"],
+                "properties": {"limit": {"type": "integer"}},
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "list_runs",
+            "name": ToolName.READ_ARTIFACT.value,
+            "description": "Read one Markdown artifact or selected heading sections.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "artifact_id": {"type": "string"},
+                    "sections": {"type": "array", "items": {"type": "string"}},
+                    "max_chars": {"type": "integer"},
+                },
+                "required": ["artifact_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": ToolName.SEARCH_ARTIFACTS.value,
+            "description": "Search all Markdown artifacts and return section-level snippets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "artifact_ids": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": LeaderChatToolName.LIST_RUNS.value,
             "description": (
                 "List runs against this target — newest first. Each entry "
                 "carries the run_id, timestamp, leader-verdict (objective_met "
@@ -150,7 +197,7 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "get_run_turns",
+            "name": LeaderChatToolName.GET_RUN_TURNS.value,
             "description": (
                 "Fetch the raw target-conversation turns for one run from "
                 "runs/{run_id}.jsonl. Each turn carries the message sent to "
@@ -171,19 +218,23 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "update_scratchpad",
+            "name": ToolName.UPDATE_ARTIFACT.value,
             "description": (
-                "Rewrite the persistent scratchpad.md for this target. "
-                "Whatever you pass replaces the current file — include "
-                "anything you want to keep. Use this when the conversation "
-                "produces a lesson worth committing for the next run."
+                "Create or update a durable Markdown artifact. Use artifact_id "
+                f"`{StandardArtifactId.OPERATOR_NOTES.value}` for human working notes. Provide content for "
+                "full replacement or operations for section-level patches."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "artifact_id": {"type": "string"},
                     "content": {"type": "string"},
+                    "operations": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
                 },
-                "required": ["content"],
+                "required": ["artifact_id"],
             },
         },
     },
@@ -289,11 +340,28 @@ def _run_turns(memory: TargetMemory, run_id: str, limit: int) -> list[dict]:
     return rows[-limit:] if limit and len(rows) > limit else rows
 
 
-def dispatch_tool(name: str, args: dict, memory: TargetMemory) -> dict:
+def dispatch_tool(
+    name: str,
+    args: dict,
+    memory: TargetMemory,
+    *,
+    artifact_specs: list[ArtifactSpec] | None = None,
+) -> dict:
     """Synchronously run one inspection tool. Returns a JSON-serialisable
     dict (always a dict — wrap lists in ``{"items": [...]}`` for shape
     consistency, makes the LLM less likely to fumble result parsing)."""
-    if name == "list_attempts":
+    chat_tool = None
+    try:
+        chat_tool = LeaderChatToolName(name)
+    except ValueError:
+        pass
+    artifact_tool = None
+    try:
+        artifact_tool = ToolName(name)
+    except ValueError:
+        pass
+
+    if chat_tool is LeaderChatToolName.LIST_ATTEMPTS:
         graph = memory.load_graph()
         status   = args.get("status")
         module   = args.get("module")
@@ -305,7 +373,7 @@ def dispatch_tool(name: str, args: dict, memory: TargetMemory) -> dict:
 
         nodes = []
         for n in graph.nodes.values():
-            if not n.module or n.module == "root":
+            if not n.module or n.source == NodeSource.ROOT.value:
                 continue
             if status and n.status != status:
                 continue
@@ -323,7 +391,7 @@ def dispatch_tool(name: str, args: dict, memory: TargetMemory) -> dict:
         nodes.sort(key=lambda n: n.timestamp or 0, reverse=True)
         return {"items": [_node_summary(n) for n in nodes[:limit]]}
 
-    if name == "get_attempt":
+    if chat_tool is LeaderChatToolName.GET_ATTEMPT:
         node_id = args.get("node_id") or ""
         graph = memory.load_graph()
         n = graph.nodes.get(node_id)
@@ -331,7 +399,7 @@ def dispatch_tool(name: str, args: dict, memory: TargetMemory) -> dict:
             return {"error": f"no node with id={node_id!r}"}
         return _node_full(n)
 
-    if name == "search_leaks":
+    if chat_tool is LeaderChatToolName.SEARCH_LEAKS:
         sub = (args.get("substring") or "").lower()
         limit = min(int(args.get("limit") or MAX_SEARCH_LEAKS), MAX_SEARCH_LEAKS)
         graph = memory.load_graph()
@@ -352,41 +420,119 @@ def dispatch_tool(name: str, args: dict, memory: TargetMemory) -> dict:
         hits.sort(key=lambda h: -h["score"])
         return {"items": hits[:limit]}
 
-    if name == "get_module_state":
-        module_name = args.get("module_name") or ""
-        graph = memory.load_graph()
-        latest = None
-        for n in graph.nodes.values():
-            if n.module != module_name:
-                continue
-            if not (n.module_output or "").strip():
-                continue
-            if latest is None or (n.timestamp or 0) > (latest.timestamp or 0):
-                latest = n
-        if latest is None:
-            return {"module": module_name, "module_output": None, "note": "no concluded execution found"}
+    if artifact_tool is ToolName.LIST_ARTIFACTS:
+        limit = max(1, min(int(args.get("limit") or 50), 100))
         return {
-            "module": module_name,
-            "module_output": latest.module_output,
-            "node_id": latest.id,
-            "timestamp": latest.timestamp,
+            "items": [
+                item.to_dict()
+                for item in artifact_list_items(
+                    memory.load_artifacts(),
+                    artifact_specs or [],
+                )[:limit]
+            ]
         }
 
-    if name == "list_runs":
+    if artifact_tool is ToolName.READ_ARTIFACT:
+        artifacts = memory.load_artifacts()
+        artifact_id = args.get("artifact_id") or ""
+        allowed = declared_artifact_ids(artifact_specs or [])
+        if allowed and artifact_id not in allowed:
+            allowed_text = ", ".join(f"`{item}`" for item in sorted(allowed))
+            return {
+                "error": (
+                    "read_artifact rejected: this scenario declares an artifact "
+                    f"contract. Use one of: {allowed_text}"
+                )
+            }
+        declared = next(
+            (spec for spec in (artifact_specs or []) if spec.id == artifact_id),
+            None,
+        )
+        sections = args.get("sections") if isinstance(args.get("sections"), list) else None
+        content = artifacts.read(artifact_id, sections=sections)
+        max_chars = max(1, min(int(args.get("max_chars") or 12000), 50000))
+        truncated = len(content) > max_chars
+        if truncated:
+            content = content[:max_chars].rstrip() + "\n\n[truncated]"
+        return {
+            "artifact_id": artifact_id,
+            "content": content,
+            "truncated": truncated,
+            "declared": declared is not None,
+            "exists": bool(content.strip()),
+            "title": declared.title if declared else "",
+            "description": declared.description if declared else "",
+        }
+
+    if artifact_tool is ToolName.SEARCH_ARTIFACTS:
+        artifacts = memory.load_artifacts()
+        artifact_ids = args.get("artifact_ids")
+        if not isinstance(artifact_ids, list):
+            artifact_ids = None
+        allowed = declared_artifact_ids(artifact_specs or [])
+        if allowed:
+            if artifact_ids is None:
+                artifact_ids = sorted(allowed)
+            else:
+                requested = {str(item) for item in artifact_ids}
+                unknown = sorted(requested - allowed)
+                if unknown:
+                    allowed_text = ", ".join(f"`{item}`" for item in sorted(allowed))
+                    return {
+                        "error": (
+                            "search_artifacts rejected: this scenario declares "
+                            f"an artifact contract. Use one of: {allowed_text}"
+                        )
+                    }
+                artifact_ids = [item for item in artifact_ids if item in allowed]
+        return {
+            "items": [
+                hit.to_dict()
+                    for hit in artifacts.search(
+                        args.get("query") or "",
+                        artifact_ids=artifact_ids,
+                        limit=int(args.get("limit") or 8),
+                    )
+                ]
+            }
+
+    if chat_tool is LeaderChatToolName.LIST_RUNS:
         limit = int(args.get("limit") or 10)
         return {"items": _run_list(memory, limit)}
 
-    if name == "get_run_turns":
+    if chat_tool is LeaderChatToolName.GET_RUN_TURNS:
         run_id = args.get("run_id") or ""
         limit = min(int(args.get("limit") or MAX_RUN_TURNS), MAX_RUN_TURNS)
         return {"items": _run_turns(memory, run_id, limit)}
 
-    if name == "update_scratchpad":
-        content = args.get("content")
-        if not isinstance(content, str):
-            return {"error": "update_scratchpad requires a string 'content'"}
-        memory.save_scratchpad(content)
-        return {"status": "saved", "chars": len(content)}
+    if artifact_tool is ToolName.UPDATE_ARTIFACT:
+        artifacts = memory.load_artifacts()
+        try:
+            allowed = declared_artifact_ids(artifact_specs or [])
+            artifact_id = args.get("artifact_id") or ""
+            if allowed and artifact_id not in allowed:
+                allowed_text = ", ".join(f"`{item}`" for item in sorted(allowed))
+                return {
+                    "error": (
+                        "update_artifact rejected: this scenario declares an artifact "
+                        f"contract. Use one of: {allowed_text}"
+                    )
+                }
+            has_content = "content" in args
+            has_operations = "operations" in args
+            if has_content == has_operations:
+                return {"error": "update_artifact requires exactly one of content or operations"}
+            update = ArtifactUpdate(
+                artifact_id=artifact_id,
+                mode=ArtifactPatchMode.REPLACE if has_content else ArtifactPatchMode.PATCH,
+                content=args.get("content") if has_content else None,
+                operations=args.get("operations") if has_operations else None,
+            )
+            result = artifacts.update(update)
+        except Exception as e:
+            return {"error": f"update_artifact rejected: {e}"}
+        memory.save_artifacts(artifacts)
+        return result.to_dict()
 
     return {"error": f"unknown tool {name!r}"}
 
@@ -399,12 +545,15 @@ def dispatch_tool(name: str, args: dict, memory: TargetMemory) -> dict:
 class LeaderChatResult:
     reply: str
     tool_trace: list[dict]                   # [{name, args, result_preview}, ...]
-    updated_scratchpad: str | None           # populated when update_scratchpad ran
+    updated_artifact: dict | None            # populated when update_artifact ran
 
 
-def _system_prompt(scenario: Scenario, scratchpad: str, graph_summary: str) -> str:
+def _system_prompt(scenario: Scenario, artifact_brief: str, graph_summary: str) -> str:
     leader = ", ".join(scenario.modules) if scenario.modules else "(no managers)"
     objective = scenario.objective.goal
+    rendered_artifact_brief = artifact_brief or f"{ARTIFACT_PROMPT_HEADING}\n(no artifacts yet)"
+    artifact_contract = render_artifact_contract(scenario.artifacts)
+    artifact_contract_block = f"{artifact_contract}\n\n" if artifact_contract else ""
     tool_lines = "\n".join(
         f"- {t['function']['name']}: {t['function']['description'].splitlines()[0]}"
         for t in TOOL_SCHEMAS
@@ -416,14 +565,14 @@ def _system_prompt(scenario: Scenario, scratchpad: str, graph_summary: str) -> s
         f"Be concise, opinionated, and grounded in real data — call your "
         f"inspection tools to look up specifics rather than guessing.\n\n"
         f"## Objective\n{objective}\n\n"
-        f"## Scratchpad (your persistent notes for this target)\n"
-        f"{scratchpad or '(empty — no notes yet)'}\n\n"
+        f"{artifact_contract_block}"
+        f"{rendered_artifact_brief}\n\n"
         f"## Graph summary\n{graph_summary or '(no runs yet)'}\n\n"
         f"## Tools available\n{tool_lines}\n\n"
-        f"Use update_scratchpad ONLY when you have a concrete lesson worth "
-        f"committing for the next run — don't rewrite it just to acknowledge "
-        f"a message. If the operator asks something you can answer from the "
-        f"scratchpad / graph_summary above, you don't need to call a tool. "
+        f"Use update_artifact when you have a concrete lesson worth committing "
+        f"for future runs; use artifact_id `{StandardArtifactId.OPERATOR_NOTES.value}` for human working "
+        f"notes. If the operator asks something you can answer from artifacts "
+        f"or graph_summary above, you don't need to call a tool. "
         f"After your tool calls, give the operator a clear, conversational "
         f"answer — not a JSON dump."
     )
@@ -445,7 +594,7 @@ async def run_leader_chat(
 
     Persists the user message immediately, runs the loop, persists the
     final assistant reply. Returns the reply plus a trace of every tool
-    call (for inline UI markers) and the new scratchpad if it changed.
+    call (for inline UI markers) and the updated artifact if one changed.
     """
     now = time.time()
     memory.append_chat("user", user_message, now)
@@ -454,11 +603,11 @@ async def run_leader_chat(
     # ``load_chat`` includes the user message we just appended (last row);
     # we'll send the whole history so the LLM sees its own prior replies.
 
-    scratchpad_before = memory.load_scratchpad() or ""
+    artifact_brief = memory.load_artifacts().render_brief_for_prompt()
     graph = memory.load_graph()
     graph_summary = graph.format_summary()
 
-    messages: list[dict] = [{"role": "system", "content": _system_prompt(scenario, scratchpad_before, graph_summary)}]
+    messages: list[dict] = [{"role": "system", "content": _system_prompt(scenario, artifact_brief, graph_summary)}]
     for row in history:
         role = row.get("role")
         if role not in ("user", "assistant"):
@@ -469,7 +618,7 @@ async def run_leader_chat(
     litellm.suppress_debug_info = True
 
     tool_trace: list[dict] = []
-    updated_scratchpad: str | None = None
+    updated_artifact: dict | None = None
     final_text = ""
 
     for _ in range(MAX_LEADER_CHAT_ITERATIONS):
@@ -527,7 +676,12 @@ async def run_leader_chat(
                 except Exception:  # pragma: no cover — observer failures shouldn't kill the chat
                     pass
             try:
-                result = dispatch_tool(name, args, memory)
+                result = dispatch_tool(
+                    name,
+                    args,
+                    memory,
+                    artifact_specs=list(scenario.artifacts),
+                )
             except Exception as e:
                 result = {"error": f"{type(e).__name__}: {e}"}
             tool_trace.append({
@@ -535,8 +689,15 @@ async def run_leader_chat(
                 "args": args,
                 "result_preview": _truncate_for_trace(result),
             })
-            if name == "update_scratchpad" and isinstance(result, dict) and result.get("status") == "saved":
-                updated_scratchpad = args.get("content", "")
+            if (
+                name == ToolName.UPDATE_ARTIFACT.value
+                and isinstance(result, dict)
+                and result.get("status") == ArtifactUpdateStatus.SAVED.value
+            ):
+                updated_artifact = {
+                    "artifact_id": result.get("artifact_id"),
+                    "chars": result.get("chars"),
+                }
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -554,7 +715,7 @@ async def run_leader_chat(
     return LeaderChatResult(
         reply=final_text,
         tool_trace=tool_trace,
-        updated_scratchpad=updated_scratchpad,
+        updated_artifact=updated_artifact,
     )
 
 

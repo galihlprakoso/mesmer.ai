@@ -111,6 +111,10 @@ class TestToolPolicyField:
         assert actor.tool_policy.dispatch_submodules is False
         assert actor.tool_policy.builtin == [
             ToolName.SEND_MESSAGE.value,
+            ToolName.LIST_ARTIFACTS.value,
+            ToolName.READ_ARTIFACT.value,
+            ToolName.SEARCH_ARTIFACTS.value,
+            ToolName.UPDATE_ARTIFACT.value,
             ToolName.CONCLUDE.value,
         ]
 

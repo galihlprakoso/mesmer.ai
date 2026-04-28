@@ -8,13 +8,17 @@ tool modules.
 
 from __future__ import annotations
 
+import json
 
-def tool_result(tool_call_id: str, content: str) -> dict:
+
+def tool_result(tool_call_id: str, content: object) -> dict:
     """Build an OpenAI ``{"role": "tool", …}`` response dict.
 
     The ReAct engine appends one of these to ``messages`` after every tool
     call so the next LLM turn can read the outcome.
     """
+    if not isinstance(content, str):
+        content = json.dumps(content, default=str)
     return {
         "role": "tool",
         "tool_call_id": tool_call_id,

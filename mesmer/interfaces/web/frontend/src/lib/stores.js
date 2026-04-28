@@ -67,6 +67,9 @@ export const selectedNode = writable(null)
  */
 export const selectedBeliefNode = writable(null)
 
+/** Incremented when the backend reports an artifact changed. */
+export const artifactVersion = writable(0)
+
 /** Bottom-panel display preference: 'autonomous' | 'co-op'.
  *  Frontend-only UI toggle. The backend executive ALWAYS has a chat
  *  surface available (the synthesized executive owns ask_human /
@@ -84,22 +87,12 @@ export const modulesDrawerOpen = writable(false)
  */
 export const pendingQuestion = writable(null)
 
-/** Current scratchpad.md content (the leader's persistent notes for the
- *  selected scenario's target). */
-export const scratchpadDoc = writable('')
-
-/** Whether scratchpad.md exists on disk for this target. */
-export const scratchpadExists = writable(false)
-
 /**
  * Persisted operator <> leader chat for the selected scenario. Loaded from
  * /api/chat on scenario switch; appended to as the user types and as
  * operator_reply WS events arrive. Array of {role, content, timestamp}.
  */
 export const chatHistory = writable([])
-
-/** Whether the scratchpad drawer is open. */
-export const scratchpadDrawerOpen = writable(false)
 
 /** Derived: is a run in progress? */
 export const isRunning = derived(runStatus, $s => $s === 'running')
@@ -292,10 +285,8 @@ export function handleMessage(msg) {
           { role: 'assistant', content: msg.detail || '', timestamp: msg.timestamp || Date.now() / 1000 },
         ])
       }
-      // Scratchpad mutated mid-run by the leader's update_scratchpad tool.
-      // The drawer auto-refreshes on its own via this signal.
-      if (msg.event === 'scratchpad_updated') {
-        scratchpadExists.set(true)
+      if (msg.event === 'artifact_updated') {
+        artifactVersion.update(v => v + 1)
       }
       break
 
@@ -328,21 +319,18 @@ export function resetForNewRun() {
   keyStatus.set(null)
 }
 
-/** Reset scratchpad + chat-history stores (e.g., on scenario change). */
-export function resetScratchpadState() {
+/** Reset chat-history stores (e.g., on scenario change). */
+export function resetChatState() {
   chatHistory.set([])
-  scratchpadDoc.set('')
-  scratchpadExists.set(false)
 }
 
-// Clear chat + scratchpad when the scenario changes so per-target context
-// doesn't bleed across scenarios. CoPilotChat refetches /api/chat and
-// /api/scratchpad after the reset.
+// Clear chat when the scenario changes so per-target context doesn't bleed
+// across scenarios. CoPilotChat refetches /api/chat after the reset.
 let _lastScenario = null
 selectedScenario.subscribe(path => {
   if (path !== _lastScenario) {
     _lastScenario = path
-    resetScratchpadState()
+    resetChatState()
   }
 })
 
@@ -356,5 +344,6 @@ currentRoute.subscribe(route => {
     selectedScenario.set(null)
     graphData.set(null)
     graphStats.set(null)
+    artifactVersion.set(0)
   }
 })

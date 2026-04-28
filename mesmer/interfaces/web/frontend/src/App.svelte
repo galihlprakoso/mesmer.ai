@@ -1,23 +1,23 @@
 <script>
   import { onMount, onDestroy } from 'svelte'
   import { connect, disconnect, onMessage } from './lib/ws.js'
-  import { handleMessage, modulesDrawerOpen, selectedNode, isRunning, mode, selectedTargetHash } from './lib/stores.js'
+  import { handleMessage, modulesDrawerOpen, selectedNode, isRunning, mode, selectedTargetHash, selectedScenario, artifactVersion } from './lib/stores.js'
   import { currentRoute } from './lib/router.js'
   import Sidebar from './components/Sidebar.svelte'
   import AttackGraph from './components/AttackGraph.svelte'
   import BeliefMap from './components/BeliefMap.svelte'
+  import ArtifactsPanel from './components/ArtifactsPanel.svelte'
   import NodeDetail from './components/NodeDetail.svelte'
   import ActivityPanel from './components/ActivityPanel.svelte'
   import CoPilotChat from './components/CoPilotChat.svelte'
   import ModuleBrowser from './components/ModuleBrowser.svelte'
-  import ScratchpadDrawer from './components/ScratchpadDrawer.svelte'
   import ScenarioList from './pages/ScenarioList.svelte'
   import ScenarioEditor from './pages/ScenarioEditor.svelte'
 
   let unsubscribe
   let sidebarOpen = false
-  // Graph view toggle: 'attack' shows the AttackGraph execution tree;
-  // 'belief' shows the typed Belief Attack Graph planner landscape.
+  // Graph view toggle: 'attack' shows execution; 'belief' shows planner
+  // state; 'artifacts' shows the durable knowledge produced so far.
   let graphView = 'attack'
   // Default the bottom (chat) panel open — under the executive layer
   // every run is conversational by default; the chat IS the primary
@@ -76,12 +76,28 @@
           >
             Belief Map
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={graphView === 'artifacts'}
+            class="view-tab"
+            class:active={graphView === 'artifacts'}
+            on:click={() => (graphView = 'artifacts')}
+          >
+            Artifacts
+          </button>
         </div>
 
         {#if graphView === 'attack'}
           <AttackGraph />
-        {:else}
+        {:else if graphView === 'belief'}
           <BeliefMap targetHash={$selectedTargetHash} />
+        {:else}
+          <ArtifactsPanel
+            targetHash={$selectedTargetHash}
+            scenarioPath={$selectedScenario}
+            version={$artifactVersion}
+          />
         {/if}
 
         <button
@@ -182,8 +198,6 @@
       <ModuleBrowser />
     </aside>
   {/if}
-
-  <ScratchpadDrawer />
 </div>
 
 {/if}
