@@ -7,6 +7,8 @@
   let hints = ''
   let fresh = false
   let loading = false
+  let testingTarget = false
+  let targetTest = null
 
   // Fetch scenarios on mount — used for the "scenario card meta" lookup
   // (target_adapter/module label below the title) and module count.
@@ -110,6 +112,30 @@
     }
   }
 
+  async function testTargetConnection() {
+    if (!$selectedScenario) return
+    testingTarget = true
+    targetTest = null
+    try {
+      const res = await fetch('/api/target/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scenario_path: $selectedScenario }),
+      })
+      const data = await res.json()
+      targetTest = {
+        ok: res.ok && data.ok,
+        latency_ms: data.latency_ms,
+        response_preview: data.response_preview || '',
+        error: data.error || '',
+      }
+    } catch (e) {
+      targetTest = { ok: false, error: e.message }
+    } finally {
+      testingTarget = false
+    }
+  }
+
   async function stopRun() {
     try {
       await fetch('/api/run/stop', { method: 'POST' })
@@ -196,6 +222,32 @@
       <button class="btn btn-primary" on:click={startRun} disabled={!$selectedScenario || loading}>
         {loading ? 'Starting...' : 'Run Attack'}
       </button>
+    {/if}
+
+    <button
+      class="btn btn-secondary"
+      type="button"
+      on:click={testTargetConnection}
+      disabled={!$selectedScenario || $isRunning || testingTarget}
+    >
+      {testingTarget ? 'Testing...' : 'Test Target'}
+    </button>
+
+    {#if targetTest}
+      <div class:ok={targetTest.ok} class:error={!targetTest.ok} class="target-test">
+        <div class="target-test-head">
+          <span class="status-dot" class:running={targetTest.ok} class:error={!targetTest.ok}></span>
+          <span>{targetTest.ok ? 'Connected' : 'Connection failed'}</span>
+          {#if targetTest.latency_ms != null}
+            <span class="latency">{targetTest.latency_ms}ms</span>
+          {/if}
+        </div>
+        {#if targetTest.response_preview}
+          <div class="target-test-body">{targetTest.response_preview}</div>
+        {:else if targetTest.error}
+          <div class="target-test-body">{targetTest.error}</div>
+        {/if}
+      </div>
     {/if}
   </section>
 
@@ -404,6 +456,23 @@
   .btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 
+  .btn-secondary {
+    margin-top: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text);
+    box-shadow: none;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    border-color: hsla(155 100% 42% / 0.5);
+    color: var(--phosphor);
+    box-shadow: var(--phosphor-glow-tight);
+  }
+  .btn-secondary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
   .btn-danger {
     background: var(--red);
     color: #fff;
@@ -458,6 +527,46 @@
     font-family: var(--font-mono);
     font-size: 0.65rem;
     color: var(--text-muted);
+  }
+
+  .target-test {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    font-size: 0.72rem;
+  }
+  .target-test.ok {
+    border-color: hsla(155 100% 42% / 0.35);
+  }
+  .target-test.error {
+    border-color: hsla(0 84% 60% / 0.45);
+  }
+  .target-test-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+    font-family: var(--font-pixel);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .latency {
+    margin-left: auto;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .target-test-body {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    line-height: 1.35;
+    max-height: 72px;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
 
   .status-bar {

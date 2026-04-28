@@ -70,6 +70,12 @@ class LeaderChatRequest(BaseModel):
     message: str
 
 
+class TargetTestRequest(BaseModel):
+    scenario_path: str
+    message: str | None = None
+    timeout_s: float = 20.0
+
+
 class CreateScenarioRequest(BaseModel):
     name: str
     yaml_content: str
@@ -492,6 +498,58 @@ def create_app(scenario_dir: str = ".") -> FastAPI:
     @app.get("/api/targets")
     async def get_targets():
         return _list_targets()
+
+    @app.post("/api/target/test")
+    async def test_target_connection(req: TargetTestRequest):
+        """Send one harmless probe through the configured target adapter."""
+        from mesmer.targets import create_target
+
+        try:
+            scenario = load_scenario(req.scenario_path)
+            target = create_target(scenario.target)
+        except Exception as e:
+            return JSONResponse(
+                {"ok": False, "error": f"Target config failed: {type(e).__name__}: {e}"},
+                status_code=400,
+            )
+
+        probe = (
+            req.message.strip()
+            if isinstance(req.message, str) and req.message.strip()
+            else "Connection check. Reply briefly with MESMER_TARGET_OK."
+        )
+        timeout_s = max(1.0, min(float(req.timeout_s or 20.0), 60.0))
+        started = time.monotonic()
+        try:
+            reply = await asyncio.wait_for(target.send(probe), timeout=timeout_s)
+            try:
+                await target.reset()
+            except Exception:
+                pass
+        except Exception as e:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "adapter": scenario.target.adapter,
+                    "model": scenario.target.model or "",
+                    "url": scenario.target.url or scenario.target.base_url or "",
+                    "latency_ms": round((time.monotonic() - started) * 1000),
+                    "error": f"{type(e).__name__}: {e}",
+                },
+                status_code=502,
+            )
+
+        preview = (reply or "").strip()
+        if len(preview) > 500:
+            preview = preview[:500].rstrip() + "..."
+        return {
+            "ok": True,
+            "adapter": scenario.target.adapter,
+            "model": scenario.target.model or "",
+            "url": scenario.target.url or scenario.target.base_url or "",
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "response_preview": preview,
+        }
 
     @app.get("/api/targets/{target_hash}/graph")
     async def get_target_graph(target_hash: str):
